@@ -6,7 +6,7 @@ from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
 from AllAgent.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(name="MCP")
 
 
 class McpServerManager:

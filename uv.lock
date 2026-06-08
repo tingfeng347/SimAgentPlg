@@ -21,12 +21,14 @@ source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "openai" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.2" },
     { name = "openai", specifier = ">=2.41.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
 ]
 
 [[package]]

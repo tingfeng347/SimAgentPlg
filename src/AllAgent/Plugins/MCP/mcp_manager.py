@@ -4,7 +4,7 @@ from pathlib import Path
 from fastmcp import Client
 from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
-from AllAgent.logger import get_logger
+from allagent.logger import get_logger
 
 logger = get_logger(name="MCP")
 
@@ -41,9 +41,7 @@ class McpServerManager:
                     mcp_client = Client({service_name: server_model.model_dump()})
                     await mcp_client.__aenter__()
                     tools = await mcp_client.list_tools()
-                    self.mcp_tools_map[service_name] = (
-                        tools
-                    )
+                    self.mcp_tools_map[service_name] = tools
                     self.mcp_clients_map[service_name] = mcp_client
                     logger.info(f"{service_name} 连接成功，加载 {len(tools)} 个工具")
                 except Exception as e:
@@ -107,11 +105,10 @@ class McpServerManager:
         return openai_tools
 
 
-
 async def main():
     mcp_sever_manager = McpServerManager(path=Path(__file__).parent / "mcp_config.json")
     await mcp_sever_manager.startup()
-    openai_tools = mcp_sever_manager.get_openai_tools()
+    mcp_sever_manager.get_openai_tools()
     await mcp_sever_manager.shutdown()
 
 

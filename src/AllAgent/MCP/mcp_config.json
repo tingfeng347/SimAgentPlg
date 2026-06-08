@@ -7,15 +7,12 @@
         "--browser=chrome"
       ]
     },
-    "trendradar": {
-      "command": "uv",
+    "tavily-remote": {
+      "command": "npx",
       "args": [
-        "--directory",
-        "/path/to/TrendRadar",
-        "run",
-        "python",
-        "-m",
-        "mcp_server.server"
+        "-y",
+        "mcp-remote",
+        "https://mcp.tavily.com/mcp/?tavilyApiKey=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"
       ]
     }
 }

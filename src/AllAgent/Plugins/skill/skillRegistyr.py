@@ -12,7 +12,6 @@ load_dotenv()
 logger = get_logger("skill")
 
 
-
 @dataclass(frozen=True)
 class Skill:
     name: str
@@ -150,7 +149,9 @@ class SkillRegistry:
             logger.warning("LLM 未返回 tool call，无法匹配技能")
             return {"skill_name": "", "task": "", "messages": []}
 
-        args = json.loads(msg.tool_calls[0].function.arguments)  # ty:ignore[unresolved-attribute]
+        args = json.loads(
+            msg.tool_calls[0].function.arguments # ty:ignore[unresolved-attribute]
+        )  
 
         skill_name: str = args.get("skill_name", "")
         task: str = args.get("task", "")
@@ -158,7 +159,11 @@ class SkillRegistry:
         try:
             skill = self._skills[skill_name]
         except KeyError:
-            logger.warning("LLM 返回了未知技能: %s，可用: %s", skill_name, list(self._skills.keys()))
+            logger.warning(
+                "LLM 返回了未知技能: %s，可用: %s",
+                skill_name,
+                list(self._skills.keys()),
+            )
             return {"skill_name": "", "task": task, "messages": []}
 
         logger.info("LLM 路由结果 — 技能: %s, 任务: %s", skill_name, task)
@@ -216,7 +221,6 @@ def main() -> None:
 
     registry = SkillRegistry(skills_root)
     asyncio.run(registry.discover())
-
 
     payload = asyncio.run(registry.dispatch("hi"))
     print("Selected skill:", payload["skill_name"])

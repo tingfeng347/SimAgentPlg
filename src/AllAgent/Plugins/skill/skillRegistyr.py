@@ -40,6 +40,7 @@ class SkillManager:
         """
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
+        self._discovered: bool = False
         logger.info("技能注册表初始化，根目录: %s", self.skills_root)
     
 
@@ -77,7 +78,10 @@ class SkillManager:
                 sample_md=sample_md if sample_md.exists() else None,
             )
 
-        logger.info("发现 %d 个技能: %s", len(self._skills), list(self._skills.keys()))
+        if not self._skills:
+            logger.debug("技能扫描完成，未发现任何技能（skills_root: %s）", self.skills_root)
+        else:
+            logger.info("发现 %d 个技能: %s", len(self._skills), list(self._skills.keys()))
         
 
     async def dispatch(
@@ -90,7 +94,12 @@ class SkillManager:
             messages: 当前对话历史消息列表。
 
         Returns:
-            包含 skill_name、task、messages 的 payload 字典。
+            if not self._discovered:
+                包含 skill_name、task、me
+                self._discovered = True
+            if not self._skills:
+                # 启动时已经扫过一次，仍为空：直接跳过 LLM 路由，避免无意义 IO + 同步阻塞
+                return Nonessages 的 payload 字典。
             若无匹配返回 None。
         """
         if not self._skills:

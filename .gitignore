@@ -5,3 +5,9 @@ __pycache__/
 my_skills
 
 .ruff_cache
+
+.playwright-mcp
+
+egg_bot.py
+
+.DS_Store

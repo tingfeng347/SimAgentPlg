@@ -15,7 +15,7 @@ class McpServerManager:
     支持按服务名前缀路由工具调用，单个服务连接失败不影响其他服务。
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path = Path("/Users/jyh030112/Desktop/Dev/All-Agent/src/allagent/plugins/mcp/mcp_config.json")):
         """初始化管理器。
 
         Args:
@@ -62,7 +62,7 @@ class McpServerManager:
         """调用 MCP 工具，按服务名前缀自动路由。
 
         Args:
-            tool_name: 工具名，格式为 "{服务名}.{工具名}"，如 "playwright.browser_navigate"。
+            tool_name: 工具名，格式为 "{服务名}__{工具名}"，如 "playwright__browser_navigate"。
             args: 传递给工具的参数字典。
 
         Returns:
@@ -73,7 +73,7 @@ class McpServerManager:
         """
         logger.info(f"调用工具: {tool_name}, 参数: {args}")
         for service_name, client in self.mcp_clients_map.items():
-            prefix = f"{service_name}."
+            prefix = f"{service_name}__"
             if tool_name.startswith(prefix):
                 raw_name = tool_name[len(prefix) :]
                 result = await client.call_tool(raw_name, args)
@@ -95,7 +95,7 @@ class McpServerManager:
                     {
                         "type": "function",
                         "function": {
-                            "name": f"{service_name}.{tool.name}",
+                            "name": f"{service_name}__{tool.name}",
                             "description": tool.description,
                             "parameters": tool.inputSchema,
                         },
@@ -106,10 +106,10 @@ class McpServerManager:
 
 
 async def main():
-    mcp_sever_manager = McpServerManager(path=Path(__file__).parent / "mcp_config.json")
-    await mcp_sever_manager.startup()
-    mcp_sever_manager.get_openai_tools()
-    await mcp_sever_manager.shutdown()
+    mcp_manager = McpServerManager()
+    await mcp_manager.startup()
+    mcp_manager.get_openai_tools()
+    await mcp_manager.shutdown()
 
 
 if __name__ == "__main__":

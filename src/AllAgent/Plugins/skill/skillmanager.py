@@ -33,11 +33,13 @@ class SkillManager:
     3. _build_messages() — 将技能定义、模板、示例拼装为 LLM 对话格式
     """
 
-    def __init__(self, skills_root: str | Path = Path("/Users/jyh030112/Desktop/Dev/All-Agent/src/allagent/plugins/skill/my_skills")):
+    def __init__(self, skills_root: str | Path | None = None):
         """
         Args:
             skills_root: 技能根目录路径，子目录中含 SKILL.md 的会被识别为技能。
         """
+        if skills_root is None:
+            skills_root = Path(__file__).parent / "my_skills"
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
         self._discovered: bool = False
@@ -189,11 +191,11 @@ class SkillManager:
             skill = self._skills[skill_name]
         except KeyError:
             logger.warning(
-                "LLM 返回了未知技能: %s，可用: %s",
+                "LLM 返回了未知技能: %s，可用: %s，跳过本次路由",
                 skill_name,
                 list(self._skills.keys()),
             )
-            return {"skill_name": "", "task": task, "messages": []}
+            return None
 
         logger.info(f"LLM 路由结果 — 技能: {skill_name}, 任务: {task}")
         return {

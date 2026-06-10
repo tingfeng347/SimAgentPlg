@@ -15,12 +15,14 @@ class McpServerManager:
     支持按服务名前缀路由工具调用，单个服务连接失败不影响其他服务。
     """
 
-    def __init__(self, path: Path = Path("/Users/jyh030112/Desktop/Dev/All-Agent/src/allagent/plugins/mcp/mcp_config.json")):
+    def __init__(self, path: Path | None = None):
         """初始化管理器。
 
         Args:
             path: MCP 配置 JSON 文件路径。
         """
+        if path is None:
+            path = Path(__file__).parent / "mcp_config.json"
         self.path = path
         self.mcp_clients_map: dict[str, Client] = {}
         self.mcp_tools_map: dict[str, list[Tool]] = {}

@@ -1,11 +1,10 @@
-from typing import Iterable, Optional, Any, cast
+from typing import Optional, Any, cast
 import os
 
 from openai import AsyncOpenAI
 from abc import ABC
 from dotenv import load_dotenv
-from openai.types.chat import ChatCompletionMessage, ChatCompletionToolUnionParam
-
+from openai.types.chat import ChatCompletionMessage
 
 load_dotenv()
 
@@ -35,21 +34,18 @@ class LLMConfig(ABC):
         self.timeout = timeout
 
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
-    
+
     async def chat_text(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        tools: Optional[list[dict[str, str]]]
+        self, messages: list[dict[str, str]], *, tools: Optional[list[dict[str, str]]]
     ) -> ChatCompletionMessage:
         """Call the configured chat model and return stripped text."""
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=cast(Any, messages),
                 temperature=self.temperature,
-                tools=tools  # ty:ignore[invalid-argument-type]
+                tools=tools,  # ty:ignore[invalid-argument-type]
             )
         except Exception as exc:
             raise KeyError(f"chat completion failed: {exc}") from exc
@@ -57,16 +53,13 @@ class LLMConfig(ABC):
         return message
 
     def finish_tool(self) -> list[dict]:
-        return[
+        return [
             {
                 "type": "function",
                 "function": {
                     "name": "finish_work",
                     "description": "判定当前工作已全部完成，结束任务",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {}
-                    }   
-                }
+                    "parameters": {"type": "object", "properties": {}},
+                },
             }
         ]

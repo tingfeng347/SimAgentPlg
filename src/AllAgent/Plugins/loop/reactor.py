@@ -23,11 +23,12 @@ REACT_LOOP_PROMPT = """
 
 MAX_STEP = 20
 
+
 class ReactLoop(LLMConfig):
-    
+
     def __init__(
         self,
-        ) -> None:
+    ) -> None:
         super().__init__()
         self.mcp_manager: McpServerManager = McpServerManager()
         self.skill_manager: SkillManager = SkillManager()
@@ -39,19 +40,15 @@ class ReactLoop(LLMConfig):
         mcp_tools = self.mcp_manager.get_openai_tools()
         self.all_tools = [*self.finish_tool(), *mcp_tools]
         await self.skill_manager.discover()
-        
-    async def runtime(self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT) -> str | None:
+
+    async def runtime(
+        self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT
+    ) -> str | None:
 
         # await self.startup()
 
-        self.messages.append({
-            "role": "system", 
-            "content": system_prompt
-        })
-        self.messages.append({
-            "role":"user",
-            "content":task
-        })
+        self.messages.append({"role": "system", "content": system_prompt})
+        self.messages.append({"role": "user", "content": task})
 
         last_skill_name: str | None = None
 
@@ -70,25 +67,26 @@ class ReactLoop(LLMConfig):
 
             if not message.tool_calls:
                 if message.content:
-                    return message.content   # 普通文字回复直接返回
+                    return message.content  # 普通文字回复直接返回
                 continue
 
-            fn_calls = [
-                tc for tc in message.tool_calls
-                if tc.type == "function"
-            ]
+            fn_calls = [tc for tc in message.tool_calls if tc.type == "function"]
 
             for tc in fn_calls:
                 if tc.function.name == "finish_work":
                     return message.content
                 else:
                     tool_args = json.loads(tc.function.arguments)
-                    result = await self.mcp_manager.call_tool(tc.function.name, tool_args)
-                    self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    })
+                    result = await self.mcp_manager.call_tool(
+                        tc.function.name, tool_args
+                    )
+                    self.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result,
+                        }
+                    )
 
 
 async def main():
@@ -100,13 +98,5 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())
-
-            
-
-
-
-
-
-        
-        

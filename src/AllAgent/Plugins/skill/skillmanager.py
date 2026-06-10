@@ -1,6 +1,5 @@
-from typing import Any, Optional
+from typing import Optional
 import json
-import asyncio
 import os
 import re
 import yaml
@@ -44,7 +43,6 @@ class SkillManager:
         self._skills: dict[str, Skill] = {}
         self._discovered: bool = False
         logger.info("技能注册表初始化，根目录: %s", self.skills_root)
-    
 
     async def discover(self) -> None:
         """扫描技能根目录，注册所有含 SKILL.md 的子目录为技能。
@@ -81,10 +79,13 @@ class SkillManager:
             )
 
         if not self._skills:
-            logger.debug("技能扫描完成，未发现任何技能（skills_root: %s）", self.skills_root)
+            logger.debug(
+                "技能扫描完成，未发现任何技能（skills_root: %s）", self.skills_root
+            )
         else:
-            logger.info("发现 %d 个技能: %s", len(self._skills), list(self._skills.keys()))
-        
+            logger.info(
+                "发现 %d 个技能: %s", len(self._skills), list(self._skills.keys())
+            )
 
     async def dispatch(
         self,
@@ -243,5 +244,3 @@ class SkillManager:
             {"role": "system", "content": "\n".join(system_parts)},
             {"role": "user", "content": task},
         ]
-
-

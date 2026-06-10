@@ -1,11 +1,12 @@
 import json
+from pathlib import Path
 
 from allagent.logger import get_logger
 
 from allagent.plugins import McpServerManager, SkillManager
-from allagent.plugins.loop.base import LLMConfig
+from allagent.agent.base import LLMConfig
 
-logger = get_logger("reactor")
+logger = get_logger("REACTAGENT")
 
 REACT_LOOP_PROMPT = """
 你是一个有能力调用外部工具的智能助手。你必须严格遵循以下 ReAct 流程：
@@ -30,22 +31,25 @@ class ReactLoop(LLMConfig):
         self,
     ) -> None:
         super().__init__()
-        self.mcp_manager: McpServerManager = McpServerManager()
-        self.skill_manager: SkillManager = SkillManager()
-        self.messages: list = []
-        self.all_tools = self.finish_tool()
+        self._startup: bool = False 
+        _agent_dir = Path(__file__).parent
+        self.mcp_manager: McpServerManager = McpServerManager(_agent_dir / "mcp_config.json")
+        self.skill_manager: SkillManager = SkillManager(_agent_dir / "react_skill")
+        
 
     async def startup(self) -> None:
         await self.mcp_manager.startup()
         mcp_tools = self.mcp_manager.get_openai_tools()
-        self.all_tools = [*self.finish_tool(), *mcp_tools]
+        self.all_tools = [*mcp_tools]
         await self.skill_manager.discover()
 
     async def runtime(
         self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT
     ) -> str | None:
 
-        # await self.startup()
+        if self._startup is False:
+            await self.startup()
+            self._startup = True
 
         self.messages.append({"role": "system", "content": system_prompt})
         self.messages.append({"role": "user", "content": task})
@@ -53,6 +57,7 @@ class ReactLoop(LLMConfig):
         last_skill_name: str | None = None
 
         for turn in range(MAX_STEP):
+            logger.info("第 %d/%d 轮", turn + 1, MAX_STEP)
 
             skill_dispatch = await self.skill_manager.dispatch(self.messages)
 
@@ -73,24 +78,21 @@ class ReactLoop(LLMConfig):
             fn_calls = [tc for tc in message.tool_calls if tc.type == "function"]
 
             for tc in fn_calls:
-                if tc.function.name == "finish_work":
-                    return message.content
-                else:
-                    tool_args = json.loads(tc.function.arguments)
-                    result = await self.mcp_manager.call_tool(
-                        tc.function.name, tool_args
-                    )
-                    self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        }
-                    )
+                tool_args = json.loads(tc.function.arguments)
+                result = await self.mcp_manager.call_tool(
+                    tc.function.name, tool_args
+                )
+                self.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
 
 
 async def main():
-    task = "你好介绍一下自己"
+    task = "今天关于agent的新概念是什么？"
     loop = ReactLoop()
     result = await loop.runtime(task=task)
     logger.info("ReAct 运行结果: %s", result)

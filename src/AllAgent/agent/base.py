@@ -2,11 +2,15 @@ from typing import Optional, Any, cast
 import os
 
 from openai import AsyncOpenAI
-from abc import ABC
+from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from openai.types.chat import ChatCompletionMessage
 
 load_dotenv()
+
+BASE_PROMPT = """
+你是一个帮助用户完成各种任务的聊天助手
+"""
 
 
 class LLMConfig(ABC):
@@ -32,8 +36,15 @@ class LLMConfig(ABC):
         self.apiKey = api_key
         self.baseUrl = base_url
         self.timeout = timeout
-
+        self.messages: list = []
+        self.all_tools = []
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+
+    @abstractmethod
+    async def runtime(
+        self, *, task: str, system_prompt: str = BASE_PROMPT
+    ) -> str | None:
+        pass
 
     async def chat_text(
         self, messages: list[dict[str, str]], *, tools: Optional[list[dict[str, str]]]
@@ -52,14 +63,3 @@ class LLMConfig(ABC):
         message: ChatCompletionMessage = response.choices[0].message
         return message
 
-    def finish_tool(self) -> list[dict]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "finish_work",
-                    "description": "判定当前工作已全部完成，结束任务",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]

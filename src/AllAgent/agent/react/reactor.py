@@ -29,12 +29,16 @@ class ReactLoop(LLMConfig):
         self,
     ) -> None:
         super().__init__()
-        self._startup: bool = False 
+        self._startup: bool = False
         _agent_dir = Path(__file__).parent
-        self.mcp_manager: McpServerManager = McpServerManager(_agent_dir / "mcp_config.json")
+        self.mcp_manager: McpServerManager = McpServerManager(
+            _agent_dir / "mcp_config.json"
+        )
         self.skill_manager: SkillManager = SkillManager(_agent_dir / "react_skill")
 
-    async def dispatch(self, tool_name: str, args: dict, index: int = 0, tool_num: int = 1) -> StepOutcome:
+    async def dispatch(
+        self, tool_name: str, args: dict, index: int = 0, tool_num: int = 1
+    ) -> StepOutcome:
         outcome = await super().dispatch(tool_name, args, index, tool_num)
         if outcome.next_prompt and outcome.next_prompt.startswith("未知工具"):
             result = await self.mcp_manager.call_tool(tool_name, args)
@@ -44,7 +48,7 @@ class ReactLoop(LLMConfig):
     async def startup(self) -> None:
         await self.mcp_manager.startup()
         mcp_tools = self.mcp_manager.get_openai_tools()
-        self.all_tools = [*mcp_tools]
+        self.all_tools.extend(mcp_tools)
         await self.skill_manager.discover()
 
     async def runtime(
@@ -102,7 +106,7 @@ class ReactLoop(LLMConfig):
 
 
 async def main():
-    task = "今天关于agent的新概念是什么？"
+    task = "写一个python脚本保存到本地，主要是打印helloworld并测试它,测试完成后删除"
     loop = ReactLoop()
     result = await loop.runtime(task=task)
     logger.info("ReAct 运行结果: %s", result)

@@ -6,13 +6,5 @@
         "--headless",
         "--browser=chrome"
       ]
-    },
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/Users/jyh030112/Desktop"
-      ]
     }
 }

@@ -1,6 +1,6 @@
 ---
-name: Weather Query Skill
-description: 通过多个免费天气网站查询实时天气和预报，无需 API Key。
+name: 查询天气的免费网站
+description: 通过多个免费天气网站查询实时天气和预报
 ---
 
 # 天气查询 Skill

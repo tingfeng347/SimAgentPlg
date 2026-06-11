@@ -20,7 +20,6 @@ class ChatLoop(LLMConfig):
     ) -> None:
         super().__init__()
 
-
     async def runtime(
         self, *, task: str, system_prompt: str = CHAT_PROMPT
     ) -> str | None:
@@ -31,10 +30,9 @@ class ChatLoop(LLMConfig):
         for turn in range(MAX_STEP):
             logger.info("第 %d/%d 轮", turn + 1, MAX_STEP)
 
-            message = await self.chat_text(self.messages, tools=self.all_tools)
+            message = await self.chat_text(self.messages, tools=None)
             self.messages.append(message.model_dump())
             return message.content
-                
 
 
 async def main():
@@ -46,4 +44,5 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())

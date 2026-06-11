@@ -98,8 +98,6 @@ class ReactLoop(LLMConfig):
 
                 if outcome.should_exit:
                     return outcome.data
-                if outcome.next_prompt is None:
-                    break
 
                 self.messages.append(
                     {
@@ -108,6 +106,9 @@ class ReactLoop(LLMConfig):
                         "content": str(outcome.data),
                     }
                 )
+
+                if outcome.next_prompt is None:
+                    break
 
 
 async def main():

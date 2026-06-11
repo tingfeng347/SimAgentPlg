@@ -1,5 +1,5 @@
 import asyncio
-from allagent.plugins import McpServerManager
+from simagentplg.plugins import McpServerManager
 
 
 async def main():

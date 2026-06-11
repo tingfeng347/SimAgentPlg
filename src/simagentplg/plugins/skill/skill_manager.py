@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 
 load_dotenv()
 logger = get_logger("skill")

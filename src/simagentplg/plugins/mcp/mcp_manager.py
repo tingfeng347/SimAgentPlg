@@ -4,7 +4,7 @@ from pathlib import Path
 from fastmcp import Client
 from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 
 logger = get_logger(name="MCP")
 

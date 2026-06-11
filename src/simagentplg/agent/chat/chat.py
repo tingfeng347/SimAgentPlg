@@ -1,8 +1,8 @@
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 
 from typing import Optional
 
-from allagent.agent.base import LLMConfig
+from simagentplg.agent.base import LLMConfig
 
 logger = get_logger("CHATAGENT")
 

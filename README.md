@@ -1,4 +1,4 @@
-# All Agent
+# SimAgentPlg
 
 A lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP integration.
 
@@ -16,13 +16,13 @@ A lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP
 ## Installation
 
 ```bash
-pip install all-agent
+pip install simagentplg
 ```
 
 Or with uv:
 
 ```bash
-uv pip install all-agent
+uv pip install simagentplg
 ```
 
 ## Quick Start
@@ -39,7 +39,7 @@ LLM_TIMEOUT=30
 ### Chat Agent
 
 ```python
-from allagent import ChatLoop
+from simagentplg import ChatLoop
 
 loop = ChatLoop()
 result = await loop.runtime(task="介绍一下你自己")
@@ -55,7 +55,7 @@ result = await loop.runtime(task="我们去哪", history=history)
 ### ReAct Agent
 
 ```python
-from allagent import ReactLoop
+from simagentplg import ReactLoop
 
 loop = ReactLoop()
 result = await loop.runtime(task="帮我写一个Python脚本打印当前时间")

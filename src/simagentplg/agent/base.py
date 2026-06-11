@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from openai.types.chat import ChatCompletionMessage
 
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 from .tool_schema import LOCAL_TOOLS
 
 load_dotenv()

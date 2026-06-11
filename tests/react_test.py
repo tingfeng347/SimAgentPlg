@@ -1,4 +1,4 @@
-from allagent.agent.react.reactor import ReactLoop
+from simagentplg.agent.react.reactor import ReactLoop
 
 
 async def main():

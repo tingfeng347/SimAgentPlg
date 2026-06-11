@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
 
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 
 from typing import Optional
 
-from allagent.plugins import McpServerManager, SkillManager
-from allagent.agent.base import LLMConfig, StepOutcome
+from simagentplg.plugins import McpServerManager, SkillManager
+from simagentplg.agent.base import LLMConfig, StepOutcome
 
 logger = get_logger("REACTAGENT")
 

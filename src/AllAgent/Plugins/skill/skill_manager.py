@@ -1,6 +1,8 @@
+from typing import Optional
 import json
-import asyncio
 import os
+import re
+import yaml
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +14,6 @@ load_dotenv()
 logger = get_logger("skill")
 
 
-
 @dataclass(frozen=True)
 class Skill:
     name: str
@@ -22,7 +23,7 @@ class Skill:
     sample_md: Path | None = None
 
 
-class SkillRegistry:
+class SkillManager:
     """技能注册表，扫描本地技能目录并通过 LLM 路由用户请求到匹配的技能。
 
     核心流程：
@@ -31,16 +32,19 @@ class SkillRegistry:
     3. _build_messages() — 将技能定义、模板、示例拼装为 LLM 对话格式
     """
 
-    def __init__(self, skills_root: str | Path):
+    def __init__(self, skills_root: str | Path | None = None):
         """
         Args:
             skills_root: 技能根目录路径，子目录中含 SKILL.md 的会被识别为技能。
         """
+        if skills_root is None:
+            skills_root = Path(__file__).parent / "my_skills"
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
+        self._discovered: bool = False
         logger.info("技能注册表初始化，根目录: %s", self.skills_root)
 
-    async def discover(self) -> dict[str, Skill]:
+    async def discover(self) -> None:
         """扫描技能根目录，注册所有含 SKILL.md 的子目录为技能。
 
         Returns:
@@ -74,24 +78,32 @@ class SkillRegistry:
                 sample_md=sample_md if sample_md.exists() else None,
             )
 
-        logger.info("发现 %d 个技能: %s", len(self._skills), list(self._skills.keys()))
-        return dict(self._skills)
+        if not self._skills:
+            logger.debug(
+                "技能扫描完成，未发现任何技能（skills_root: %s）", self.skills_root
+            )
+        else:
+            logger.info(
+                "发现 %d 个技能: %s", len(self._skills), list(self._skills.keys())
+            )
 
     async def dispatch(
         self,
-        user_text: str,
-    ) -> dict:
-        """用 LLM 从自然语言中自动匹配技能并构建对话消息。
+        messages: list[dict],
+    ) -> Optional[dict]:
+        """用 LLM 根据对话历史自动匹配技能并构建对话消息。
 
         Args:
-            user_text: 用户自然语言输入，如 "帮我写一份周报"。
-            model: 用于路由的 OpenAI 模型名。
+            messages: 当前对话历史消息列表。
 
         Returns:
-            包含 skill_name、task、messages 的 payload 字典。
-
-        Raises:
-            ValueError: LLM 返回的技能名未注册。
+            if not self._discovered:
+                包含 skill_name、task、me
+                self._discovered = True
+            if not self._skills:
+                # 启动时已经扫过一次，仍为空：直接跳过 LLM 路由，避免无意义 IO + 同步阻塞
+                return Nonessages 的 payload 字典。
+            若无匹配返回 None。
         """
         if not self._skills:
             await self.discover()
@@ -100,12 +112,32 @@ class SkillRegistry:
             api_key=os.environ["MODEL_API_KEY"],
             base_url=os.environ["MODEL_URL"],
         )
-        logger.info("正在调用 LLM 路由技能，输入: %s", user_text[:80])
 
-        skill_list = "\n".join(
-            f"- {name}: {skill.skill_md.read_text(encoding='utf-8')[:200]}"
+        def _read_skill_frontmatter(skill: Skill) -> dict[str, str]:
+            """解析 SKILL.md 的 YAML 头部。"""
+            text = skill.skill_md.read_text(encoding="utf-8")
+            match = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
+            if match:
+                return yaml.safe_load(match.group(1))
+            return {}
+
+        skill_list: str = "\n".join(
+            f"- {name}: {_read_skill_frontmatter(skill)}"
             for name, skill in self._skills.items()
         )
+
+        # 提取原始任务和最新进展，构建紧凑上下文
+        task = ""
+        latest = ""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and not latest:
+                latest = m.get("content", "")
+            if m.get("role") == "user" and not task:
+                task = m.get("content", "")
+
+        context = f"原始任务: {task}"
+        if latest:
+            context += f"\n当前进展: {latest[:300]}"
 
         response = client.chat.completions.create(
             model=os.environ.get("SKILL_MODEL", "gpt-4o-mini"),
@@ -113,11 +145,11 @@ class SkillRegistry:
                 {
                     "role": "system",
                     "content": (
-                        "你是一个技能路由器。根据用户输入，选择最匹配的技能并提取任务描述。\n"
+                        "你是一个技能路由器。根据用户输入和当前进展，选择最匹配的技能并提取任务描述。\n"
                         "可用技能列表：\n" + skill_list
                     ),
                 },
-                {"role": "user", "content": user_text},
+                {"role": "user", "content": context},
             ],
             tools=[
                 {
@@ -147,10 +179,11 @@ class SkillRegistry:
 
         msg = response.choices[0].message
         if not msg.tool_calls:
-            logger.warning("LLM 未返回 tool call，无法匹配技能")
-            return {"skill_name": "", "task": "", "messages": []}
+            return None
 
-        args = json.loads(msg.tool_calls[0].function.arguments)  # ty:ignore[unresolved-attribute]
+        args = json.loads(
+            msg.tool_calls[0].function.arguments  # ty:ignore[unresolved-attribute]
+        )
 
         skill_name: str = args.get("skill_name", "")
         task: str = args.get("task", "")
@@ -158,10 +191,14 @@ class SkillRegistry:
         try:
             skill = self._skills[skill_name]
         except KeyError:
-            logger.warning("LLM 返回了未知技能: %s，可用: %s", skill_name, list(self._skills.keys()))
-            return {"skill_name": "", "task": task, "messages": []}
+            logger.warning(
+                "LLM 返回了未知技能: %s，可用: %s，跳过本次路由",
+                skill_name,
+                list(self._skills.keys()),
+            )
+            return None
 
-        logger.info("LLM 路由结果 — 技能: %s, 任务: %s", skill_name, task)
+        logger.info(f"LLM 路由结果 — 技能: {skill_name}, 任务: {task}")
         return {
             "skill_name": skill.name,
             "task": task,
@@ -207,24 +244,3 @@ class SkillRegistry:
             {"role": "system", "content": "\n".join(system_parts)},
             {"role": "user", "content": task},
         ]
-
-
-def main() -> None:
-    """SkillRegistry 功能验证入口：发现技能并通过 LLM 路由一条示例输入。"""
-    here = Path(__file__).resolve().parent
-    skills_root = here / "my_skills"
-
-    registry = SkillRegistry(skills_root)
-    asyncio.run(registry.discover())
-
-
-    payload = asyncio.run(registry.dispatch("hi"))
-    print("Selected skill:", payload["skill_name"])
-    print("Task:", payload["task"])
-    print("Messages:")
-    for message in payload["messages"]:
-        print(f"- {message['role']}: {message['content']}...")
-
-
-if __name__ == "__main__":
-    main()

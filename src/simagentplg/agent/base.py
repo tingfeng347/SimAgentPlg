@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from openai.types.chat import ChatCompletionMessage
 
-from allagent.logger import get_logger
+from simagentplg.logger import get_logger
 from .tool_schema import LOCAL_TOOLS
 
 load_dotenv()
@@ -173,7 +173,8 @@ class LLMConfig(BaseHandler, ABC):
 
     @abstractmethod
     async def runtime(
-        self, *, task: str, system_prompt: str = BASE_PROMPT
+        self, *, task: str, system_prompt: str = BASE_PROMPT,
+        history: Optional[list[dict]] = None,
     ) -> str | None:
         pass
 

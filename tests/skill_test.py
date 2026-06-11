@@ -1,12 +1,12 @@
 import asyncio
 from pathlib import Path
 
-from allagent.plugins import SkillManager
+from simagentplg.plugins import SkillManager
 
 
 async def main() -> None:
     """SkillManager 功能验证入口：发现技能并通过 LLM 路由一条示例输入。"""
-    here = Path("/Users/jyh030112/Desktop/Dev/All-Agent/src/allagent/plugins/skill")
+    here = Path("/Users/jyh030112/Desktop/Dev/All-Agent/src/simagentplg/plugins/skill")
     skills_root = here / "my_skills"
 
     registry = SkillManager(skills_root)

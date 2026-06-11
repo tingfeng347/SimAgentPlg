@@ -2,7 +2,7 @@ import logging
 
 
 def setup_logger(
-    name: str = "All-Agent",
+    name: str = "SimAgentPlg",
     level: str = "INFO",
     log_file: str = "./logs/app.log",
     fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -34,11 +34,11 @@ def setup_logger(
     return logger
 
 
-def get_logger(name: str = "All-Agent") -> logging.Logger:
+def get_logger(name: str = "SimAgentPlg") -> logging.Logger:
     """获取或创建指定名称的日志记录器。
 
     Args:
-        name: 日志记录器名称，默认为 "All-Agent"。
+        name: 日志记录器名称，默认为 "SimAgentPlg"。
 
     Returns:
         配置完成的 logging.Logger 实例。

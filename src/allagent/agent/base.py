@@ -173,7 +173,8 @@ class LLMConfig(BaseHandler, ABC):
 
     @abstractmethod
     async def runtime(
-        self, *, task: str, system_prompt: str = BASE_PROMPT
+        self, *, task: str, system_prompt: str = BASE_PROMPT,
+        history: Optional[list[dict]] = None,
     ) -> str | None:
         pass
 

@@ -3,6 +3,8 @@ from pathlib import Path
 
 from allagent.logger import get_logger
 
+from typing import Optional
+
 from allagent.plugins import McpServerManager, SkillManager
 from allagent.agent.base import LLMConfig, StepOutcome
 
@@ -52,14 +54,17 @@ class ReactLoop(LLMConfig):
         await self.skill_manager.discover()
 
     async def runtime(
-        self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT
+        self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT,
+        history: Optional[list[dict]] = None,
     ) -> str | None:
 
         if self._startup is False:
             await self.startup()
             self._startup = True
 
-        self.messages.append({"role": "system", "content": system_prompt})
+        self.messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            self.messages.extend(history)
         self.messages.append({"role": "user", "content": task})
 
         last_skill_name: str | None = None

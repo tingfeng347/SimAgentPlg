@@ -1,5 +1,7 @@
 from allagent.logger import get_logger
 
+from typing import Optional
+
 from allagent.agent.base import LLMConfig
 
 logger = get_logger("CHATAGENT")
@@ -21,10 +23,16 @@ class ChatLoop(LLMConfig):
         super().__init__()
 
     async def runtime(
-        self, *, task: str, system_prompt: str = CHAT_PROMPT
+        self,
+        *,
+        task: str,
+        system_prompt: str = CHAT_PROMPT,
+        history: Optional[list[dict]] = None,
     ) -> str | None:
 
-        self.messages.append({"role": "system", "content": system_prompt})
+        self.messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            self.messages.extend(history)
         self.messages.append({"role": "user", "content": task})
 
         for turn in range(MAX_STEP):

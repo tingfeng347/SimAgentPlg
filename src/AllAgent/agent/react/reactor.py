@@ -4,7 +4,7 @@ from pathlib import Path
 from allagent.logger import get_logger
 
 from allagent.plugins import McpServerManager, SkillManager
-from allagent.agent.base import LLMConfig
+from allagent.agent.base import LLMConfig, StepOutcome
 
 logger = get_logger("REACTAGENT")
 
@@ -14,8 +14,6 @@ REACT_LOOP_PROMPT = """
 1. Thought: 分析当前问题，规划下一步行动。
 2. Action: 调用一个工具来执行行动。
    - 如果需要操作浏览器/文件系统/技能，调用对应的 MCP 工具或技能工具。
-   - 当任务全部完成时，必须调用 finish_work 工具来结束任务。
-
 重要规则：
 - 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
 - 工具执行结果会返回给你，请根据结果继续思考下一步。
@@ -35,7 +33,13 @@ class ReactLoop(LLMConfig):
         _agent_dir = Path(__file__).parent
         self.mcp_manager: McpServerManager = McpServerManager(_agent_dir / "mcp_config.json")
         self.skill_manager: SkillManager = SkillManager(_agent_dir / "react_skill")
-        
+
+    async def dispatch(self, tool_name: str, args: dict, index: int = 0, tool_num: int = 1) -> StepOutcome:
+        outcome = await super().dispatch(tool_name, args, index, tool_num)
+        if outcome.next_prompt and outcome.next_prompt.startswith("未知工具"):
+            result = await self.mcp_manager.call_tool(tool_name, args)
+            return StepOutcome(data=result)
+        return outcome
 
     async def startup(self) -> None:
         await self.mcp_manager.startup()
@@ -77,16 +81,22 @@ class ReactLoop(LLMConfig):
 
             fn_calls = [tc for tc in message.tool_calls if tc.type == "function"]
 
-            for tc in fn_calls:
+            for ii, tc in enumerate(fn_calls):
                 tool_args = json.loads(tc.function.arguments)
-                result = await self.mcp_manager.call_tool(
-                    tc.function.name, tool_args
+                outcome = await self.dispatch(
+                    tc.function.name, tool_args, index=ii, tool_num=len(fn_calls)
                 )
+
+                if outcome.should_exit:
+                    return outcome.data
+                if outcome.next_prompt is None:
+                    break
+
                 self.messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": result,
+                        "content": str(outcome.data),
                     }
                 )
 

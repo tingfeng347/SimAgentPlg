@@ -1,9 +1,9 @@
-from simagentplg.agent.react.reactor import ReactLoop
+from simagentplg import BaseAgent
 
 
 async def main():
     task = "现在杭州天气如何？"
-    loop = ReactLoop()
+    loop = BaseAgent()
     result = await loop.runtime(task=task)
     print(f"\n===== 最终结果 =====\n{result}")
 

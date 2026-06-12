@@ -8,7 +8,7 @@ from typing import Optional
 from simagentplg.plugins import McpServerManager, SkillManager
 from simagentplg.agent.base import LLMConfig, StepOutcome
 
-logger = get_logger("REACTAGENT")
+logger = get_logger("BASEAGENT")
 
 REACT_LOOP_PROMPT = """
 你是一个有能力调用外部工具的智能助手。你必须严格遵循以下 ReAct 流程：
@@ -25,18 +25,26 @@ REACT_LOOP_PROMPT = """
 MAX_STEP = 20
 
 
-class ReactLoop(LLMConfig):
+class BaseAgent(LLMConfig):
 
     def __init__(
         self,
+        system_prompt: str = REACT_LOOP_PROMPT,
+        enable_tools: bool = True,
+        mcp_config_path: str | Path | None = None,
+        skills_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
+        self.system_prompt = system_prompt
+        self.enable_tools = enable_tools
         self._startup: bool = False
         _agent_dir = Path(__file__).parent
-        self.mcp_manager: McpServerManager = McpServerManager(
-            _agent_dir / "mcp_config.json"
+        _mcp = (
+            Path(mcp_config_path) if mcp_config_path else _agent_dir / "mcp_config.json"
         )
-        self.skill_manager: SkillManager = SkillManager(_agent_dir / "react_skill")
+        _skills = Path(skills_dir) if skills_dir else _agent_dir / "skills"
+        self.mcp_manager: McpServerManager = McpServerManager(_mcp)
+        self.skill_manager: SkillManager = SkillManager(_skills)
 
     async def dispatch(
         self, tool_name: str, args: dict, index: int = 0, tool_num: int = 1
@@ -54,15 +62,17 @@ class ReactLoop(LLMConfig):
         await self.skill_manager.discover()
 
     async def runtime(
-        self, *, task: str, system_prompt: str = REACT_LOOP_PROMPT,
+        self,
+        *,
+        task: str,
         history: Optional[list[dict]] = None,
     ) -> str | None:
 
-        if self._startup is False:
+        if self.enable_tools and self._startup is False:
             await self.startup()
             self._startup = True
 
-        self.messages = [{"role": "system", "content": system_prompt}]
+        self.messages = [{"role": "system", "content": self.system_prompt}]
         if history:
             self.messages.extend(history)
         self.messages.append({"role": "user", "content": task})
@@ -72,15 +82,17 @@ class ReactLoop(LLMConfig):
         for turn in range(MAX_STEP):
             logger.info("第 %d/%d 轮", turn + 1, MAX_STEP)
 
-            skill_dispatch = await self.skill_manager.dispatch(self.messages)
+            if self.enable_tools:
+                skill_dispatch = await self.skill_manager.dispatch(self.messages)
 
-            if skill_dispatch:
-                skill_name = skill_dispatch.get("skill_name", "")
-                if skill_name and skill_name != last_skill_name:
-                    last_skill_name = skill_name
-                    self.messages.extend(skill_dispatch["messages"])
+                if skill_dispatch:
+                    skill_name = skill_dispatch.get("skill_name", "")
+                    if skill_name and skill_name != last_skill_name:
+                        last_skill_name = skill_name
+                        self.messages.extend(skill_dispatch["messages"])
 
-            message = await self.chat_text(self.messages, tools=self.all_tools)
+            tools = self.all_tools if self.enable_tools else None
+            message = await self.chat_text(self.messages, tools=tools)
             self.messages.append(message.model_dump())
 
             if not message.tool_calls:
@@ -113,7 +125,7 @@ class ReactLoop(LLMConfig):
 
 async def main():
     task = "帮我写一个Python脚本打印当前时间"
-    loop = ReactLoop()
+    loop = BaseAgent()
     result = await loop.runtime(task=task)
     logger.info("ReAct 运行结果: %s", result)
 

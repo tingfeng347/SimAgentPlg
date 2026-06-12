@@ -15,10 +15,6 @@ load_dotenv()
 
 logger = get_logger("LLMCONFIG")
 
-BASE_PROMPT = """
-你是一个帮助用户完成各种任务的聊天助手
-"""
-
 
 @dataclass
 class StepOutcome:
@@ -173,7 +169,9 @@ class LLMConfig(BaseHandler, ABC):
 
     @abstractmethod
     async def runtime(
-        self, *, task: str, system_prompt: str = BASE_PROMPT,
+        self,
+        *,
+        task: str,
         history: Optional[list[dict]] = None,
     ) -> str | None:
         pass

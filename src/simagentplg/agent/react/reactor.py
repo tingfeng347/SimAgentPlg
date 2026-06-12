@@ -98,8 +98,6 @@ class ReactLoop(LLMConfig):
 
                 if outcome.should_exit:
                     return outcome.data
-                if outcome.next_prompt is None:
-                    break
 
                 self.messages.append(
                     {
@@ -109,9 +107,12 @@ class ReactLoop(LLMConfig):
                     }
                 )
 
+                if outcome.next_prompt is None:
+                    break
+
 
 async def main():
-    task = "写一个python脚本保存到本地，主要是打印helloworld并测试它,测试完成后删除"
+    task = "帮我写一个Python脚本打印当前时间"
     loop = ReactLoop()
     result = await loop.runtime(task=task)
     logger.info("ReAct 运行结果: %s", result)

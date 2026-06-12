@@ -97,12 +97,7 @@ class SkillManager:
             messages: 当前对话历史消息列表。
 
         Returns:
-            if not self._discovered:
-                包含 skill_name、task、me
-                self._discovered = True
-            if not self._skills:
-                # 启动时已经扫过一次，仍为空：直接跳过 LLM 路由，避免无意义 IO + 同步阻塞
-                return Nonessages 的 payload 字典。
+            包含 skill_name、task、messages 的 payload 字典。
             若无匹配返回 None。
         """
         if not self._skills:

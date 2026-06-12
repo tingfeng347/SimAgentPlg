@@ -1,6 +1,6 @@
 [project]
 name = "SimAgentPlg"
-version = "0.1.0"
+version = "0.1.2"
 description = "A lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP integration"
 readme = "README.md"
 license = {file = "LICENSE"}

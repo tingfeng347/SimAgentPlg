@@ -69,12 +69,62 @@ result = await agent.runtime(task="如何在 Python 中读写 JSON 文件？")
 
 ### Custom MCP Config & Skills
 
+如果不需要使用内置的 MCP 工具和技能，可以指向你自己的配置。
+
+**文件结构示例：**
+
+```
+my_project/
+  mcp_config.json      ← 你的 MCP 服务器配置
+  skills/               ← 你的技能目录（可选）
+    code_review/
+      SKILL.md
+    deploy/
+      SKILL.md
+```
+
+**使用方式：**
+
 ```python
 agent = BaseAgent(
-    mcp_config_path="/my_project/mcp_config.json",
-    skills_dir="/my_project/skills",
+    mcp_config_path="my_project/mcp_config.json",
+    skills_dir="my_project/skills",
 )
-result = await agent.runtime(task="你的任务")
+result = await agent.runtime(task="帮我审查代码")
+```
+
+**mcp_config.json 格式：**
+
+```json
+{
+  "playwright": {
+    "command": "npx",
+    "args": [
+      "@playwright/mcp@latest",
+      "--headless",
+      "--browser=chrome"
+    ]
+  }
+}
+```
+
+**SKILL.md 格式（markdown + YAML front-matter）：**
+
+```markdown
+---
+name: code_review
+description: 审查代码并提供改进建议
+---
+
+# 代码审查
+
+你是代码审查专家，注意以下几点：
+- 安全漏洞（SQL 注入、XSS 等）
+- 性能问题
+- 代码风格和可读性
+- 潜在 bug
+
+审查后输出结构化报告。
 ```
 
 | Parameter | Default | Description |
@@ -166,11 +216,13 @@ Place an `mcp_config.json` alongside your `BaseAgent`, or pass `mcp_config_path`
 
 ```json
 {
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-playwright"]
-    }
+  "playwright": {
+    "command": "npx",
+    "args": [
+      "@playwright/mcp@latest",
+      "--headless",
+      "--browser=chrome"
+    ]
   }
 }
 ```

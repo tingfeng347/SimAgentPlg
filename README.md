@@ -42,7 +42,7 @@ LLM_TIMEOUT=30
 ```python
 from simagentplg import BaseAgent
 
-agent = BaseAgent()
+agent = BaseAgent(enable_tools=True)
 result = await agent.runtime(task="帮我写一个Python脚本打印当前时间")
 ```
 
@@ -261,16 +261,6 @@ class StepOutcome:
     data: Any                # tool return value
     next_prompt: str | None  # None = task complete
     should_exit: bool        # True = force exit
-```
-
-## Running Tests
-
-```bash
-# Init-only tests (no API key needed)
-pytest tests/test_react_loop.py -m "not integration"
-
-# Full integration tests (.env required)
-python tests/test_react_loop.py
 ```
 
 ## Requirements

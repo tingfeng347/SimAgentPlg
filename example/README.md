@@ -16,6 +16,7 @@ uv run python example/01_stateful_chat.py
 - `02_custom_tool.py`: a custom atomic tool with `MethodToolHandler`
 - `03_multi_agent.py`: concurrent tasks coordinated by `AgentManager`
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
+- `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server

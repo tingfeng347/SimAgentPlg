@@ -89,10 +89,11 @@ uv run python example/01_stateful_chat.py
 uv run python example/02_custom_tool.py
 uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
+uv run python example/05_role_workflow.py
 ```
 
 They cover stateful chat, custom atomic tools, multi-agent coordination, and
-MCP integration.
+MCP integration, plus role-based serial workflows.
 
 ## Tool Handlers
 
@@ -239,6 +240,51 @@ Calls to the same agent are serialized because they mutate one message history.
 Calls to different agents run concurrently. `run_many()` returns exceptions as
 values for failed entries so one failure does not cancel the remaining agents.
 
+## Agent Workflow
+
+`AgentWorkflow` connects specialized agents as a linear pipeline. Every step
+resets its agent before running, so roles exchange information only through
+explicit prompt templates.
+
+```python
+from simagentplg import AgentWorkflow, WorkflowStep
+
+workflow = AgentWorkflow(
+    manager,
+    [
+        WorkflowStep(
+            name="plan",
+            agent_id="planner",
+            prompt="请规划以下任务：\n{input}",
+        ),
+        WorkflowStep(
+            name="execute",
+            agent_id="executor",
+            prompt=(
+                "原始目标：\n{original_task}\n\n"
+                "请执行以下方案：\n{input}"
+            ),
+        ),
+        WorkflowStep(
+            name="review",
+            agent_id="reviewer",
+            prompt="请审查执行结果：\n{execute}",
+        ),
+    ],
+)
+
+result = await workflow.run("实现用户登录功能")
+print(result.final_output)
+```
+
+Templates support `{input}` for the previous output, `{original_task}` for the
+initial task, and a completed step name such as `{plan}` or `{execute}`.
+Unknown and forward references fail when the workflow is created.
+
+`WorkflowResult` contains the original task, every rendered step task and
+output, and the final output. A failed step raises `WorkflowExecutionError`
+with the failed step, original cause, and all completed step results.
+
 ## Public API
 
 ```python
@@ -256,6 +302,9 @@ await agent.runtime(*, task: str) -> str | None
 agent.reset(history=None)
 await agent.startup()
 await agent.shutdown()
+
+await manager.run_isolated(agent_id, task)
+await workflow.run(task) -> WorkflowResult
 ```
 
 ## Migrating from 0.1.3

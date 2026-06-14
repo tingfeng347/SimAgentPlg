@@ -58,12 +58,28 @@ class AgentManager:
         return entry.agent
 
     async def run(self, agent_id: str, task: str) -> str | None:
+        return await self._run(agent_id, task, reset=False)
+
+    async def run_isolated(self, agent_id: str, task: str) -> str | None:
+        """Reset and run one agent while holding its per-agent lock."""
+
+        return await self._run(agent_id, task, reset=True)
+
+    async def _run(
+        self,
+        agent_id: str,
+        task: str,
+        *,
+        reset: bool,
+    ) -> str | None:
         entry = self._get_entry(agent_id)
         async with entry.lock:
             if not entry.active:
                 raise AgentNotFoundError(
                     f"agent {agent_id!r} is no longer registered"
                 )
+            if reset:
+                entry.agent.reset()
             return await entry.agent.runtime(task=task)
 
     async def run_many(

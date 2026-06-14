@@ -7,6 +7,13 @@ from simagentplg.agent.manager import (
     AgentManagerError,
     AgentNotFoundError,
 )
+from simagentplg.agent.workflow import (
+    AgentWorkflow,
+    WorkflowExecutionError,
+    WorkflowResult,
+    WorkflowStep,
+    WorkflowStepResult,
+)
 from simagentplg.handlers import (
     BaseHandler,
     BashHandler,
@@ -27,6 +34,11 @@ __all__ = [
     "AgentManagerError",
     "AgentAlreadyExistsError",
     "AgentNotFoundError",
+    "AgentWorkflow",
+    "WorkflowStep",
+    "WorkflowStepResult",
+    "WorkflowResult",
+    "WorkflowExecutionError",
     "BaseHandler",
     "MethodToolHandler",
     "BashHandler",

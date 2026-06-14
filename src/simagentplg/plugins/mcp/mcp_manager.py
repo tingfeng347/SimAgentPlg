@@ -5,6 +5,7 @@ from fastmcp import Client
 from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
 from simagentplg.logger import get_logger
+from simagentplg.resources import DEFAULT_MCP_CONFIG
 
 logger = get_logger(name="MCP")
 
@@ -22,7 +23,7 @@ class McpServerManager:
             path: MCP 配置 JSON 文件路径。
         """
         if path is None:
-            path = Path(__file__).parent / "mcp_config.json"
+            path = DEFAULT_MCP_CONFIG
         self.path = path
         self.mcp_clients_map: dict[str, Client] = {}
         self.mcp_tools_map: dict[str, list[Tool]] = {}
@@ -60,7 +61,7 @@ class McpServerManager:
             logger.info(f"{service_name} 已断开")
         logger.info("MCP 服务管理器已关闭")
 
-    async def call_tool(self, tool_name: str, args: dict[str, str]) -> str:
+    async def call_tool(self, tool_name: str, args: dict[str, object]) -> str:
         """调用 MCP 工具，按服务名前缀自动路由。
 
         Args:

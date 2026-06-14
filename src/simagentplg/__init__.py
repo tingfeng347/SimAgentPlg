@@ -1,15 +1,40 @@
-"""All Agent — a lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP integration."""
+"""Composable stateful agents with tool handlers and MCP integration."""
 
-from simagentplg.agent.runner.baseagent import BaseAgent
-from simagentplg.agent.base import LLMConfig, StepOutcome, BaseHandler
+from simagentplg.agent.base import BaseAgent, ModelConfig, StepOutcome
+from simagentplg.agent.manager import (
+    AgentAlreadyExistsError,
+    AgentManager,
+    AgentManagerError,
+    AgentNotFoundError,
+)
+from simagentplg.handlers import (
+    BaseHandler,
+    BashHandler,
+    McpToolHandler,
+    MethodToolHandler,
+    ToolDefinitionError,
+    UnknownToolError,
+)
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
 from simagentplg.plugins.skill.skill_manager import SkillManager
+from simagentplg.resources import DEFAULT_MCP_CONFIG, DEFAULT_SKILLS_DIR
 
 __all__ = [
     "BaseAgent",
-    "LLMConfig",
+    "ModelConfig",
     "StepOutcome",
+    "AgentManager",
+    "AgentManagerError",
+    "AgentAlreadyExistsError",
+    "AgentNotFoundError",
     "BaseHandler",
+    "MethodToolHandler",
+    "BashHandler",
+    "McpToolHandler",
+    "ToolDefinitionError",
+    "UnknownToolError",
     "McpServerManager",
     "SkillManager",
+    "DEFAULT_MCP_CONFIG",
+    "DEFAULT_SKILLS_DIR",
 ]

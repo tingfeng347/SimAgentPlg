@@ -1,6 +1,6 @@
-"""Agent 调度 — ReAct 循环。"""
+"""Agent runtime and multi-agent coordination."""
 
-from simagentplg.agent.runner.baseagent import BaseAgent
-from simagentplg.agent.base import LLMConfig
+from simagentplg.agent.base import BaseAgent, ModelConfig, StepOutcome
+from simagentplg.agent.manager import AgentManager
 
-__all__ = ["BaseAgent", "LLMConfig"]
+__all__ = ["BaseAgent", "ModelConfig", "StepOutcome", "AgentManager"]

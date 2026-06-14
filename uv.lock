@@ -1182,12 +1182,13 @@ wheels = [
 
 [[package]]
 name = "simagentplg"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "openai" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1195,6 +1196,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.2" },
     { name = "openai", specifier = ">=2.41.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [[package]]

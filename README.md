@@ -1,17 +1,17 @@
 # SimAgentPlg
 
-A lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP integration.
+A lightweight framework for stateful OpenAI-compatible agents, composable tool
+handlers, MCP integration, and multi-agent coordination.
 
 ## Features
 
-- **BaseAgent** — unified ReAct agent that doubles as a chat bot via `enable_tools=False`
-- **Tool Dispatch** — convention-over-configuration: define `do_{tool_name}` methods, auto-routed via reflection
-- **MCP Integration** — pluggable MCP server manager for external tool providers
-- **Skill System** — skill-based prompt injection for domain-specific behaviors
-- **Built-in Bash Executor** — async sandboxed bash execution with timeout, output truncation, and blacklist filtering
-- **Customizable Prompt & Tools** — override system prompt or point to your own MCP config / skills directory
-- **Stateless Execution** — each `runtime()` call starts with a clean context; history is caller-managed
-- **OpenAI-compatible** — works with any OpenAI-compatible API (DeepSeek, etc.)
+- **Stateful `BaseAgent`** with explicit `reset()` support
+- **Reusable tool handlers** instead of tool logic embedded in the agent
+- **Atomic local tools** through `MethodToolHandler`
+- **MCP tools** through an explicit `McpToolHandler`
+- **`AgentManager`** with per-agent serialization and cross-agent concurrency
+- **Optional skills** loaded from a local skills directory
+- **OpenAI-compatible models** configured with `ModelConfig`
 
 ## Installation
 
@@ -19,256 +19,261 @@ A lightweight multi-agent framework with ReAct reasoning, tool dispatch, and MCP
 pip install simagentplg
 ```
 
-Or with uv:
+Python 3.12 or newer is required.
 
-```bash
-uv pip install simagentplg
+## Configuration
+
+Create a `.env` file:
+
+```env
+CHAT_MODEL=deepseek-v4-flash
+MODEL_API_KEY=sk-xxxxxxxx
+MODEL_URL=https://api.deepseek.com
+LLM_TIMEOUT=60
+LLM_TEMPERATURE=0.7
+SKILL_MODEL=deepseek-v4-flash
+```
+
+`ModelConfig.from_env()` reads these variables. A config can also be constructed
+directly and shared safely by multiple agents:
+
+```python
+from simagentplg import ModelConfig
+
+config = ModelConfig(
+    model="deepseek-v4-flash",
+    api_key="sk-xxxxxxxx",
+    base_url="https://api.deepseek.com",
+)
 ```
 
 ## Quick Start
 
-Set up your environment variables (`.env`):
-
-```env
-CHAT_MODEL=deepseek-v4-flash
-SKLL_MODEL=deepseek-v4-flash
-MODEL_API_KEY=sk-xxxxxxxx
-MODEL_URL=https://api.deepseek.com
-LLM_TIMEOUT=30
-```
-
-### Tool Mode (default)
+`BaseAgent` uses a `BashHandler` by default:
 
 ```python
-from simagentplg import BaseAgent
+from simagentplg import BaseAgent, ModelConfig
 
-agent = BaseAgent(enable_tools=True)
-result = await agent.runtime(task="帮我写一个Python脚本打印当前时间")
+agent = BaseAgent(config=ModelConfig.from_env())
+result = await agent.runtime(task="打印当前目录中的 Python 文件")
+await agent.shutdown()
 ```
 
-In tool mode, `BaseAgent` follows a ReAct loop — it thinks, calls tools (built-in `bash_run`, MCP tools, skills), and iterates until it reaches a final answer.
-
-### Chat Mode
-
-```python
-agent = BaseAgent(enable_tools=False)
-result = await agent.runtime(task="介绍一下你自己")
-```
-
-When `enable_tools=False`, no MCP/skills are loaded and `tools=None` is passed to the LLM, turning it into a pure conversational agent.
-
-### Custom System Prompt
+For plain chat, tool handlers are neither started nor sent to the model:
 
 ```python
 agent = BaseAgent(
-    system_prompt="你是一个专业的 Python 导师，回答时要言简意赅。",
+    config=ModelConfig.from_env(),
+    system_prompt="你是一个言简意赅的 Python 导师。",
     enable_tools=False,
 )
-result = await agent.runtime(task="如何在 Python 中读写 JSON 文件？")
+result = await agent.runtime(task="解释什么是生成器")
 ```
 
-### Custom MCP Config & Skills
-
-如果不需要使用内置的 MCP 工具和技能，可以指向你自己的配置。
-
-**文件结构示例：**
-
-```
-my_project/
-  mcp_config.json      ← 你的 MCP 服务器配置
-  skills/               ← 你的技能目录（可选）
-    code_review/
-      SKILL.md
-    deploy/
-      SKILL.md
-```
-
-**使用方式：**
+An agent keeps conversation memory between `runtime()` calls:
 
 ```python
-agent = BaseAgent(
-    mcp_config_path="my_project/mcp_config.json",
-    skills_dir="my_project/skills",
-)
-result = await agent.runtime(task="帮我审查代码")
+await agent.runtime(task="我叫小明")
+result = await agent.runtime(task="我叫什么？")
+
+agent.reset()
+agent.reset(history=[{"role": "user", "content": "从这里继续"}])
 ```
 
-**mcp_config.json 格式：**
+## Examples
 
-```json
-{
-  "playwright": {
-    "command": "npx",
-    "args": [
-      "@playwright/mcp@latest",
-      "--headless",
-      "--browser=chrome"
-    ]
-  }
-}
+Runnable examples are available in [`example/`](example/README.md):
+
+```bash
+uv run python example/01_stateful_chat.py
+uv run python example/02_custom_tool.py
+uv run python example/03_multi_agent.py
+uv run python example/04_mcp_tools.py
 ```
 
-**SKILL.md 格式（markdown + YAML front-matter）：**
+They cover stateful chat, custom atomic tools, multi-agent coordination, and
+MCP integration.
 
-```markdown
----
-name: code_review
-description: 审查代码并提供改进建议
----
+## Tool Handlers
 
-# 代码审查
+`BaseHandler` is the common interface for local and external tools:
 
-你是代码审查专家，注意以下几点：
-- 安全漏洞（SQL 注入、XSS 等）
-- 性能问题
-- 代码风格和可读性
-- 潜在 bug
-
-审查后输出结构化报告。
+```text
+BaseAgent
+  -> BaseHandler
+       -> MethodToolHandler
+            -> BashHandler
+            -> custom atomic handlers
+       -> McpToolHandler
 ```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `system_prompt` | ReAct prompt | System prompt for the agent |
-| `enable_tools` | `True` | Enable tool calling (MCP + skills + local tools) |
-| `mcp_config_path` | auto (built-in) | Path to your MCP config JSON file |
-| `skills_dir` | auto (built-in) | Path to your skills directory |
+### Custom Atomic Tools
 
-### Multi-turn History
+`MethodToolHandler` maps a tool named `add` to an async method named `do_add`:
 
 ```python
-history = [
-    {"role": "user", "content": "今天天气不错"},
-    {"role": "assistant", "content": "是啊，适合出去走走"},
-]
-result = await agent.runtime(task="我们去哪", history=history)
-```
+from typing import Any
 
-## Architecture
+from simagentplg import MethodToolHandler, StepOutcome
 
-```
-LLMConfig (BaseHandler, ABC)
-└── BaseAgent             — unified agent (tool mode + chat mode)
-     ├── MCP tools        — external tools via MCP protocol
-     ├── Skill system     — domain-specific prompt injection
-     └── Local tools      — built-in bash_run, extensible
-```
-
-### Directory Structure
-
-```
-agent/
-  runner/
-    baseagent.py          ← BaseAgent + REACT_LOOP_PROMPT
-    mcp_config.json        ← default MCP server configuration
-    skills/                ← default skills directory
-      weather/
-        SKILL.md
-  base.py                  ← LLMConfig, BaseHandler, StepOutcome
-  tool_schema.py           ← local tool schemas
-```
-
-### Tool Dispatch Flow
-
-```
-LLM calls "bash_run"
-    → BaseHandler.dispatch("bash_run", args)
-        → hasattr(self, "do_bash_run")?  YES
-            → await self.do_bash_run(args)  ← local tool
-        → NO
-            → "未知工具" → MCP fallback  ← external tool
-```
-
-### Adding a Local Tool
-
-1. Define the tool schema in `tool_schema.py`:
-
-```python
-{
+ADD_TOOL = {
     "type": "function",
     "function": {
-        "name": "calculator",
-        "description": "Evaluate a math expression",
+        "name": "add",
+        "description": "Add two numbers.",
         "parameters": {
             "type": "object",
             "properties": {
-                "expression": {"type": "string", "description": "Math expression"}
+                "left": {"type": "number"},
+                "right": {"type": "number"},
             },
-            "required": ["expression"]
-        }
-    }
+            "required": ["left", "right"],
+        },
+    },
 }
+
+
+class MathHandler(MethodToolHandler):
+    def __init__(self) -> None:
+        super().__init__([ADD_TOOL])
+
+    async def do_add(self, arguments: dict[str, Any]) -> StepOutcome:
+        value = arguments["left"] + arguments["right"]
+        return StepOutcome({"value": value})
 ```
 
-2. Add the `do_calculator` method in `LLMConfig`:
+Compose handlers when creating an agent:
 
 ```python
-async def do_calculator(self, args: dict) -> StepOutcome:
-    result = eval(args["expression"])
-    return StepOutcome(data=result, next_prompt="\n")
+from simagentplg import BaseAgent, BashHandler, ModelConfig
+
+agent = BaseAgent(
+    config=ModelConfig.from_env(),
+    handlers=[
+        BashHandler(),
+        MathHandler(),
+    ],
+)
 ```
 
-All agents automatically inherit the new tool.
+Handler startup builds one tool routing table. Duplicate tool names fail
+immediately instead of silently overriding another handler.
 
-## MCP Configuration
+### MCP Tools
 
-Place an `mcp_config.json` alongside your `BaseAgent`, or pass `mcp_config_path`:
+MCP is opt-in and uses the same handler contract:
+
+```python
+from simagentplg import BaseAgent, McpToolHandler, ModelConfig
+
+agent = BaseAgent(
+    config=ModelConfig.from_env(),
+    handlers=[
+        McpToolHandler("my_project/mcp_config.json"),
+    ],
+)
+```
+
+Example configuration:
 
 ```json
 {
   "playwright": {
     "command": "npx",
-    "args": [
-      "@playwright/mcp@latest",
-      "--headless",
-      "--browser=chrome"
-    ]
+    "args": ["@playwright/mcp@latest", "--headless"]
   }
 }
 ```
 
-## Skill System
+Calling an unknown local tool never falls back to MCP. Only tools registered by
+`McpToolHandler` are routed to MCP.
 
-Create a skills directory with subdirectories each containing a `SKILL.md`:
+## Skills
 
-```
-skills/
-  my_skill/
-    SKILL.md   ← skill definition (markdown with YAML front-matter)
-```
-
-Pass `skills_dir` to `BaseAgent` or use the built-in `skills/` directory.
-
-## API
-
-### `BaseAgent`
+Skills remain optional prompt extensions and are separate from tool handlers:
 
 ```python
+from simagentplg import BaseAgent, DEFAULT_SKILLS_DIR, ModelConfig
+
 agent = BaseAgent(
-    system_prompt=REACT_LOOP_PROMPT,  # custom prompt
-    enable_tools=True,                # tool mode (False = chat mode)
-    mcp_config_path=None,             # path to MCP config JSON
-    skills_dir=None,                  # path to skills directory
+    config=ModelConfig.from_env(),
+    skills_dir=DEFAULT_SKILLS_DIR,
 )
-await agent.runtime(*, task, history=None) -> str | None
 ```
 
-### `StepOutcome`
+Each skill directory must contain `SKILL.md` with YAML front matter. Pass a
+custom directory to load application-specific skills.
+
+## Agent Manager
+
+`AgentManager` registers existing agents. It does not construct agents or own
+application-specific workflow rules.
 
 ```python
-@dataclass
-class StepOutcome:
-    data: Any                # tool return value
-    next_prompt: str | None  # None = task complete
-    should_exit: bool        # True = force exit
+from simagentplg import AgentManager, BaseAgent, ModelConfig
+
+config = ModelConfig.from_env()
+manager = AgentManager()
+manager.register(
+    "assistant",
+    BaseAgent(config=config, system_prompt="You are a helpful assistant."),
+)
+manager.register(
+    "reviewer",
+    BaseAgent(config=config, system_prompt="You are a careful reviewer."),
+)
+
+result = await manager.run("assistant", "完成任务")
+
+results = await manager.run_many(
+    {
+        "assistant": "总结当前进度",
+        "reviewer": "检查当前结果",
+    }
+)
+
+await manager.shutdown()
 ```
 
-## Requirements
+Calls to the same agent are serialized because they mutate one message history.
+Calls to different agents run concurrently. `run_many()` returns exceptions as
+values for failed entries so one failure does not cancel the remaining agents.
 
-- Python >= 3.12
-- fastmcp >= 3.4.2
-- openai >= 2.41.0
-- python-dotenv >= 1.2.2
+## Public API
+
+```python
+BaseAgent(
+    config: ModelConfig | None = None,
+    *,
+    system_prompt: str = REACT_LOOP_PROMPT,
+    handlers: Iterable[BaseHandler] | None = None,
+    enable_tools: bool = True,
+    skills_dir: str | Path | None = None,
+    max_steps: int = 20,
+)
+
+await agent.runtime(*, task: str) -> str | None
+agent.reset(history=None)
+await agent.startup()
+await agent.shutdown()
+```
+
+## Migrating from 0.1.3
+
+Version 0.2.0 intentionally removes the old inheritance API:
+
+- `LLMConfig` has been removed.
+- `BaseHandler` is now composed into `BaseAgent` instead of inherited by it.
+- Move `do_<tool_name>` methods into a `MethodToolHandler` subclass.
+- Wrap MCP configuration with `McpToolHandler`.
+- `runtime()` keeps memory; use `reset()` to start a clean conversation.
+- Use `AgentManager` when coordinating multiple stateful agents.
+
+## Development
+
+```bash
+uv run python -m unittest discover -s tests -p "test*.py" -v
+```
 
 ## License
 

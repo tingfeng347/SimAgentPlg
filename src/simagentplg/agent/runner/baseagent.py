@@ -45,6 +45,7 @@ class BaseAgent(LLMConfig):
         _skills = Path(skills_dir) if skills_dir else _agent_dir / "skills"
         self.mcp_manager: McpServerManager = McpServerManager(_mcp)
         self.skill_manager: SkillManager = SkillManager(_skills)
+        self.messages = [{"role": "system", "content": self.system_prompt}]
 
     async def dispatch(
         self, tool_name: str, args: dict, index: int = 0, tool_num: int = 1
@@ -71,8 +72,7 @@ class BaseAgent(LLMConfig):
         if self.enable_tools and self._startup is False:
             await self.startup()
             self._startup = True
-
-        self.messages = [{"role": "system", "content": self.system_prompt}]
+        
         if history:
             self.messages.extend(history)
         self.messages.append({"role": "user", "content": task})

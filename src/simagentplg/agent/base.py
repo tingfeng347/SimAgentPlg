@@ -28,7 +28,7 @@ REACT_LOOP_PROMPT = """
 - 不要重复相同的无效操作。
 """.strip()
 
-DEFAULT_MAX_STEPS = 50
+DEFAULT_MAX_STEPS = 20
 
 
 @dataclass(frozen=True, slots=True)

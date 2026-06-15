@@ -19,7 +19,7 @@ async def main() -> None:
             config=config,
             agent_id="planner",
             system_prompt="You create concise, actionable implementation plans.",
-            enable_tools=False,
+            enable_tools=True,
         ),
     )
     manager.register(
@@ -38,7 +38,7 @@ async def main() -> None:
             config=config,
             agent_id="reviewer",
             system_prompt="You review completed work for correctness and risk.",
-            enable_tools=False,
+            enable_tools=True,
         ),
     )
 

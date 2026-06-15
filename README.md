@@ -435,9 +435,6 @@ The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 - Raised a clear error when tool mode exhausts `max_steps`
 - Kept `BashHandler` focused exclusively on `bash_run`
 
-## Development
-
-
 ## License
 
 MIT

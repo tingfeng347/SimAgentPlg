@@ -26,7 +26,10 @@ async def main() -> None:
         BaseAgent(
             config=config,
             agent_id="executor",
-            system_prompt="You execute a provided plan and report the result.",
+            system_prompt=(
+                "You execute the provided plan with tools. When the work is "
+                "complete, call run_finish with a concise summary."
+            ),
             enable_tools=True,
         ),
     )
@@ -60,7 +63,9 @@ async def main() -> None:
                 agent_id="reviewer",
                 prompt=(
                     "Review the implementation below against the original "
-                    "plan.\n\nPlan:\n{plan}\n\nImplementation:\n{execute}"
+                    "plan. The implementation is a JSON completion report "
+                    "containing a summary and Git file changes."
+                    "\n\nPlan:\n{plan}\n\nImplementation:\n{execute}"
                 ),
             ),
         ],

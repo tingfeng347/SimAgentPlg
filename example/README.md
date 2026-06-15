@@ -21,6 +21,12 @@ register the agent object directly with `manager.register(agent)`.
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 
+Tool-enabled agents include two sibling built-in handlers: `BashHandler`
+provides `bash_run`, while `FinishHandler` provides `run_finish`. The finish
+result contains the model's summary plus Git files added, modified, or deleted
+during that `runtime()` call. Plain text does not finish a tool task, and the
+third identical consecutive tool call is rejected before execution.
+
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
 through `npx`.

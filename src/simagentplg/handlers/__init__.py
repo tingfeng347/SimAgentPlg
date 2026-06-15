@@ -7,6 +7,7 @@ from simagentplg.handlers.base import (
     UnknownToolError,
 )
 from simagentplg.handlers.bash import BashHandler
+from simagentplg.handlers.finish import FinishHandler
 from simagentplg.handlers.mcp import McpToolHandler
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "ToolDefinitionError",
     "UnknownToolError",
     "BashHandler",
+    "FinishHandler",
     "McpToolHandler",
 ]

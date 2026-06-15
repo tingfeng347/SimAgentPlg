@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 logger = get_logger("BASEAGENT")
 
+TOOL_COMPLETION_PROMPT = """
+工具模式下，只有调用 run_finish 才表示任务完成。
+完成所有操作后，必须单独调用 run_finish，并在 summary 中总结结果。
+不要用普通文本结束任务，也不要在完成后继续调用其他工具。
+""".strip()
+
 REACT_LOOP_PROMPT = """
 你是一个有能力调用外部工具的智能助手。你必须严格遵循以下 ReAct 流程：
 
@@ -26,9 +32,11 @@ REACT_LOOP_PROMPT = """
 - 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
 - 工具执行结果会返回给你，请根据结果继续思考下一步。
 - 不要重复相同的无效操作。
+- 完成所有操作后，必须调用 run_finish 提交总结并结束任务。
 """.strip()
 
 DEFAULT_MAX_STEPS = 20
+MAX_REPEATED_TOOL_CALLS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,18 +132,36 @@ class BaseAgent:
         self.handlers = list(handlers or ())
         if enable_tools:
             from simagentplg.handlers.bash import BashHandler
+            from simagentplg.handlers.finish import FinishHandler
+
+            bash_handler = next(
+                (
+                    handler
+                    for handler in self.handlers
+                    if isinstance(handler, BashHandler)
+                ),
+                None,
+            )
+            if bash_handler is None:
+                bash_handler = BashHandler()
+                self.handlers.insert(0, bash_handler)
 
             if not any(
-                isinstance(handler, BashHandler)
+                isinstance(handler, FinishHandler)
                 for handler in self.handlers
             ):
-                self.handlers.insert(0, BashHandler())
+                self.handlers.insert(
+                    self.handlers.index(bash_handler) + 1,
+                    FinishHandler(cwd=bash_handler.cwd),
+                )
 
         self.messages: list[dict[str, Any]] = []
         self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
         self._last_skill_name: str | None = None
+        self._last_tool_signature: tuple[str, str] | None = None
+        self._repeated_tool_calls = 0
         self.reset()
 
     @property
@@ -161,9 +187,15 @@ class BaseAgent:
         """Reset conversation memory while preserving the agent identity."""
 
         self.messages = [{"role": "system", "content": self.system_prompt}]
+        if self.enable_tools and self.system_prompt != REACT_LOOP_PROMPT:
+            self.messages.append(
+                {"role": "system", "content": TOOL_COMPLETION_PROMPT}
+            )
         if history:
             self.messages.extend(dict(message) for message in history)
         self._last_skill_name = None
+        self._last_tool_signature = None
+        self._repeated_tool_calls = 0
 
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
@@ -258,8 +290,12 @@ class BaseAgent:
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
 
+        self._last_tool_signature = None
+        self._repeated_tool_calls = 0
         if self.enable_tools:
             await self.startup()
+            for handler in self.handlers:
+                await handler.on_task_start()
 
         self.messages.append({"role": "user", "content": task})
 
@@ -274,14 +310,26 @@ class BaseAgent:
             self.messages.append(message.model_dump())
 
             if not message.tool_calls:
-                if message.content:
+                if not self.enable_tools and message.content:
                     return message.content
+                if self.enable_tools:
+                    self.messages.append(
+                        {
+                            "role": "system",
+                            "content": TOOL_COMPLETION_PROMPT,
+                        }
+                    )
                 continue
 
             exit_value = await self._execute_tool_calls(message)
             if exit_value is not None:
                 return exit_value
 
+        if self.enable_tools:
+            raise RuntimeError(
+                f"agent {self.agent_id!r} did not finish within "
+                f"{self.max_steps} steps"
+            )
         return None
 
     def _build_tool_routes(self) -> dict[str, "BaseHandler"]:
@@ -321,6 +369,10 @@ class BaseAgent:
         ]
 
         for tool_call in function_calls:
+            self._check_repeated_tool_call(
+                tool_call.function.name,
+                tool_call.function.arguments,
+            )
             outcome = await self._execute_tool_call(
                 tool_call.function.name,
                 tool_call.function.arguments,
@@ -335,6 +387,35 @@ class BaseAgent:
             if outcome.should_exit:
                 return self._serialize_tool_result(outcome.data)
         return None
+
+    def _check_repeated_tool_call(
+        self,
+        tool_name: str,
+        raw_arguments: str,
+    ) -> None:
+        try:
+            arguments = json.loads(raw_arguments)
+            normalized_arguments = json.dumps(
+                arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            normalized_arguments = raw_arguments
+
+        signature = (tool_name, normalized_arguments)
+        if signature == self._last_tool_signature:
+            self._repeated_tool_calls += 1
+        else:
+            self._last_tool_signature = signature
+            self._repeated_tool_calls = 1
+
+        if self._repeated_tool_calls >= MAX_REPEATED_TOOL_CALLS:
+            raise RuntimeError(
+                f"tool {tool_name!r} was called with the same arguments "
+                f"{MAX_REPEATED_TOOL_CALLS} consecutive times"
+            )
 
     async def _execute_tool_call(
         self,

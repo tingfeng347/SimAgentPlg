@@ -7,6 +7,7 @@ from typing import Any
 from simagentplg import (
     BaseAgent,
     BashHandler,
+    FinishHandler,
     McpToolHandler,
     MethodToolHandler,
     ModelConfig,
@@ -85,6 +86,8 @@ class EchoHandler(MethodToolHandler):
         super().__init__((ECHO_TOOL,))
         self.started = 0
         self.stopped = 0
+        self.task_starts = 0
+        self.calls = 0
 
     async def startup(self) -> None:
         self.started += 1
@@ -92,7 +95,11 @@ class EchoHandler(MethodToolHandler):
     async def shutdown(self) -> None:
         self.stopped += 1
 
+    async def on_task_start(self) -> None:
+        self.task_starts += 1
+
     async def do_echo(self, arguments: dict[str, Any]) -> StepOutcome:
+        self.calls += 1
         text = arguments.get("text")
         if not isinstance(text, str):
             return StepOutcome({"status": "error", "error": "text is required"})
@@ -226,20 +233,22 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             {"status": "success", "text": "hello"},
         )
 
-    async def test_tool_mode_always_includes_bash_handler(self) -> None:
+    async def test_tool_mode_always_includes_builtin_handlers(self) -> None:
         echo = EchoHandler()
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="tools",
             handlers=[echo],
+            enable_tools=True,
             client=FakeClient([]),
         )
 
         self.assertIsInstance(agent.handlers[0], BashHandler)
-        self.assertIs(agent.handlers[1], echo)
+        self.assertIsInstance(agent.handlers[1], FinishHandler)
+        self.assertIs(agent.handlers[2], echo)
         self.assertEqual(
             [tool["function"]["name"] for tool in agent.tools],
-            ["bash_run", "echo"],
+            ["bash_run", "run_finish", "echo"],
         )
 
     async def test_explicit_bash_handler_is_not_duplicated(self) -> None:
@@ -248,6 +257,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[bash, EchoHandler()],
+            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -256,6 +266,27 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertIs(agent.handlers[0], bash)
+        self.assertIsInstance(agent.handlers[1], FinishHandler)
+        self.assertEqual(agent.handlers[1].cwd, bash.cwd)
+
+    async def test_explicit_finish_handler_is_not_duplicated(self) -> None:
+        finish = FinishHandler()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tools",
+            handlers=[finish],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            sum(
+                isinstance(handler, FinishHandler)
+                for handler in agent.handlers
+            ),
+            1,
+        )
+        self.assertIs(agent.handlers[1], finish)
 
     async def test_tool_disabled_mode_does_not_add_bash_handler(self) -> None:
         agent = BaseAgent(
@@ -273,6 +304,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="duplicate-tools",
             handlers=[EchoHandler(), EchoHandler()],
+            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -284,6 +316,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="unknown-tool",
             handlers=[EchoHandler()],
+            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -301,25 +334,153 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         )
                     ]
                 ),
-                FakeMessage("recovered"),
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-2",
+                            function=FakeFunction(
+                                "run_finish",
+                                '{"summary": "recovered"}',
+                            ),
+                        )
+                    ]
+                ),
             ]
         )
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="invalid-json",
             handlers=[EchoHandler()],
+            enable_tools=True,
             client=client,
         )
 
         result = await agent.runtime(task="use echo")
 
-        self.assertEqual(result, "recovered")
+        self.assertEqual(json.loads(result or "")["summary"], "recovered")
         tool_message = next(
             message for message in agent.messages if message["role"] == "tool"
         )
         payload = json.loads(tool_message["content"])
         self.assertEqual(payload["status"], "error")
         self.assertIn("JSON object", payload["error"])
+
+    async def test_tool_mode_corrects_plain_text_until_finish(self) -> None:
+        client = FakeClient(
+            [
+                FakeMessage("premature answer"),
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(
+                                "run_finish",
+                                '{"summary": "done"}',
+                            ),
+                        )
+                    ]
+                ),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="finish-required",
+            enable_tools=True,
+            client=client,
+        )
+
+        result = await agent.runtime(task="complete the task")
+
+        self.assertEqual(json.loads(result or "")["summary"], "done")
+        second_messages = client.completions.calls[1]["messages"]
+        self.assertTrue(
+            any(
+                message.get("role") == "system"
+                and "run_finish" in message.get("content", "")
+                for message in second_messages
+            )
+        )
+
+    async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
+        handler = EchoHandler()
+        client = FakeClient(
+            [
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(
+                                "run_finish",
+                                '{"summary": "first"}',
+                            ),
+                        )
+                    ]
+                ),
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-2",
+                            function=FakeFunction(
+                                "run_finish",
+                                '{"summary": "second"}',
+                            ),
+                        )
+                    ]
+                ),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="task-hooks",
+            handlers=[handler],
+            enable_tools=True,
+            client=client,
+        )
+
+        await agent.runtime(task="first")
+        await agent.runtime(task="second")
+
+        self.assertEqual(handler.task_starts, 2)
+
+    async def test_third_identical_tool_call_fails_before_execution(self) -> None:
+        handler = EchoHandler()
+        repeated_call = FakeToolCall(
+            id="call",
+            function=FakeFunction("echo", '{"text": "same"}'),
+        )
+        client = FakeClient(
+            [
+                FakeMessage(tool_calls=[repeated_call]),
+                FakeMessage(tool_calls=[repeated_call]),
+                FakeMessage(tool_calls=[repeated_call]),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="repeat-guard",
+            handlers=[handler],
+            enable_tools=True,
+            max_steps=3,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "consecutive times"):
+            await agent.runtime(task="repeat")
+
+        self.assertEqual(handler.calls, 2)
+
+    async def test_tool_mode_raises_when_finish_is_never_called(self) -> None:
+        client = FakeClient([FakeMessage("not finished"), FakeMessage(None)])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="step-limit",
+            enable_tools=True,
+            max_steps=2,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
+            await agent.runtime(task="never finish")
 
     async def test_tool_disabled_mode_does_not_start_handlers(self) -> None:
         handler = EchoHandler()

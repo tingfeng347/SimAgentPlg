@@ -17,6 +17,7 @@ from simagentplg.agent.workflow import (
 from simagentplg.handlers import (
     BaseHandler,
     BashHandler,
+    FinishHandler,
     McpToolHandler,
     MethodToolHandler,
     ToolDefinitionError,
@@ -42,6 +43,7 @@ __all__ = [
     "BaseHandler",
     "MethodToolHandler",
     "BashHandler",
+    "FinishHandler",
     "McpToolHandler",
     "ToolDefinitionError",
     "UnknownToolError",

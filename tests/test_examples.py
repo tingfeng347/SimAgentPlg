@@ -2,7 +2,7 @@ import runpy
 import unittest
 from pathlib import Path
 
-from simagentplg import MethodToolHandler
+from simagentplg import MethodToolHandler, SkillManager
 
 EXAMPLES_DIR = Path(__file__).parents[1] / "example"
 
@@ -27,6 +27,20 @@ class ExampleTests(unittest.IsolatedAsyncioTestCase):
             outcome.data,
             {"status": "success", "value": 42.0},
         )
+
+    async def test_skill_example_discovers_local_skill(self) -> None:
+        namespace = runpy.run_path(
+            EXAMPLES_DIR / "06_skill.py",
+            run_name="example_test",
+        )
+        manager = SkillManager(namespace["SKILLS_DIR"])
+
+        await manager.discover()
+
+        self.assertIn("release_notes", manager._skills)
+        skill = manager._skills["release_notes"]
+        self.assertIsNotNone(skill.template_md)
+        self.assertIsNotNone(skill.sample_md)
 
 
 if __name__ == "__main__":

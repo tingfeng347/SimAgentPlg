@@ -16,8 +16,10 @@ class WorkflowAgent:
         self,
         response: str | None | Callable[[str], str | None],
         *,
+        agent_id: str,
         delay: float = 0,
     ) -> None:
+        self._agent_id = agent_id
         self.response = response
         self.delay = delay
         self.history: list[str] = []
@@ -25,6 +27,10 @@ class WorkflowAgent:
         self.reset_count = 0
         self.active = 0
         self.maximum_active = 0
+
+    @property
+    def agent_id(self) -> str:
+        return self._agent_id
 
     def reset(self) -> None:
         self.reset_count += 1
@@ -59,12 +65,12 @@ class FailingWorkflowAgent(WorkflowAgent):
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_pipeline_renders_previous_and_named_outputs(self) -> None:
         manager = AgentManager()
-        planner = WorkflowAgent("PLAN")
-        executor = WorkflowAgent("IMPLEMENTATION")
-        reviewer = WorkflowAgent("APPROVED")
-        manager.register("planner", planner)  # type: ignore[arg-type]
-        manager.register("executor", executor)  # type: ignore[arg-type]
-        manager.register("reviewer", reviewer)  # type: ignore[arg-type]
+        planner = WorkflowAgent("PLAN", agent_id="planner")
+        executor = WorkflowAgent("IMPLEMENTATION", agent_id="executor")
+        reviewer = WorkflowAgent("APPROVED", agent_id="reviewer")
+        manager.register(planner)  # type: ignore[arg-type]
+        manager.register(executor)  # type: ignore[arg-type]
+        manager.register(reviewer)  # type: ignore[arg-type]
         workflow = AgentWorkflow(
             manager,
             [
@@ -101,8 +107,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reused_agent_is_reset_for_every_step(self) -> None:
         manager = AgentManager()
-        agent = WorkflowAgent(lambda task: f"done:{task}")
-        manager.register("worker", agent)  # type: ignore[arg-type]
+        agent = WorkflowAgent(
+            lambda task: f"done:{task}",
+            agent_id="worker",
+        )
+        manager.register(agent)  # type: ignore[arg-type]
         workflow = AgentWorkflow(
             manager,
             [
@@ -125,8 +134,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_workflows_isolate_a_shared_agent(self) -> None:
         manager = AgentManager()
-        agent = WorkflowAgent(lambda task: task.upper(), delay=0.01)
-        manager.register("shared", agent)  # type: ignore[arg-type]
+        agent = WorkflowAgent(
+            lambda task: task.upper(),
+            agent_id="shared",
+            delay=0.01,
+        )
+        manager.register(agent)  # type: ignore[arg-type]
         workflow = AgentWorkflow(
             manager,
             [WorkflowStep("work", "shared", "process:{input}")],
@@ -150,13 +163,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failure_stops_and_preserves_completed_steps(self) -> None:
         manager = AgentManager()
-        manager.register(
-            "planner",
-            WorkflowAgent("PLAN"),  # type: ignore[arg-type]
+        manager.register(  # type: ignore[arg-type]
+            WorkflowAgent("PLAN", agent_id="planner")
         )
-        manager.register(
-            "executor",
-            FailingWorkflowAgent("unused"),  # type: ignore[arg-type]
+        manager.register(  # type: ignore[arg-type]
+            FailingWorkflowAgent("unused", agent_id="executor")
         )
         workflow = AgentWorkflow(
             manager,
@@ -187,9 +198,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await missing_workflow.run("task")
         self.assertIsInstance(missing.exception.cause, AgentNotFoundError)
 
-        manager.register(
-            "empty",
-            WorkflowAgent(None),  # type: ignore[arg-type]
+        manager.register(  # type: ignore[arg-type]
+            WorkflowAgent(None, agent_id="empty")
         )
         empty_workflow = AgentWorkflow(
             manager,

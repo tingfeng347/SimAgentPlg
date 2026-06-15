@@ -9,17 +9,17 @@ async def main() -> None:
     config = ModelConfig.from_env()
     manager = AgentManager()
     manager.register(
-        "writer",
         BaseAgent(
             config=config,
+            agent_id="writer",
             system_prompt="You write concise release notes.",
             enable_tools=False,
         ),
     )
     manager.register(
-        "reviewer",
         BaseAgent(
             config=config,
+            agent_id="reviewer",
             system_prompt="You review software changes for risk.",
             enable_tools=False,
         ),

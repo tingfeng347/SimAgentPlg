@@ -33,6 +33,9 @@ class BaseHandler(ABC):
     async def shutdown(self) -> None:
         """Release optional external resources."""
 
+    async def on_task_start(self) -> None:
+        """Prepare handler state for one new agent task."""
+
     def can_handle(self, tool_name: str) -> bool:
         return tool_name in self.tool_names
 

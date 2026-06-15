@@ -138,11 +138,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         second_client = FakeClient([FakeMessage("second")])
         first = BaseAgent(
             TEST_CONFIG,
+            agent_id="first",
             enable_tools=False,
             client=first_client,
         )
         second = BaseAgent(
             TEST_CONFIG,
+            agent_id="second",
             enable_tools=False,
             client=second_client,
         )
@@ -163,6 +165,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient([FakeMessage("one"), FakeMessage("two")])
         agent = BaseAgent(
             TEST_CONFIG,
+            agent_id="memory",
             enable_tools=False,
             client=client,
         )
@@ -184,6 +187,37 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_agent_id_is_normalized_and_read_only(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="  assistant  ",
+            enable_tools=False,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(agent.agent_id, "assistant")
+        with self.assertRaises(AttributeError):
+            agent.agent_id = "renamed"  # type: ignore[misc]
+
+    async def test_empty_agent_id_is_rejected(self) -> None:
+        for agent_id in ("", "   "):
+            with self.subTest(agent_id=agent_id):
+                with self.assertRaisesRegex(ValueError, "agent_id"):
+                    BaseAgent(
+                        TEST_CONFIG,
+                        agent_id=agent_id,
+                        enable_tools=False,
+                        client=FakeClient([]),
+                    )
+
+    async def test_agent_id_is_required(self) -> None:
+        with self.assertRaisesRegex(TypeError, "agent_id"):
+            BaseAgent(  # type: ignore[call-arg]
+                TEST_CONFIG,
+                enable_tools=False,
+                client=FakeClient([]),
+            )
+
     async def test_method_handler_dispatches_atomic_tool(self) -> None:
         handler = EchoHandler()
         result = await handler.dispatch("echo", {"text": "hello"})
@@ -192,9 +226,52 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             {"status": "success", "text": "hello"},
         )
 
+    async def test_tool_mode_always_includes_bash_handler(self) -> None:
+        echo = EchoHandler()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tools",
+            handlers=[echo],
+            client=FakeClient([]),
+        )
+
+        self.assertIsInstance(agent.handlers[0], BashHandler)
+        self.assertIs(agent.handlers[1], echo)
+        self.assertEqual(
+            [tool["function"]["name"] for tool in agent.tools],
+            ["bash_run", "echo"],
+        )
+
+    async def test_explicit_bash_handler_is_not_duplicated(self) -> None:
+        bash = BashHandler()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tools",
+            handlers=[bash, EchoHandler()],
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            sum(isinstance(handler, BashHandler) for handler in agent.handlers),
+            1,
+        )
+        self.assertIs(agent.handlers[0], bash)
+
+    async def test_tool_disabled_mode_does_not_add_bash_handler(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="chat",
+            enable_tools=False,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(agent.handlers, [])
+        self.assertEqual(agent.tools, [])
+
     async def test_duplicate_tool_names_fail_during_startup(self) -> None:
         agent = BaseAgent(
             TEST_CONFIG,
+            agent_id="duplicate-tools",
             handlers=[EchoHandler(), EchoHandler()],
             client=FakeClient([]),
         )
@@ -205,6 +282,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_tool_has_explicit_error(self) -> None:
         agent = BaseAgent(
             TEST_CONFIG,
+            agent_id="unknown-tool",
             handlers=[EchoHandler()],
             client=FakeClient([]),
         )
@@ -228,6 +306,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         agent = BaseAgent(
             TEST_CONFIG,
+            agent_id="invalid-json",
             handlers=[EchoHandler()],
             client=client,
         )
@@ -247,6 +326,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient([FakeMessage("plain chat")])
         agent = BaseAgent(
             TEST_CONFIG,
+            agent_id="plain-chat",
             handlers=[handler],
             enable_tools=False,
             client=client,

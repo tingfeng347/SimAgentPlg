@@ -15,24 +15,25 @@ async def main() -> None:
     config = ModelConfig.from_env()
     manager = AgentManager()
     manager.register(
-        "planner",
         BaseAgent(
             config=config,
+            agent_id="planner",
             system_prompt="You create concise, actionable implementation plans.",
             enable_tools=False,
         ),
     )
     manager.register(
-        "executor",
         BaseAgent(
             config=config,
+            agent_id="executor",
             system_prompt="You execute a provided plan and report the result.",
+            enable_tools=True,
         ),
     )
     manager.register(
-        "reviewer",
         BaseAgent(
             config=config,
+            agent_id="reviewer",
             system_prompt="You review completed work for correctness and risk.",
             enable_tools=False,
         ),

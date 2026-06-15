@@ -10,6 +10,9 @@ Run an example from the repository root:
 uv run python example/01_stateful_chat.py
 ```
 
+Every `BaseAgent` declares its own immutable `agent_id`. Manager examples
+register the agent object directly with `manager.register(agent)`.
+
 ## Examples
 
 - `01_stateful_chat.py`: plain chat, conversation memory, and `reset()`

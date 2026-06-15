@@ -11,12 +11,14 @@ MCP_CONFIG = Path(__file__).with_name("mcp_config.json")
 async def main() -> None:
     agent = BaseAgent(
         config=ModelConfig.from_env(),
+        agent_id="browser",
         handlers=[McpToolHandler(MCP_CONFIG)],
+        enable_tools=True
     )
 
     try:
         result = await agent.runtime(
-            task="Open https://example.com and report the page title."
+            task="Open https://baidu.com and report the page title."
         )
         print(result)
     finally:

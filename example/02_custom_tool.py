@@ -52,6 +52,7 @@ class MathHandler(MethodToolHandler):
 async def main() -> None:
     agent = BaseAgent(
         config=ModelConfig.from_env(),
+        agent_id="calculator",
         handlers=[MathHandler()],
     )
 

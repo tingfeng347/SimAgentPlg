@@ -28,7 +28,7 @@ REACT_LOOP_PROMPT = """
 - 不要重复相同的无效操作。
 """.strip()
 
-DEFAULT_MAX_STEPS = 20
+DEFAULT_MAX_STEPS = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,13 +97,17 @@ class BaseAgent:
         self,
         config: ModelConfig | None = None,
         *,
+        agent_id: str,
         system_prompt: str = REACT_LOOP_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
-        enable_tools: bool = True,
+        enable_tools: bool = False,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,
     ) -> None:
+        self._agent_id = agent_id.strip()
+        if not self._agent_id:
+            raise ValueError("agent_id must not be empty")
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than zero")
 
@@ -117,18 +121,28 @@ class BaseAgent:
             timeout=self.config.timeout,
         )
 
-        if handlers is None:
+        self.handlers = list(handlers or ())
+        if enable_tools:
             from simagentplg.handlers.bash import BashHandler
 
-            handlers = (BashHandler(),)
+            if not any(
+                isinstance(handler, BashHandler)
+                for handler in self.handlers
+            ):
+                self.handlers.insert(0, BashHandler())
 
-        self.handlers = list(handlers)
         self.messages: list[dict[str, Any]] = []
         self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
         self._last_skill_name: str | None = None
         self.reset()
+
+    @property
+    def agent_id(self) -> str:
+        """Return the immutable identity used by AgentManager."""
+
+        return self._agent_id
 
     @property
     def tools(self) -> list[dict[str, Any]]:

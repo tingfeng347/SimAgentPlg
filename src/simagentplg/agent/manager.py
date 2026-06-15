@@ -30,9 +30,8 @@ class AgentManager:
     def __init__(self) -> None:
         self._entries: dict[str, _AgentEntry] = {}
 
-    def register(self, agent_id: str, agent: BaseAgent) -> None:
-        if not agent_id:
-            raise ValueError("agent_id must not be empty")
+    def register(self, agent: BaseAgent) -> None:
+        agent_id = agent.agent_id
         if agent_id in self._entries:
             raise AgentAlreadyExistsError(
                 f"agent {agent_id!r} is already registered"

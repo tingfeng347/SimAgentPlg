@@ -24,10 +24,15 @@ class StubAgent:
         delay: float = 0.01,
     ) -> None:
         self.name = name
+        self._agent_id = name
         self.activity = activity or Activity()
         self.delay = delay
         self.started = 0
         self.stopped = 0
+
+    @property
+    def agent_id(self) -> str:
+        return self._agent_id
 
     async def startup(self) -> None:
         self.started += 1
@@ -78,17 +83,18 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_errors_are_explicit(self) -> None:
         manager = AgentManager()
         agent = StubAgent("one")
-        manager.register("one", agent)  # type: ignore[arg-type]
+        manager.register(agent)  # type: ignore[arg-type]
 
+        self.assertIs(manager.get("one"), agent)
         with self.assertRaises(AgentAlreadyExistsError):
-            manager.register("one", agent)  # type: ignore[arg-type]
+            manager.register(StubAgent("one"))  # type: ignore[arg-type]
         with self.assertRaises(AgentNotFoundError):
             manager.get("missing")
 
     async def test_same_agent_runs_serially(self) -> None:
         manager = AgentManager()
         agent = StubAgent("one")
-        manager.register("one", agent)  # type: ignore[arg-type]
+        manager.register(agent)  # type: ignore[arg-type]
 
         results = await asyncio.gather(
             manager.run("one", "a"),
@@ -101,13 +107,11 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_different_agents_run_concurrently(self) -> None:
         manager = AgentManager()
         activity = Activity()
-        manager.register(
-            "one",
-            StubAgent("one", activity=activity),  # type: ignore[arg-type]
+        manager.register(  # type: ignore[arg-type]
+            StubAgent("one", activity=activity)
         )
-        manager.register(
-            "two",
-            StubAgent("two", activity=activity),  # type: ignore[arg-type]
+        manager.register(  # type: ignore[arg-type]
+            StubAgent("two", activity=activity)
         )
 
         results = await manager.run_many({"one": "a", "two": "b"})
@@ -118,7 +122,7 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_isolated_resets_agent_before_running(self) -> None:
         manager = AgentManager()
         agent = ResettableAgent("one")
-        manager.register("one", agent)  # type: ignore[arg-type]
+        manager.register(agent)  # type: ignore[arg-type]
 
         result = await manager.run_isolated("one", "task")
 
@@ -127,11 +131,8 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_many_isolates_failures(self) -> None:
         manager = AgentManager()
-        manager.register("ok", StubAgent("ok"))  # type: ignore[arg-type]
-        manager.register(
-            "bad",
-            FailingAgent("bad"),  # type: ignore[arg-type]
-        )
+        manager.register(StubAgent("ok"))  # type: ignore[arg-type]
+        manager.register(FailingAgent("bad"))  # type: ignore[arg-type]
 
         results = await manager.run_many(
             {"ok": "work", "bad": "work", "missing": "work"}
@@ -145,8 +146,8 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = AgentManager()
         first = StubAgent("first")
         second = StubAgent("second")
-        manager.register("first", first)  # type: ignore[arg-type]
-        manager.register("second", second)  # type: ignore[arg-type]
+        manager.register(first)  # type: ignore[arg-type]
+        manager.register(second)  # type: ignore[arg-type]
 
         await manager.startup()
         removed = await manager.remove("first")
@@ -163,7 +164,7 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_remove_rejects_a_queued_run(self) -> None:
         manager = AgentManager()
         agent = BlockingAgent("one")
-        manager.register("one", agent)  # type: ignore[arg-type]
+        manager.register(agent)  # type: ignore[arg-type]
 
         running = asyncio.create_task(manager.run("one", "running"))
         await agent.entered.wait()

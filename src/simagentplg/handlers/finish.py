@@ -8,6 +8,11 @@ from typing import Any
 
 from simagentplg.agent.base import StepOutcome
 from simagentplg.handlers.base import MethodToolHandler, ToolSchema
+from simagentplg.logger import get_logger
+
+logger = get_logger("FINISHHANDLER")
+
+
 
 FINISH_TOOL: ToolSchema = {
     "type": "function",
@@ -247,7 +252,7 @@ class FinishHandler(MethodToolHandler):
                     "modified": [],
                     "deleted": [],
                 }
-
+        logger.info("任务完成，summary=%s, changes=%s", summary[:80], bool(changes.get("available")))
         return StepOutcome(
             {
                 "summary": summary.strip(),

@@ -21,10 +21,6 @@ OpenAI 兼容智能体、可组合工具处理器、MCP 集成以及基于角色
 
 ## 安装
 
-```bash
-pip install simagentplg
-```
-
 使用 uv 安装本地项目：
 
 ```bash
@@ -430,11 +426,7 @@ Workflow 类型、Handler 基类、`BashHandler`、`FinishHandler`、
 - 工具模式耗尽 `max_steps` 时抛出明确错误
 - `BashHandler` 只负责提供 `bash_run`
 
-## 开发
 
-```bash
-uv run python -m unittest discover -s tests -p "test*.py" -v
-```
 
 ## 许可证
 

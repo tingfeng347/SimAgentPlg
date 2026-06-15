@@ -22,10 +22,6 @@ Python 3.12 or newer is required.
 
 ## Installation
 
-```bash
-pip install simagentplg
-```
-
 Or install the local project with uv:
 
 ```bash
@@ -441,9 +437,6 @@ The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 
 ## Development
 
-```bash
-uv run python -m unittest discover -s tests -p "test*.py" -v
-```
 
 ## License
 

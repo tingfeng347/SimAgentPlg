@@ -20,6 +20,7 @@ register the agent object directly with `manager.register(agent)`.
 - `03_multi_agent.py`: concurrent tasks coordinated by `AgentManager`
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
+- `06_skill.py`: local skill discovery, routing, template, and sample injection
 
 Tool-enabled agents include two sibling built-in handlers: `BashHandler`
 provides `bash_run`, while `FinishHandler` provides `run_finish`. The finish
@@ -30,3 +31,8 @@ third identical consecutive tool call is rejected before execution.
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
 through `npx`.
+
+The skill example loads `example/skills/release_notes/`. `SKILL_MODEL` selects
+the model used to route the task to a skill; when omitted, it defaults to
+`gpt-4o-mini`. The selected `SKILL.md`, optional `template.md`, and optional
+`examples/sample.md` are injected into the agent context.

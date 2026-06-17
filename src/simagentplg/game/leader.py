@@ -7,7 +7,33 @@ from typing import Any
 
 from simagentplg import BaseAgent, MethodToolHandler, ModelConfig, StepOutcome
 from simagentplg.handlers.base import ToolSchema
-from simagentplg.game.world import RESOURCE_TYPES, WorldState
+from simagentplg.game.world import DEFAULT_FACTIONS, RESOURCE_TYPES, WorldState
+
+POPULATION_TASKS = (
+    "farm",
+    "gather_wood",
+    "mine_stone",
+    "build",
+    "settle",
+    "train",
+    "defend",
+    "attack",
+    "scout",
+    "idle",
+)
+RESOURCE_ACTIONS = ("reserve", "spend", "trade", "tribute")
+TERRITORY_ACTIONS = ("claim", "settle", "fortify", "abandon", "scout")
+MILITARY_ACTIONS = ("muster", "defend", "attack", "raid", "retreat")
+DIPLOMACY_PROPOSALS = (
+    "alliance",
+    "trade",
+    "non_aggression",
+    "tribute",
+    "peace",
+    "war",
+)
+PETITION_TYPES = ("resources", "weather", "protection", "territory", "miracle", "peace")
+URGENCY_LEVELS = ("low", "medium", "high")
 
 LEADER_SYSTEM_PROMPT = """
 You are the LLM leader of one civilization in an original god-sandbox
@@ -15,6 +41,11 @@ simulation game. You do not directly modify the world. Inspect only the
 information available to your faction, then end your strategic turn by calling
 submit_leader_turn exactly once. Keep strategy_summary concise and never reveal
 private chain-of-thought.
+
+Use only the exact enum values exposed by the submit_leader_turn tool schema.
+If no legal action is obvious, submit a conservative no-op plan with empty
+order arrays. Never invent action names, resource names, faction IDs, or
+coordinates.
 """.strip()
 
 
@@ -239,6 +270,18 @@ INSPECT_FACTION_TOOL: ToolSchema = {
     },
 }
 
+
+def _target_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+        },
+        "required": ["x", "y"],
+    }
+
+
 SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
     "type": "function",
     "function": {
@@ -248,12 +291,93 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
             "type": "object",
             "properties": {
                 "turn_intent": {"type": "string"},
-                "population_orders": {"type": "array", "items": {"type": "object"}},
-                "resource_orders": {"type": "array", "items": {"type": "object"}},
-                "territory_orders": {"type": "array", "items": {"type": "object"}},
-                "military_orders": {"type": "array", "items": {"type": "object"}},
-                "diplomacy_orders": {"type": "array", "items": {"type": "object"}},
-                "petitions": {"type": "array", "items": {"type": "object"}},
+                "population_orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string", "enum": list(POPULATION_TASKS)},
+                            "target": _target_schema(),
+                            "workers": {"type": "integer", "minimum": 0},
+                            "priority": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["task", "workers"],
+                    },
+                },
+                "resource_orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "resource": {"type": "string", "enum": list(RESOURCE_TYPES)},
+                            "action": {"type": "string", "enum": list(RESOURCE_ACTIONS)},
+                            "amount": {"type": "integer", "minimum": 0},
+                            "purpose": {"type": "string"},
+                        },
+                        "required": ["resource", "action", "amount"],
+                    },
+                },
+                "territory_orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": list(TERRITORY_ACTIONS)},
+                            "target": _target_schema(),
+                            "priority": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["action", "target"],
+                    },
+                },
+                "military_orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": list(MILITARY_ACTIONS)},
+                            "origin": _target_schema(),
+                            "target": _target_schema(),
+                            "force_ratio": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 1,
+                            },
+                            "priority": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["action"],
+                    },
+                },
+                "diplomacy_orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "target_faction": {
+                                "type": "string",
+                                "enum": list(DEFAULT_FACTIONS),
+                            },
+                            "proposal": {
+                                "type": "string",
+                                "enum": list(DIPLOMACY_PROPOSALS),
+                            },
+                            "message": {"type": "string"},
+                        },
+                        "required": ["target_faction", "proposal"],
+                    },
+                },
+                "petitions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": list(PETITION_TYPES)},
+                            "request": {"type": "object"},
+                            "reason": {"type": "string"},
+                            "urgency": {"type": "string", "enum": list(URGENCY_LEVELS)},
+                        },
+                        "required": ["type", "reason"],
+                    },
+                },
                 "public_decree": {"type": "string"},
                 "strategy_summary": {"type": "string"},
             },
@@ -412,14 +536,36 @@ def _build_leader_task(
     feedback: str | None,
 ) -> str:
     faction = world.factions[faction_id]
+    owned_tiles = [
+        {
+            "x": tile.x,
+            "y": tile.y,
+            "terrain": tile.terrain,
+            "population": tile.population_of(faction_id),
+            "soldiers": tile.soldiers_of(faction_id),
+        }
+        for tile in world.faction_tiles(faction_id)
+    ]
+    expansion_candidates = _expansion_candidates(world, faction_id)
     lines = [
         f"You lead faction {faction.name} ({faction_id}) at world tick {world.tick}.",
         "Use inspect tools if needed, then call submit_leader_turn.",
+        "Legal values:",
+        f"- population task: {', '.join(POPULATION_TASKS)}",
+        f"- resource action: {', '.join(RESOURCE_ACTIONS)}",
+        f"- territory action: {', '.join(TERRITORY_ACTIONS)}",
+        f"- military action: {', '.join(MILITARY_ACTIONS)}",
+        f"- diplomacy proposal: {', '.join(DIPLOMACY_PROPOSALS)}",
+        f"- petition type: {', '.join(PETITION_TYPES)}",
+        "Use only visible coordinates. For a safe turn, submit empty order arrays.",
         f"Resources: {faction.resources.as_dict()}",
         f"Population: {world.total_population(faction_id)}",
         f"Soldiers: {world.total_soldiers(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",
+        f"Owned tiles: {owned_tiles}",
+        f"Legal expansion candidates: {expansion_candidates[:8]}",
         f"Diplomacy: {faction.diplomacy}",
+        "Safe no-op submit example: turn_intent='consolidate', all order arrays empty, strategy_summary='Hold position.'",
     ]
     if feedback:
         lines.extend(
@@ -445,6 +591,26 @@ def _summarize_tile(world: WorldState, x: int, y: int) -> dict[str, Any]:
         "soldiers": dict(tile.soldiers),
         "protected": tile.protected,
     }
+
+
+def _expansion_candidates(
+    world: WorldState,
+    faction_id: str,
+) -> list[dict[str, Any]]:
+    candidates: dict[tuple[int, int], dict[str, Any]] = {}
+    for tile in world.faction_tiles(faction_id):
+        for neighbor in world.neighbors(tile.x, tile.y):
+            if neighbor.owner is not None or not neighbor.is_passable():
+                continue
+            if not world.is_visible(faction_id, neighbor.x, neighbor.y):
+                continue
+            candidates[(neighbor.x, neighbor.y)] = {
+                "x": neighbor.x,
+                "y": neighbor.y,
+                "terrain": neighbor.terrain,
+                "weather": neighbor.weather,
+            }
+    return [candidates[key] for key in sorted(candidates)]
 
 
 def _requested_coordinates(arguments: Mapping[str, Any]) -> list[tuple[int, int]]:

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 logger = get_logger("BASEAGENT")
 
 TOOL_COMPLETION_PROMPT = """
-工具模式下，只有调用 run_finish 才表示任务完成。
-完成所有操作后，必须单独调用 run_finish，并在 summary 中总结结果。
+工具模式下，只有调用一个会结束任务的工具才表示任务完成。
+完成所有操作后，必须单独调用当前任务指定的完成工具。
 不要用普通文本结束任务，也不要在完成后继续调用其他工具。
 """.strip()
 
@@ -32,7 +32,7 @@ REACT_LOOP_PROMPT = """
 - 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
 - 工具执行结果会返回给你，请根据结果继续思考下一步。
 - 不要重复相同的无效操作。
-- 完成所有操作后，必须调用 run_finish 提交总结并结束任务。
+- 完成所有操作后，必须调用当前任务指定的完成工具来结束任务。
 """.strip()
 
 DEFAULT_MAX_STEPS = 20
@@ -128,33 +128,7 @@ class BaseAgent:
             base_url=self.config.base_url,
             timeout=self.config.timeout,
         )
-
         self.handlers = list(handlers or ())
-        if enable_tools:
-            from simagentplg.handlers.bash import BashHandler
-            from simagentplg.handlers.finish import FinishHandler
-
-            bash_handler = next(
-                (
-                    handler
-                    for handler in self.handlers
-                    if isinstance(handler, BashHandler)
-                ),
-                None,
-            )
-            if bash_handler is None:
-                bash_handler = BashHandler()
-                self.handlers.insert(0, bash_handler)
-
-            if not any(
-                isinstance(handler, FinishHandler)
-                for handler in self.handlers
-            ):
-                self.handlers.insert(
-                    self.handlers.index(bash_handler) + 1,
-                    FinishHandler(cwd=bash_handler.cwd),
-                )
-
         self.messages: list[dict[str, Any]] = []
         self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
@@ -305,7 +279,7 @@ class BaseAgent:
 
             message = await self.chat_text(
                 self.messages,
-                tools=self.tools if self.enable_tools else None,
+                tools=(self.tools or None) if self.enable_tools else None,
             )
             self.messages.append(message.model_dump())
 

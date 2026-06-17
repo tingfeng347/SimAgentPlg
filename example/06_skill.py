@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, FinishHandler, ModelConfig
 
 SKILLS_DIR = Path(__file__).with_name("skills")
 
@@ -17,6 +17,7 @@ async def main() -> None:
             "Use the selected local skill to complete the task. "
             "Return the final deliverable in the run_finish summary."
         ),
+        handlers=[FinishHandler()],
         skills_dir=SKILLS_DIR,
         enable_tools=True,
     )

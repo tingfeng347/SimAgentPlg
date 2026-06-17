@@ -33,6 +33,19 @@ ECHO_TOOL = {
     },
 }
 
+DONE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "done",
+        "description": "Finish the current test task.",
+        "parameters": {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        },
+    },
+}
+
 
 @dataclass
 class FakeFunction:
@@ -104,6 +117,17 @@ class EchoHandler(MethodToolHandler):
         if not isinstance(text, str):
             return StepOutcome({"status": "error", "error": "text is required"})
         return StepOutcome({"status": "success", "text": text})
+
+
+class DoneHandler(MethodToolHandler):
+    def __init__(self) -> None:
+        super().__init__((DONE_TOOL,))
+
+    async def do_done(self, arguments: dict[str, Any]) -> StepOutcome:
+        return StepOutcome(
+            {"summary": arguments.get("summary", "")},
+            should_exit=True,
+        )
 
 
 class FakeMcpManager:
@@ -233,7 +257,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             {"status": "success", "text": "hello"},
         )
 
-    async def test_tool_mode_always_includes_builtin_handlers(self) -> None:
+    async def test_tool_mode_uses_only_explicit_handlers(self) -> None:
         echo = EchoHandler()
         agent = BaseAgent(
             TEST_CONFIG,
@@ -243,33 +267,30 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             client=FakeClient([]),
         )
 
-        self.assertIsInstance(agent.handlers[0], BashHandler)
-        self.assertIsInstance(agent.handlers[1], FinishHandler)
-        self.assertIs(agent.handlers[2], echo)
+        self.assertEqual(agent.handlers, [echo])
         self.assertEqual(
             [tool["function"]["name"] for tool in agent.tools],
-            ["bash_run", "run_finish", "echo"],
+            ["echo"],
         )
 
-    async def test_explicit_bash_handler_is_not_duplicated(self) -> None:
+    async def test_explicit_bash_handler_is_preserved_without_finish_injection(self) -> None:
         bash = BashHandler()
+        echo = EchoHandler()
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="tools",
-            handlers=[bash, EchoHandler()],
+            handlers=[bash, echo],
             enable_tools=True,
             client=FakeClient([]),
         )
 
+        self.assertEqual(agent.handlers, [bash, echo])
         self.assertEqual(
-            sum(isinstance(handler, BashHandler) for handler in agent.handlers),
-            1,
+            [tool["function"]["name"] for tool in agent.tools],
+            ["bash_run", "echo"],
         )
-        self.assertIs(agent.handlers[0], bash)
-        self.assertIsInstance(agent.handlers[1], FinishHandler)
-        self.assertEqual(agent.handlers[1].cwd, bash.cwd)
 
-    async def test_explicit_finish_handler_is_not_duplicated(self) -> None:
+    async def test_explicit_finish_handler_is_preserved(self) -> None:
         finish = FinishHandler()
         agent = BaseAgent(
             TEST_CONFIG,
@@ -279,14 +300,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             client=FakeClient([]),
         )
 
+        self.assertEqual(agent.handlers, [finish])
         self.assertEqual(
-            sum(
-                isinstance(handler, FinishHandler)
-                for handler in agent.handlers
-            ),
-            1,
+            [tool["function"]["name"] for tool in agent.tools],
+            ["run_finish"],
         )
-        self.assertIs(agent.handlers[1], finish)
 
     async def test_tool_disabled_mode_does_not_add_bash_handler(self) -> None:
         agent = BaseAgent(
@@ -339,7 +357,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         FakeToolCall(
                             id="call-2",
                             function=FakeFunction(
-                                "run_finish",
+                                "done",
                                 '{"summary": "recovered"}',
                             ),
                         )
@@ -350,7 +368,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="invalid-json",
-            handlers=[EchoHandler()],
+            handlers=[EchoHandler(), DoneHandler()],
             enable_tools=True,
             client=client,
         )
@@ -365,7 +383,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "error")
         self.assertIn("JSON object", payload["error"])
 
-    async def test_tool_mode_corrects_plain_text_until_finish(self) -> None:
+    async def test_tool_mode_corrects_plain_text_until_exit_tool(self) -> None:
         client = FakeClient(
             [
                 FakeMessage("premature answer"),
@@ -374,7 +392,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         FakeToolCall(
                             id="call-1",
                             function=FakeFunction(
-                                "run_finish",
+                                "done",
                                 '{"summary": "done"}',
                             ),
                         )
@@ -385,6 +403,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="finish-required",
+            handlers=[DoneHandler()],
             enable_tools=True,
             client=client,
         )
@@ -396,7 +415,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 message.get("role") == "system"
-                and "run_finish" in message.get("content", "")
+                and "完成工具" in message.get("content", "")
                 for message in second_messages
             )
         )
@@ -410,7 +429,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         FakeToolCall(
                             id="call-1",
                             function=FakeFunction(
-                                "run_finish",
+                                "done",
                                 '{"summary": "first"}',
                             ),
                         )
@@ -421,7 +440,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         FakeToolCall(
                             id="call-2",
                             function=FakeFunction(
-                                "run_finish",
+                                "done",
                                 '{"summary": "second"}',
                             ),
                         )
@@ -432,7 +451,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="task-hooks",
-            handlers=[handler],
+            handlers=[handler, DoneHandler()],
             enable_tools=True,
             client=client,
         )

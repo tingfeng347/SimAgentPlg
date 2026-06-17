@@ -79,17 +79,18 @@ await agent.shutdown()
 
 ### Tool Mode
 
-Set `enable_tools=True` to expose the built-in tools:
+Set `enable_tools=True` and pass explicit handlers to expose tools:
 
 ```python
 import json
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, BashHandler, FinishHandler, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="developer",
     system_prompt="Complete coding tasks using the available tools.",
+    handlers=[BashHandler(), FinishHandler()],
     enable_tools=True,
 )
 
@@ -103,7 +104,7 @@ print(report["changes"])
 await agent.shutdown()
 ```
 
-Tool-enabled agents automatically include two sibling handlers:
+Tool-enabled agents expose only the handlers passed to `BaseAgent`:
 
 ```text
 BaseAgent
@@ -117,7 +118,8 @@ BaseAgent
 
 `bash_run` executes a bounded Bash command. When the task is complete, the
 model must call `run_finish` with a non-empty summary. Returning ordinary text
-does not finish a tool task.
+does not finish a tool task. A custom tool may also finish a task by returning
+`StepOutcome(..., should_exit=True)`.
 
 `run_finish` returns a JSON result and exits the current `runtime()`:
 
@@ -141,7 +143,7 @@ the task can still finish with `changes.available` set to `false`.
 
 Tool mode stops with an error when:
 
-- `run_finish` is not called within `max_steps`
+- no finishing tool is called within `max_steps`
 - the same tool and arguments are requested three consecutive times
 
 ## Custom Tool Handlers

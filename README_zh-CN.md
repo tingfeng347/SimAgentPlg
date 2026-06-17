@@ -77,17 +77,18 @@ await agent.shutdown()
 
 ### 工具模式
 
-设置 `enable_tools=True` 后，Agent 会获得内置工具：
+设置 `enable_tools=True` 并显式传入 Handler 后，Agent 会获得对应工具：
 
 ```python
 import json
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, BashHandler, FinishHandler, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="developer",
     system_prompt="使用可用工具完成编程任务。",
+    handlers=[BashHandler(), FinishHandler()],
     enable_tools=True,
 )
 
@@ -101,7 +102,7 @@ print(report["changes"])
 await agent.shutdown()
 ```
 
-工具模式会自动加入两个同级的内置 Handler：
+工具模式只会暴露显式传给 `BaseAgent` 的 Handler：
 
 ```text
 BaseAgent
@@ -115,6 +116,7 @@ BaseAgent
 
 `bash_run` 用于执行受限制的 Bash 命令。任务完成后，模型必须调用
 `run_finish` 并提供非空的 `summary`。在工具模式下，直接返回普通文本不会结束任务。
+自定义工具也可以通过返回 `StepOutcome(..., should_exit=True)` 来结束任务。
 
 `run_finish` 会返回 JSON 结果，并立即结束当前 `runtime()`：
 
@@ -138,7 +140,7 @@ BaseAgent
 
 以下情况会导致工具模式报错：
 
-- 在 `max_steps` 内没有调用 `run_finish`
+- 在 `max_steps` 内没有调用任何会结束任务的工具
 - 相同工具和参数连续出现三次
 
 ## 自定义工具 Handler

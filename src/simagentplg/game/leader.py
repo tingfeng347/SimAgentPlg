@@ -32,7 +32,7 @@ DIPLOMACY_PROPOSALS = (
     "peace",
     "war",
 )
-PETITION_TYPES = ("resources", "weather", "protection", "territory", "miracle", "peace")
+PETITION_TYPES = ("resources", "weather", "protection", "territory")
 URGENCY_LEVELS = ("low", "medium", "high")
 
 LEADER_SYSTEM_PROMPT = """
@@ -43,9 +43,21 @@ submit_leader_turn exactly once. Keep strategy_summary concise and never reveal
 private chain-of-thought.
 
 Use only the exact enum values exposed by the submit_leader_turn tool schema.
-If no legal action is obvious, submit a conservative no-op plan with empty
-order arrays. Never invent action names, resource names, faction IDs, or
-coordinates.
+Enum fields, resource names, faction IDs, action names, and coordinates must
+stay in the exact English values required by the schema. All human-facing
+narrative text must be written in Simplified Chinese, including turn_intent,
+strategy_summary, public_decree, diplomacy message, petition reason, and
+resource purpose. Never write petitions, decrees, or strategy plans in English.
+
+You are competing for land, food, safety, and long-term survival. Peace is a
+strategy, not the default ending. Do not repeatedly propose alliances that
+already exist. If borders touch and you have enough soldiers, consider war,
+raids, fortification, or deterrence.
+
+Population grows through food, safety, and settlement; never petition the god
+for people. Petitions may ask only for god powers: resources, weather,
+protection, or unowned territory. Never invent action names, resource names,
+faction IDs, petition types, or coordinates.
 """.strip()
 
 
@@ -290,7 +302,10 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
         "parameters": {
             "type": "object",
             "properties": {
-                "turn_intent": {"type": "string"},
+                "turn_intent": {
+                    "type": "string",
+                    "description": "本回合意图，必须使用简体中文。",
+                },
                 "population_orders": {
                     "type": "array",
                     "items": {
@@ -312,7 +327,10 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                             "resource": {"type": "string", "enum": list(RESOURCE_TYPES)},
                             "action": {"type": "string", "enum": list(RESOURCE_ACTIONS)},
                             "amount": {"type": "integer", "minimum": 0},
-                            "purpose": {"type": "string"},
+                            "purpose": {
+                                "type": "string",
+                                "description": "资源用途说明，必须使用简体中文。",
+                            },
                         },
                         "required": ["resource", "action", "amount"],
                     },
@@ -360,7 +378,10 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                                 "type": "string",
                                 "enum": list(DIPLOMACY_PROPOSALS),
                             },
-                            "message": {"type": "string"},
+                            "message": {
+                                "type": "string",
+                                "description": "外交说明，必须使用简体中文。",
+                            },
                         },
                         "required": ["target_faction", "proposal"],
                     },
@@ -372,14 +393,23 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                         "properties": {
                             "type": {"type": "string", "enum": list(PETITION_TYPES)},
                             "request": {"type": "object"},
-                            "reason": {"type": "string"},
+                            "reason": {
+                                "type": "string",
+                                "description": "向上帝祈求的理由，必须使用简体中文。",
+                            },
                             "urgency": {"type": "string", "enum": list(URGENCY_LEVELS)},
                         },
                         "required": ["type", "reason"],
                     },
                 },
-                "public_decree": {"type": "string"},
-                "strategy_summary": {"type": "string"},
+                "public_decree": {
+                    "type": "string",
+                    "description": "面向族人的公开法令，必须使用简体中文。",
+                },
+                "strategy_summary": {
+                    "type": "string",
+                    "description": "面向玩家展示的计划总结，必须使用简体中文。",
+                },
             },
             "required": ["turn_intent"],
         },
@@ -547,9 +577,15 @@ def _build_leader_task(
         for tile in world.faction_tiles(faction_id)
     ]
     expansion_candidates = _expansion_candidates(world, faction_id)
+    border_targets = _border_enemy_targets(world, faction_id)
+    dangerous_weather = _dangerous_weather_tiles(world, faction_id)
     lines = [
         f"You lead faction {faction.name} ({faction_id}) at world tick {world.tick}.",
+        f"Faction doctrine: {_faction_doctrine(faction_id)}",
         "Use inspect tools if needed, then call submit_leader_turn.",
+        "Important language rule: write every player-facing sentence in Simplified Chinese / 简体中文。",
+        "必须使用简体中文的字段：turn_intent, strategy_summary, public_decree, petition.reason, diplomacy message, resource purpose。",
+        "Keep only enum/action/resource/faction IDs in English so the rule engine can parse them.",
         "Legal values:",
         f"- population task: {', '.join(POPULATION_TASKS)}",
         f"- resource action: {', '.join(RESOURCE_ACTIONS)}",
@@ -557,15 +593,22 @@ def _build_leader_task(
         f"- military action: {', '.join(MILITARY_ACTIONS)}",
         f"- diplomacy proposal: {', '.join(DIPLOMACY_PROPOSALS)}",
         f"- petition type: {', '.join(PETITION_TYPES)}",
-        "Use only visible coordinates. For a safe turn, submit empty order arrays.",
+        "Use only visible coordinates.",
+        "Do not refresh diplomacy that already matches the current relation.",
+        "Alliance from neutral is only a first trust step; war is valid when border pressure, crowding, or resource competition make peace costly.",
+        "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
+        "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
+        "Good Chinese output examples: public_decree='粮仓告急，全族优先耕作。', strategy_summary='扩大东侧农田并防备兽人边境。', petition reason='粮食不足，请求上帝赐予应急粮食。'",
         f"Resources: {faction.resources.as_dict()}",
         f"Population: {world.total_population(faction_id)}",
         f"Soldiers: {world.total_soldiers(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",
         f"Owned tiles: {owned_tiles}",
         f"Legal expansion candidates: {expansion_candidates[:8]}",
+        f"Border enemy targets for legal war/raid planning: {border_targets[:8]}",
+        f"Dangerous weather on your land: {dangerous_weather[:8]}",
         f"Diplomacy: {faction.diplomacy}",
-        "Safe no-op submit example: turn_intent='consolidate', all order arrays empty, strategy_summary='Hold position.'",
+        "Only submit a no-op if there are no useful economic, defensive, expansion, or war actions.",
     ]
     if feedback:
         lines.extend(
@@ -611,6 +654,63 @@ def _expansion_candidates(
                 "weather": neighbor.weather,
             }
     return [candidates[key] for key in sorted(candidates)]
+
+
+def _border_enemy_targets(
+    world: WorldState,
+    faction_id: str,
+) -> list[dict[str, Any]]:
+    targets: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+    relation_map = world.factions[faction_id].diplomacy
+    for origin in world.faction_tiles(faction_id):
+        soldiers = origin.soldiers_of(faction_id)
+        if soldiers <= 0:
+            continue
+        for target in world.neighbors(origin.x, origin.y):
+            if target.owner is None or target.owner == faction_id:
+                continue
+            if not target.is_passable() or not world.is_visible(faction_id, target.x, target.y):
+                continue
+            targets[(origin.x, origin.y, target.x, target.y)] = {
+                "origin": {"x": origin.x, "y": origin.y},
+                "target": {"x": target.x, "y": target.y},
+                "owner": target.owner,
+                "relation": relation_map.get(target.owner, "neutral"),
+                "origin_soldiers": soldiers,
+                "target_soldiers": target.soldiers_of(target.owner),
+                "target_population": target.population_of(target.owner),
+                "terrain": target.terrain,
+                "weather": target.weather,
+                "protected": target.protected,
+            }
+    return [targets[key] for key in sorted(targets)]
+
+
+def _dangerous_weather_tiles(
+    world: WorldState,
+    faction_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "x": tile.x,
+            "y": tile.y,
+            "weather": tile.weather,
+            "population": tile.population_of(faction_id),
+            "soldiers": tile.soldiers_of(faction_id),
+        }
+        for tile in world.faction_tiles(faction_id)
+        if tile.weather in {"drought", "storm"}
+    ]
+
+
+def _faction_doctrine(faction_id: str) -> str:
+    if faction_id == "orc":
+        return "Aggressive raiders. Prefer expansion, mustering, raids, and war when strong border targets exist."
+    if faction_id == "elf":
+        return "Defensive stewards. Prefer forests, protection, and alliances, but strike first against border crowding or threats."
+    if faction_id == "human":
+        return "Pragmatic settlers. Expand into open land first, then use war or deterrence when boxed in."
+    return "Survive, expand, and protect your people."
 
 
 def _requested_coordinates(arguments: Mapping[str, Any]) -> list[tuple[int, int]]:

@@ -10,6 +10,7 @@ from simagentplg.game.leader import (
 from simagentplg.game.npc import NPCExecutor
 from simagentplg.game.render import render_inbox, render_log, render_map, render_status
 from simagentplg.game.rules import RuleCheck, RuleEngine
+from simagentplg.game.web import create_engine, create_game_app, serialize_state
 from simagentplg.game.world import (
     DEFAULT_FACTIONS,
     RESOURCE_TYPES,
@@ -36,6 +37,9 @@ __all__ = [
     "NPCExecutor",
     "RuleCheck",
     "RuleEngine",
+    "create_engine",
+    "create_game_app",
+    "serialize_state",
     "WorldState",
     "Tile",
     "Faction",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from simagentplg.game.god import GodSystem
@@ -68,7 +69,8 @@ class GameEngine:
         return self.world
 
     async def _run_strategic_turns(self) -> None:
-        for faction_id in sorted(self.world.factions):
+        faction_ids = sorted(self.world.factions)
+        for faction_id in faction_ids:
             controller = self.leaders.get(faction_id)
             if controller is None:
                 self.world.pause(
@@ -76,31 +78,42 @@ class GameEngine:
                 )
                 return
 
-            feedback: str | None = None
-            accepted = False
-            for attempt in range(self.retry_limit + 1):
-                try:
-                    decision = await controller.decide(
-                        self.world,
-                        feedback=feedback,
+        pending = set(faction_ids)
+        feedback_by_faction: dict[str, str | None] = {
+            faction_id: None for faction_id in faction_ids
+        }
+
+        for attempt in range(self.retry_limit + 1):
+            results = await asyncio.gather(
+                *(
+                    self._ask_leader(
+                        faction_id,
+                        feedback_by_faction[faction_id],
                     )
-                except Exception as exc:
+                    for faction_id in sorted(pending)
+                ),
+                return_exceptions=True,
+            )
+
+            for result in results:
+                if isinstance(result, Exception):
                     self.world.pause(
-                        f"Leader {faction_id} failed to decide: {exc}"
+                        f"Leader failed to decide: {result}"
                     )
                     return
 
-                check = self.rules.validate_decision(
+                faction_id, decision = result
+                check = self.rules.apply_decision(
                     self.world,
                     faction_id,
                     decision,
                 )
                 if check.accepted:
-                    self.rules.apply_decision(self.world, faction_id, decision)
-                    accepted = True
-                    break
+                    pending.discard(faction_id)
+                    continue
 
                 feedback = "; ".join(check.errors)
+                feedback_by_faction[faction_id] = feedback
                 self.world.add_event(
                     "rule_reject",
                     (
@@ -110,11 +123,32 @@ class GameEngine:
                     faction_id=faction_id,
                 )
 
-            if not accepted:
-                self.world.pause(
-                    f"Leader {faction_id} exceeded invalid decision retry limit"
-                )
-                return
+            if not pending:
+                break
+
+        if pending:
+            failed = ", ".join(sorted(pending))
+            self.world.pause(
+                f"Leader(s) {failed} exceeded invalid decision retry limit"
+            )
+            return
+
+    async def _ask_leader(
+        self,
+        faction_id: str,
+        feedback: str | None,
+    ) -> tuple[str, LeaderDecision]:
+        controller = self.leaders[faction_id]
+        try:
+            decision = await controller.decide(
+                self.world,
+                feedback=feedback,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Leader {faction_id} failed to decide: {exc}"
+            ) from exc
+        return faction_id, decision
 
     def _advance_weather(self) -> None:
         for tile in self.world.tiles:

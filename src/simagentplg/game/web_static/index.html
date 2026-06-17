@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>上帝模拟器</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="map-pane">
+        <header class="topbar">
+          <div>
+            <h1>上帝模拟器</h1>
+            <p id="worldMeta">第 0 刻</p>
+          </div>
+          <div class="tick-controls">
+            <button id="tickOne" type="button">推进 1 刻</button>
+            <button id="tickFive" type="button">推进 5 刻</button>
+          </div>
+        </header>
+
+        <div id="pauseBanner" class="pause-banner" hidden></div>
+        <canvas id="worldCanvas" width="960" height="640"></canvas>
+        <div id="tileTip" class="tile-tip" hidden></div>
+
+        <section class="god-tools" aria-label="上帝工具">
+          <div class="tool-group">
+            <label>
+              赐给
+              <select id="factionSelect"></select>
+            </label>
+            <label>
+              资源
+              <select id="resourceSelect"></select>
+            </label>
+            <label>
+              数量
+              <input id="resourceAmount" type="number" min="1" value="50" />
+            </label>
+            <button id="giveButton" type="button">赐予</button>
+          </div>
+
+          <div class="tool-group">
+            <label>
+              X
+              <input id="coordX" type="number" min="0" value="0" />
+            </label>
+            <label>
+              Y
+              <input id="coordY" type="number" min="0" value="0" />
+            </label>
+            <label>
+              天气
+              <select id="weatherSelect"></select>
+            </label>
+            <button id="weatherButton" type="button">改变天气</button>
+            <label>
+              划给
+              <select id="claimFactionSelect"></select>
+            </label>
+            <button id="claimButton" type="button">划给领土</button>
+          </div>
+        </section>
+      </section>
+
+      <aside class="side-pane">
+        <section class="panel">
+          <h2>种族</h2>
+          <div id="factions"></div>
+        </section>
+
+        <section class="panel">
+          <h2>祈求</h2>
+          <div id="petitions"></div>
+        </section>
+
+        <section class="panel events-panel">
+          <h2>事件</h2>
+          <div id="events"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

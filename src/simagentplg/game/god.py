@@ -129,10 +129,5 @@ class GodSystem:
             x = int(request["x"])
             y = int(request["y"])
             self.protect_tile(x, y, True)
-        elif kind == "peace":
-            target = str(request["target_faction"])
-            self.world.factions[faction_id].diplomacy[target] = "neutral"
-            self.world.factions[target].diplomacy[faction_id] = "neutral"
-        elif kind == "miracle":
-            self.world.factions[faction_id].resources.add("food", 20)
-            self.world.factions[faction_id].resources.add("wood", 20)
+        else:
+            raise ValueError(f"unsupported petition kind {kind!r}")

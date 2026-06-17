@@ -1,4 +1,6 @@
 import json
+import asyncio
+import time
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -16,6 +18,11 @@ from simagentplg.game import (
     render_inbox,
     render_map,
     render_status,
+)
+from simagentplg.game.leader import (
+    LEADER_SYSTEM_PROMPT,
+    SUBMIT_LEADER_TURN_TOOL,
+    _build_leader_task,
 )
 
 TEST_CONFIG = ModelConfig(
@@ -92,6 +99,23 @@ class ScriptedLeader:
         return self.decisions[0]
 
 
+class DelayedLeader:
+    def __init__(self, faction_id: str, delay: float = 0.05) -> None:
+        self.faction_id = faction_id
+        self.delay = delay
+        self.calls = 0
+
+    async def decide(
+        self,
+        world,
+        *,
+        feedback: str | None = None,
+    ) -> LeaderDecision:
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        return hold()
+
+
 def hold() -> LeaderDecision:
     return LeaderDecision(turn_intent="hold position")
 
@@ -130,6 +154,29 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         engine.god.answer_petition(1, True)
         self.assertEqual(world.petitions[0].status, "approved")
         self.assertEqual(world.factions["human"].resources.wood, 85)
+
+    def test_world_merges_duplicate_pending_petitions(self) -> None:
+        world = create_default_world(seed=11)
+
+        first = world.add_petition(
+            faction_id="human",
+            kind="resources",
+            request={"resource": "food", "amount": 30},
+            reason="low granary",
+            urgency="medium",
+        )
+        second = world.add_petition(
+            faction_id="human",
+            kind="resources",
+            request={"resource": "food", "amount": 80},
+            reason="famine worsened",
+            urgency="high",
+        )
+
+        self.assertIs(first, second)
+        self.assertEqual(len(world.petitions), 1)
+        self.assertEqual(world.petitions[0].request["amount"], 80)
+        self.assertEqual(world.petitions[0].urgency, "high")
 
     def test_rule_engine_rejects_illegal_leader_orders(self) -> None:
         world = create_default_world(seed=2)
@@ -184,6 +231,114 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(world.factions["human"].resources.food, before_food)
         self.assertEqual(world.tile_at(*target).owner, "human")
+
+    def test_npc_grows_population_from_food_and_capacity(self) -> None:
+        world = create_default_world(seed=31)
+        npc = NPCExecutor()
+        world.tick = 5
+        before = world.total_population("human")
+
+        npc.apply_passive_tick(world)
+
+        self.assertGreater(world.total_population("human"), before)
+        self.assertTrue(any(event.kind == "population" for event in world.events))
+
+    def test_weather_damages_population_on_owned_tiles(self) -> None:
+        world = create_default_world(seed=32)
+        npc = NPCExecutor()
+        tile = world.faction_tiles("human")[0]
+        tile.weather = "storm"
+        world.tick = 1
+        before = tile.population_of("human")
+
+        npc.apply_passive_tick(world)
+
+        self.assertLess(tile.population_of("human"), before)
+        self.assertTrue(any(event.kind == "weather" for event in world.events))
+
+    def test_military_attack_can_capture_enemy_territory(self) -> None:
+        world = create_default_world(seed=33)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "elf"
+        target.population = {"elf": 10}
+        target.soldiers = {"elf": 1}
+        origin.soldiers["human"] = 30
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "declare war and seize the border",
+                "diplomacy_orders": [
+                    {"target_faction": "elf", "proposal": "war"}
+                ],
+                "military_orders": [
+                    {
+                        "action": "attack",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": target.x, "y": target.y},
+                        "force_ratio": 0.8,
+                    }
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(world.factions["human"].relation_to("elf"), "war")
+        self.assertTrue(any(event.kind == "battle" for event in world.events))
+
+    def test_petitions_are_limited_to_god_owned_powers(self) -> None:
+        world = create_default_world(seed=34)
+        rules = RuleEngine()
+        miracle = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "ask for people",
+                "petitions": [
+                    {"type": "miracle", "reason": "give us more citizens"}
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", miracle)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("unknown type" in error for error in check.errors))
+
+    def test_alliance_from_neutral_requires_trust_step(self) -> None:
+        world = create_default_world(seed=35)
+        rules = RuleEngine()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "seek alliance",
+                "diplomacy_orders": [
+                    {"target_faction": "elf", "proposal": "alliance"}
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+
+        self.assertTrue(check.accepted, check.errors)
+        self.assertEqual(world.factions["human"].relation_to("elf"), "non_aggression")
+
+    def test_leader_prompts_require_chinese_narrative_output(self) -> None:
+        world = create_default_world(seed=36)
+        task = _build_leader_task(world, "human", None)
+        schema = SUBMIT_LEADER_TURN_TOOL["function"]["parameters"]["properties"]
+
+        self.assertIn("Simplified Chinese", LEADER_SYSTEM_PROMPT)
+        self.assertIn("简体中文", task)
+        self.assertIn("turn_intent", task)
+        self.assertIn("public_decree", task)
+        self.assertIn("petition.reason", task)
+        self.assertIn("必须使用简体中文", schema["turn_intent"]["description"])
+        self.assertIn("必须使用简体中文", schema["public_decree"]["description"])
+        self.assertIn("必须使用简体中文", schema["strategy_summary"]["description"])
 
     async def test_llm_leader_controller_submits_game_only_tool(self) -> None:
         world = create_default_world(seed=4)
@@ -262,6 +417,27 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(event.kind == "rule_reject" for event in world.events)
         )
+
+    async def test_engine_asks_leaders_in_parallel(self) -> None:
+        world = create_default_world(seed=8)
+        leaders = {
+            faction_id: DelayedLeader(faction_id, delay=0.08)
+            for faction_id in world.factions
+        }
+        engine = GameEngine(
+            world,
+            strategy_interval=1,
+            leaders=leaders,
+        )
+
+        started = time.perf_counter()
+        await engine.tick()
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.18)
+        self.assertFalse(world.paused)
+        for leader in leaders.values():
+            self.assertEqual(leader.calls, 1)
 
     async def test_engine_pauses_after_repeated_illegal_llm_decisions(self) -> None:
         world = create_default_world(seed=6)

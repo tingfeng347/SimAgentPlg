@@ -22,6 +22,7 @@ register the agent object directly with `manager.register(agent)`.
 - `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 - `06_skill.py`: local skill discovery, routing, template, and sample injection
 - `07_god_simulator.py`: LLM-led god sandbox MVP with a CLI
+- `08_god_simulator_web.py`: LLM-led god sandbox MVP in a browser
 
 Tool-enabled agents expose only the handlers explicitly passed to
 `BaseAgent`. `BashHandler` provides `bash_run`, while `FinishHandler` provides
@@ -40,3 +41,5 @@ the model used to route the task to a skill; when omitted, it defaults to
 
 The god simulator example requires model credentials because every faction
 leader is controlled by an LLM agent at strategic turns.
+The web version starts a local FastAPI server and opens at
+`http://127.0.0.1:8000` by default.

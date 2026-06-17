@@ -227,6 +227,23 @@ class WorldState:
         reason: str,
         urgency: str = "medium",
     ) -> Petition:
+        signature = _petition_signature(faction_id, kind, request)
+        for petition in self.petitions:
+            if petition.status != "pending":
+                continue
+            if _petition_signature(petition.faction_id, petition.kind, petition.request) != signature:
+                continue
+            petition.request = _merge_petition_request(kind, petition.request, request)
+            petition.reason = reason
+            petition.urgency = _max_urgency(petition.urgency, urgency)
+            petition.created_tick = self.tick
+            self.add_event(
+                "petition",
+                f"{faction_id} updated petition for {kind}: {reason}",
+                faction_id=faction_id,
+            )
+            return petition
+
         petition = Petition(
             petition_id=self._next_petition_id,
             faction_id=faction_id,
@@ -340,3 +357,35 @@ def _seed_faction_land(
 def _check_resource(resource: str) -> None:
     if resource not in RESOURCE_TYPES:
         raise ValueError(f"unknown resource {resource!r}")
+
+
+def _petition_signature(
+    faction_id: str,
+    kind: str,
+    request: dict[str, Any],
+) -> tuple[object, ...]:
+    if kind == "resources":
+        return (faction_id, kind, request.get("resource"))
+    if kind in {"weather", "protection", "territory"}:
+        return (faction_id, kind, request.get("x"), request.get("y"))
+    return (faction_id, kind)
+
+
+def _merge_petition_request(
+    kind: str,
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(current)
+    merged.update(incoming)
+    if kind == "resources" and current.get("resource") == incoming.get("resource"):
+        try:
+            merged["amount"] = max(int(current.get("amount", 0)), int(incoming.get("amount", 0)))
+        except (TypeError, ValueError):
+            pass
+    return merged
+
+
+def _max_urgency(first: str, second: str) -> str:
+    ranks = {"low": 0, "medium": 1, "high": 2}
+    return first if ranks.get(first, 1) >= ranks.get(second, 1) else second

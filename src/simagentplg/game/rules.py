@@ -33,7 +33,7 @@ DIPLOMACY_PROPOSALS = {
     "peace",
     "war",
 }
-PETITION_TYPES = {"resources", "weather", "protection", "territory", "miracle", "peace"}
+PETITION_TYPES = {"resources", "weather", "protection", "territory"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +62,7 @@ class RuleEngine:
         errors.extend(self._validate_territory_orders(world, faction_id, decision))
         errors.extend(self._validate_military_orders(world, faction_id, decision))
         errors.extend(self._validate_diplomacy_orders(world, faction_id, decision))
-        errors.extend(self._validate_petitions(decision))
+        errors.extend(self._validate_petitions(world, faction_id, decision))
         return RuleCheck(not errors, tuple(errors))
 
     def apply_decision(
@@ -78,10 +78,17 @@ class RuleEngine:
         faction = world.factions[faction_id]
         faction.active_orders = decision.as_dict()
         for order in decision.diplomacy_orders:
-            self._apply_diplomacy(world, faction_id, order.target_faction, order.proposal)
+            relation, changed = self._apply_diplomacy(
+                world,
+                faction_id,
+                order.target_faction,
+                order.proposal,
+            )
+            if not changed:
+                continue
             world.add_event(
                 "diplomacy",
-                f"{faction_id} proposed {order.proposal} to {order.target_faction}",
+                f"{faction_id} set relation with {order.target_faction} to {relation}",
                 faction_id=faction_id,
             )
 
@@ -197,6 +204,11 @@ class RuleEngine:
         decision: LeaderDecision,
     ) -> list[str]:
         errors: list[str] = []
+        declared_war_targets = {
+            order.target_faction
+            for order in decision.diplomacy_orders
+            if order.proposal == "war"
+        }
         for index, order in enumerate(decision.military_orders, start=1):
             label = f"military_order {index}"
             if order.action not in MILITARY_ACTIONS:
@@ -224,6 +236,11 @@ class RuleEngine:
                 target_tile = world.tile_at(*order.target)
                 if target_tile.owner in {None, faction_id}:
                     errors.append(f"{label}: target must be enemy-owned")
+                elif (
+                    world.factions[faction_id].relation_to(target_tile.owner) == "allied"
+                    and target_tile.owner not in declared_war_targets
+                ):
+                    errors.append(f"{label}: must declare war before attacking an ally")
                 if target_tile.protected:
                     errors.append(f"{label}: target is protected by god")
         return errors
@@ -244,13 +261,60 @@ class RuleEngine:
                 errors.append(f"diplomacy_order {index}: unknown proposal {order.proposal!r}")
         return errors
 
-    def _validate_petitions(self, decision: LeaderDecision) -> list[str]:
+    def _validate_petitions(
+        self,
+        world: WorldState,
+        faction_id: str,
+        decision: LeaderDecision,
+    ) -> list[str]:
         errors: list[str] = []
         for index, petition in enumerate(decision.petitions, start=1):
+            label = f"petition {index}"
             if petition.kind not in PETITION_TYPES:
-                errors.append(f"petition {index}: unknown type {petition.kind!r}")
+                errors.append(f"{label}: unknown type {petition.kind!r}")
+                continue
             if not petition.reason:
-                errors.append(f"petition {index}: reason is required")
+                errors.append(f"{label}: reason is required")
+
+            if petition.kind == "resources":
+                resource = str(petition.request.get("resource", "")).strip()
+                amount = _int(petition.request.get("amount"), 0)
+                if resource not in RESOURCE_TYPES:
+                    errors.append(f"{label}: resource petition needs a valid resource")
+                if amount <= 0:
+                    errors.append(f"{label}: resource petition amount must be positive")
+                if amount > 250:
+                    errors.append(f"{label}: resource petition amount exceeds god-grant limit")
+            elif petition.kind == "weather":
+                target = _request_target(petition.request)
+                weather = str(petition.request.get("weather", "")).strip()
+                if target is None:
+                    errors.append(f"{label}: weather petition needs x and y")
+                else:
+                    errors.extend(self._validate_visible_target(world, faction_id, target, label))
+                if weather not in WEATHER_TYPES:
+                    errors.append(f"{label}: weather petition needs a valid weather")
+            elif petition.kind == "protection":
+                target = _request_target(petition.request)
+                if target is None:
+                    errors.append(f"{label}: protection petition needs x and y")
+                else:
+                    errors.extend(self._validate_visible_target(world, faction_id, target, label))
+            elif petition.kind == "territory":
+                target = _request_target(petition.request)
+                if target is None:
+                    errors.append(f"{label}: territory petition needs x and y")
+                    continue
+                errors.extend(self._validate_visible_target(world, faction_id, target, label))
+                if not world.in_bounds(*target):
+                    continue
+                tile = world.tile_at(*target)
+                if tile.owner is not None:
+                    errors.append(f"{label}: territory petition target must be unowned")
+                if not tile.is_passable():
+                    errors.append(f"{label}: territory petition target must be passable")
+                if not self._adjacent_to_owned(world, faction_id, target):
+                    errors.append(f"{label}: territory petition target must border owned territory")
         return errors
 
     def _validate_visible_target(
@@ -280,20 +344,45 @@ class RuleEngine:
     def _adjacent(first: tuple[int, int], second: tuple[int, int]) -> bool:
         return abs(first[0] - second[0]) + abs(first[1] - second[1]) == 1
 
-    @staticmethod
     def _apply_diplomacy(
+        self,
         world: WorldState,
         faction_id: str,
         other_id: str,
         proposal: str,
-    ) -> None:
-        relation = {
-            "war": "war",
-            "peace": "neutral",
-            "alliance": "allied",
-            "non_aggression": "non_aggression",
-            "trade": "trade",
-            "tribute": "tribute",
-        }[proposal]
+    ) -> tuple[str, bool]:
+        current = world.factions[faction_id].relation_to(other_id)
+        if proposal == "alliance":
+            relation = "allied" if current in {"non_aggression", "trade", "allied"} else "non_aggression"
+        else:
+            relation = {
+                "war": "war",
+                "peace": "neutral",
+                "non_aggression": "non_aggression",
+                "trade": "trade",
+                "tribute": "tribute",
+            }[proposal]
+        if (
+            world.factions[faction_id].relation_to(other_id) == relation
+            and world.factions[other_id].relation_to(faction_id) == relation
+        ):
+            return relation, False
         world.factions[faction_id].diplomacy[other_id] = relation
         world.factions[other_id].diplomacy[faction_id] = relation
+        return relation, True
+
+
+def _request_target(request: dict[str, object]) -> tuple[int, int] | None:
+    try:
+        return (int(request["x"]), int(request["y"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default

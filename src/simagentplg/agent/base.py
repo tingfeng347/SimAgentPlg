@@ -15,7 +15,7 @@ from simagentplg.plugins.skill.skill_manager import SkillManager
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
 
-logger = get_logger("BASEAGENT")
+
 
 TOOL_COMPLETION_PROMPT = """
 工具模式下，只有调用一个会结束任务的工具才表示任务完成。
@@ -136,6 +136,7 @@ class BaseAgent:
         self._last_skill_name: str | None = None
         self._last_tool_signature: tuple[str, str] | None = None
         self._repeated_tool_calls = 0
+        self.logger = get_logger(f"{self.agent_id}")
         self.reset()
 
     @property
@@ -190,7 +191,7 @@ class BaseAgent:
                 try:
                     await handler.shutdown()
                 except Exception as shutdown_error:
-                    logger.warning(
+                    self.logger.warning(
                         "Handler %s 回滚关闭失败: %s",
                         type(handler).__name__,
                         shutdown_error,
@@ -274,7 +275,7 @@ class BaseAgent:
         self.messages.append({"role": "user", "content": task})
 
         for turn in range(self.max_steps):
-            logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
+            self.logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
             await self._inject_skill_messages()
 
             message = await self.chat_text(
@@ -402,7 +403,7 @@ class BaseAgent:
                 raise TypeError("tool arguments must be a JSON object")
             return await self.dispatch(tool_name, arguments)
         except Exception as exc:
-            logger.warning("工具 %s 执行失败: %s", tool_name, exc)
+            self.logger.warning("工具 %s 执行失败: %s", tool_name, exc)
             return StepOutcome(
                 {
                     "status": "error",

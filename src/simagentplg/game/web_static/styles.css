@@ -171,7 +171,7 @@ h2 {
 }
 
 .tool-group:nth-child(2) {
-  grid-template-columns: repeat(3, minmax(80px, 1fr)) auto minmax(110px, 1fr) auto;
+  grid-template-columns: repeat(4, minmax(76px, 1fr)) auto minmax(110px, 1fr) auto;
 }
 
 .side-pane {

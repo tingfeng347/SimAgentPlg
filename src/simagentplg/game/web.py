@@ -37,6 +37,7 @@ class WeatherRequest(BaseModel):
     x: int
     y: int
     weather: str
+    duration: int | None = Field(default=None, ge=0, le=50)
 
 
 class ClaimRequest(BaseModel):
@@ -115,6 +116,7 @@ def create_game_app(engine: GameEngine | None = None) -> FastAPI:
                 request.x,
                 request.y,
                 request.weather,
+                request.duration,
             )
         except Exception as exc:
             return _error(exc)
@@ -163,8 +165,15 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
                 "terrain": tile.terrain,
                 "owner": tile.owner,
                 "weather": tile.weather,
+                "weather_duration": tile.weather_duration,
                 "population": dict(tile.population),
                 "soldiers": dict(tile.soldiers),
+                "professions": {
+                    faction_id: tile.professions_of(faction_id)
+                    for faction_id in tile.population
+                },
+                "houses": tile.houses,
+                "capacity": tile.capacity(),
                 "protected": tile.protected,
             }
             for tile in world.tiles
@@ -177,8 +186,17 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
                 "resources": faction.resources.as_dict(),
                 "population": world.total_population(faction_id),
                 "soldiers": world.total_soldiers(faction_id),
+                "jobs": world.total_jobs(faction_id),
+                "houses": world.total_houses(faction_id),
+                "population_capacity": world.population_capacity(faction_id),
                 "territory_count": len(world.faction_tiles(faction_id)),
-                "diplomacy": dict(faction.diplomacy),
+                "known_factions": sorted(faction.known_factions),
+                "diplomacy": {
+                    other_id: faction.relation_to(other_id)
+                    for other_id in sorted(faction.known_factions)
+                    if other_id != faction_id
+                },
+                "last_plan_snapshot": dict(faction.last_plan_snapshot),
             }
             for faction_id, faction in sorted(world.factions.items())
         ],

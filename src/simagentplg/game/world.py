@@ -8,6 +8,15 @@ RESOURCE_TYPES = ("food", "wood", "stone")
 WEATHER_TYPES = ("clear", "rain", "drought", "storm")
 TERRAIN_TYPES = ("plain", "forest", "hill", "water", "mountain")
 DEFAULT_FACTIONS = ("human", "elf", "orc")
+PROFESSION_TYPES = ("farmer", "lumberjack", "miner", "builder", "idle")
+BASE_TILE_CAPACITY = {
+    "plain": 60,
+    "forest": 45,
+    "hill": 35,
+    "water": 0,
+    "mountain": 0,
+}
+HOUSE_CAPACITY = 5
 
 
 @dataclass(slots=True)
@@ -58,8 +67,11 @@ class Tile:
     terrain: str
     owner: str | None = None
     weather: str = "clear"
+    weather_duration: int = 0
     population: dict[str, int] = field(default_factory=dict)
     soldiers: dict[str, int] = field(default_factory=dict)
+    professions: dict[str, dict[str, int]] = field(default_factory=dict)
+    houses: int = 0
     protected: bool = False
 
     def __post_init__(self) -> None:
@@ -73,6 +85,47 @@ class Tile:
 
     def soldiers_of(self, faction_id: str) -> int:
         return self.soldiers.get(faction_id, 0)
+
+    def professions_of(self, faction_id: str) -> dict[str, int]:
+        self.ensure_professions(faction_id)
+        return dict(self.professions.get(faction_id, {}))
+
+    def ensure_professions(self, faction_id: str) -> None:
+        population = self.population_of(faction_id)
+        current = self.professions.setdefault(
+            faction_id,
+            {profession: 0 for profession in PROFESSION_TYPES},
+        )
+        for profession in PROFESSION_TYPES:
+            current.setdefault(profession, 0)
+        total = sum(current.values())
+        if total < population:
+            current["idle"] += population - total
+        elif total > population:
+            surplus = total - population
+            for profession in ("idle", "builder", "miner", "lumberjack", "farmer"):
+                remove = min(current.get(profession, 0), surplus)
+                current[profession] = current.get(profession, 0) - remove
+                surplus -= remove
+                if surplus <= 0:
+                    break
+        if population <= 0:
+            self.professions.pop(faction_id, None)
+
+    def set_population(self, faction_id: str, amount: int) -> None:
+        self.population[faction_id] = max(0, amount)
+        if self.population[faction_id] <= 0:
+            self.population.pop(faction_id, None)
+        self.ensure_professions(faction_id)
+
+    def change_population(self, faction_id: str, delta: int) -> int:
+        before = self.population_of(faction_id)
+        after = max(0, before + delta)
+        self.set_population(faction_id, after)
+        return after - before
+
+    def capacity(self) -> int:
+        return BASE_TILE_CAPACITY[self.terrain] + self.houses * HOUSE_CAPACITY
 
     def is_passable(self) -> bool:
         return self.terrain not in {"water", "mountain"}
@@ -134,6 +187,8 @@ class Faction:
     resources: ResourceStockpile = field(default_factory=ResourceStockpile)
     diplomacy: dict[str, str] = field(default_factory=dict)
     active_orders: dict[str, Any] = field(default_factory=dict)
+    known_factions: set[str] = field(default_factory=set)
+    last_plan_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def relation_to(self, other_faction: str) -> str:
         return self.diplomacy.get(other_faction, "neutral")
@@ -190,17 +245,59 @@ class WorldState:
     def total_soldiers(self, faction_id: str) -> int:
         return sum(tile.soldiers_of(faction_id) for tile in self.tiles)
 
+    def total_houses(self, faction_id: str) -> int:
+        return sum(tile.houses for tile in self.faction_tiles(faction_id))
+
+    def population_capacity(self, faction_id: str) -> int:
+        return sum(tile.capacity() for tile in self.faction_tiles(faction_id))
+
+    def total_jobs(self, faction_id: str) -> dict[str, int]:
+        totals = {profession: 0 for profession in PROFESSION_TYPES}
+        for tile in self.faction_tiles(faction_id):
+            for profession, amount in tile.professions_of(faction_id).items():
+                totals[profession] = totals.get(profession, 0) + amount
+        return totals
+
     def visible_tiles(self, faction_id: str, radius: int = 2) -> set[tuple[int, int]]:
         visible: set[tuple[int, int]] = set()
         for owned in self.faction_tiles(faction_id):
             for y in range(owned.y - radius, owned.y + radius + 1):
                 for x in range(owned.x - radius, owned.x + radius + 1):
-                    if self.in_bounds(x, y):
+                    if self.in_bounds(x, y) and abs(owned.x - x) + abs(owned.y - y) <= radius:
                         visible.add((x, y))
         return visible
 
     def is_visible(self, faction_id: str, x: int, y: int) -> bool:
         return (x, y) in self.visible_tiles(faction_id)
+
+    def discover_factions(self) -> list[tuple[str, str]]:
+        discoveries: list[tuple[str, str]] = []
+        for faction_id, faction in self.factions.items():
+            faction.known_factions.add(faction_id)
+            visible = self.visible_tiles(faction_id)
+            for other_id in self.factions:
+                if other_id == faction_id or other_id in faction.known_factions:
+                    continue
+                if any((tile.x, tile.y) in visible for tile in self.faction_tiles(other_id)):
+                    faction.known_factions.add(other_id)
+                    discoveries.append((faction_id, other_id))
+        return discoveries
+
+    def enforce_population_ownership(self) -> None:
+        for tile in self.tiles:
+            for faction_id in list(tile.population):
+                if tile.population_of(faction_id) <= 0:
+                    tile.population.pop(faction_id, None)
+                    tile.professions.pop(faction_id, None)
+            if tile.owner is not None and tile.population_of(tile.owner) <= 0:
+                previous = tile.owner
+                tile.owner = None
+                tile.houses = 0
+                self.add_event(
+                    "territory",
+                    f"{previous} lost tile ({tile.x}, {tile.y}) because no people remained",
+                    faction_id=previous,
+                )
 
     def add_event(
         self,
@@ -295,11 +392,6 @@ def create_default_world(
         else:
             tile.terrain = "plain"
 
-    starts = {
-        "human": (max(1, width // 4), max(1, height // 2)),
-        "elf": (min(width - 2, (width * 3) // 4), max(1, height // 3)),
-        "orc": (min(width - 2, (width * 3) // 4), min(height - 2, (height * 2) // 3)),
-    }
     names = {
         "human": ("Human", "High Steward"),
         "elf": ("Elf", "Moon Speaker"),
@@ -317,14 +409,13 @@ def create_default_world(
         world.factions[faction_id] = faction
 
     for faction_id, faction in world.factions.items():
-        faction.diplomacy = {
-            other_id: "neutral"
-            for other_id in world.factions
-            if other_id != faction_id
-        }
+        faction.known_factions = {faction_id}
 
-    for faction_id, center in starts.items():
-        _seed_faction_land(world, faction_id, center)
+    starts = _random_start_positions(world, rng, DEFAULT_FACTIONS)
+    for faction_id, start in starts.items():
+        _seed_faction_land(world, faction_id, start)
+
+    world.discover_factions()
 
     world.add_event(
         "world",
@@ -339,19 +430,58 @@ def _seed_faction_land(
     center: tuple[int, int],
 ) -> None:
     cx, cy = center
-    claimed = [(cx, cy), (cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)]
-    first = True
-    for x, y in claimed:
-        if not world.in_bounds(x, y):
-            continue
-        tile = world.tile_at(x, y)
-        tile.terrain = "plain" if first else tile.terrain
-        if not tile.is_passable():
-            tile.terrain = "plain"
-        tile.owner = faction_id
-        tile.population[faction_id] = 60 if first else 10
-        tile.soldiers[faction_id] = 12 if first else 2
-        first = False
+    tile = world.tile_at(cx, cy)
+    if not tile.is_passable():
+        tile.terrain = "plain"
+    tile.owner = faction_id
+    tile.houses = 16
+    tile.set_population(faction_id, 40)
+    tile.professions[faction_id]["farmer"] = 30
+    tile.ensure_professions(faction_id)
+    tile.soldiers[faction_id] = 20
+
+
+def _random_start_positions(
+    world: WorldState,
+    rng: random.Random,
+    faction_ids: tuple[str, ...],
+) -> dict[str, tuple[int, int]]:
+    coordinates = [(tile.x, tile.y) for tile in world.tiles]
+    rng.shuffle(coordinates)
+    starts: dict[str, tuple[int, int]] = {}
+    for faction_id in faction_ids:
+        target = _pop_random_start(
+            coordinates,
+            starts.values(),
+            min_distance=3,
+        )
+        if target is None:
+            target = _pop_random_start(
+                coordinates,
+                starts.values(),
+                min_distance=1,
+            )
+        if target is None:
+            raise ValueError("world is too small to place all factions")
+        starts[faction_id] = target
+    return starts
+
+
+def _pop_random_start(
+    coordinates: list[tuple[int, int]],
+    existing: Any,
+    *,
+    min_distance: int,
+) -> tuple[int, int] | None:
+    existing_positions = list(existing)
+    for index, candidate in enumerate(coordinates):
+        if all(_manhattan(candidate, other) >= min_distance for other in existing_positions):
+            return coordinates.pop(index)
+    return None
+
+
+def _manhattan(first: tuple[int, int], second: tuple[int, int]) -> int:
+    return abs(first[0] - second[0]) + abs(first[1] - second[1])
 
 
 def _check_resource(resource: str) -> None:

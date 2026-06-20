@@ -57,6 +57,8 @@ class GameEngine:
             self.world.tick += 1
             self._advance_weather()
             self.npc.apply_passive_tick(self.world)
+            self.world.enforce_population_ownership()
+            self._record_discoveries()
 
             if self.world.tick % self.strategy_interval == 0:
                 await self._run_strategic_turns()
@@ -64,6 +66,8 @@ class GameEngine:
                     break
                 for faction_id in sorted(self.world.factions):
                     self.npc.execute_active_orders(self.world, faction_id)
+                self.world.enforce_population_ownership()
+                self._record_discoveries()
 
             self.world.add_event("tick", f"Tick {self.world.tick} completed")
         return self.world
@@ -152,9 +156,19 @@ class GameEngine:
 
     def _advance_weather(self) -> None:
         for tile in self.world.tiles:
-            if tile.weather == "storm" and self.world.tick % 3 == 0:
+            if tile.weather == "clear":
+                tile.weather_duration = 0
+                continue
+            if tile.weather_duration > 0:
+                tile.weather_duration -= 1
+            if tile.weather_duration <= 0:
                 tile.weather = "clear"
-            elif tile.weather == "rain" and self.world.tick % 4 == 0:
-                tile.weather = "clear"
-            elif tile.weather == "drought" and self.world.tick % 5 == 0:
-                tile.weather = "clear"
+                tile.weather_duration = 0
+
+    def _record_discoveries(self) -> None:
+        for faction_id, other_id in self.world.discover_factions():
+            self.world.add_event(
+                "scout",
+                f"{faction_id} discovered {other_id}",
+                faction_id=faction_id,
+            )

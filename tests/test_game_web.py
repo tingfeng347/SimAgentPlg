@@ -46,6 +46,7 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("推进 5 刻", response.text)
         self.assertIn("claimFactionSelect", response.text)
         self.assertIn("划给领土", response.text)
+        self.assertIn("weatherDuration", response.text)
         self.assertIn("祈求", response.text)
 
     def test_state_endpoint_returns_renderable_world(self) -> None:
@@ -59,10 +60,24 @@ class GameWebTests(unittest.TestCase):
         self.assertEqual(payload["height"], 8)
         self.assertEqual(payload["tick"], 0)
         self.assertEqual(len(payload["tiles"]), 96)
+        self.assertIn("professions", payload["tiles"][0])
+        self.assertIn("houses", payload["tiles"][0])
+        self.assertIn("capacity", payload["tiles"][0])
+        self.assertIn("weather_duration", payload["tiles"][0])
         self.assertEqual(
             {faction["faction_id"] for faction in payload["factions"]},
             {"human", "elf", "orc"},
         )
+        human = next(
+            faction
+            for faction in payload["factions"]
+            if faction["faction_id"] == "human"
+        )
+        self.assertIn("jobs", human)
+        self.assertIn("houses", human)
+        self.assertIn("population_capacity", human)
+        self.assertIn("known_factions", human)
+        self.assertIn("last_plan_snapshot", human)
 
     def test_god_mutation_endpoints_return_updated_state(self) -> None:
         client = self.make_client()
@@ -73,11 +88,11 @@ class GameWebTests(unittest.TestCase):
         )
         weather = client.post(
             "/api/god/weather",
-            json={"x": 0, "y": 0, "weather": "storm"},
+            json={"x": 0, "y": 0, "weather": "storm", "duration": 4},
         )
         claim = client.post(
             "/api/god/claim",
-            json={"faction_id": "human", "x": 0, "y": 0},
+            json={"faction_id": "human", "x": 3, "y": 4},
         )
 
         self.assertEqual(give.status_code, 200)
@@ -90,9 +105,11 @@ class GameWebTests(unittest.TestCase):
             if faction["faction_id"] == "human"
         )
         tile = payload["tiles"][0]
+        claimed = payload["tiles"][4 * 12 + 3]
         self.assertEqual(human["resources"]["food"], 127)
         self.assertEqual(tile["weather"], "storm")
-        self.assertEqual(tile["owner"], "human")
+        self.assertEqual(tile["weather_duration"], 4)
+        self.assertEqual(claimed["owner"], "human")
 
     def test_answer_petition_endpoint_updates_inbox(self) -> None:
         client = self.make_client()

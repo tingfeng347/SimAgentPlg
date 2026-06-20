@@ -19,7 +19,6 @@ POPULATION_TASKS = (
     "defend",
     "attack",
     "scout",
-    "idle",
 )
 RESOURCE_ACTIONS = ("reserve", "spend", "trade", "tribute")
 TERRITORY_ACTIONS = ("claim", "settle", "fortify", "abandon", "scout")
@@ -49,15 +48,80 @@ narrative text must be written in Simplified Chinese, including turn_intent,
 strategy_summary, public_decree, diplomacy message, petition reason, and
 resource purpose. Never write petitions, decrees, or strategy plans in English.
 
-You are competing for land, food, safety, and long-term survival. Peace is a
-strategy, not the default ending. Do not repeatedly propose alliances that
-already exist. If borders touch and you have enough soldiers, consider war,
-raids, fortification, or deterrence.
+Tool usage:
+- inspect is your only observation function. It never changes the world. Use it
+  when the task summary is not enough or when you need to verify a coordinate,
+  local weather, idle workers, houses, known factions, or visible enemy border.
+- Call inspect with {"mode": "realm"} to refresh your civilization summary:
+  resources, population, soldiers, jobs, houses, capacity, known factions,
+  diplomacy, last plan snapshot, and recent relevant events.
+- Call inspect with {"mode": "tiles", "tiles": [{"x": 1, "y": 2}]} to inspect
+  specific visible coordinates. You may also call inspect with {"mode": "tiles",
+  "center": {"x": 1, "y": 2}, "radius": 2} to inspect a small visible area.
+  Tile results include terrain, weather, owner, population, soldiers,
+  professions, houses, capacity, and protection if the tile is visible.
+- Call inspect with {"mode": "faction", "faction_id": "elf"} only for a
+  discovered faction. It returns known relation, visible territory, visible
+  population, visible soldiers, visible jobs, visible houses, and recent events.
+  Unknown factions should not be used for diplomacy, war, or long-term plans.
+- submit_leader_turn is the only function that ends your strategic turn. Call it
+  exactly once after you have enough information. Do not call it before your
+  final plan is internally consistent.
+- submit_leader_turn must contain a clear Chinese turn_intent and may contain
+  population_orders, resource_orders, territory_orders, military_orders,
+  diplomacy_orders, petitions, public_decree, and strategy_summary. Leave an
+  order list empty if you do not need that category.
+- submit_leader_turn example:
+  {"turn_intent":"增加粮食并扩张边境","population_orders":[{"task":"farm",
+  "target":{"x":3,"y":4},"workers":5}],"territory_orders":[{"action":"claim",
+  "target":{"x":4,"y":4}}],"military_orders":[],"diplomacy_orders":[],
+  "petitions":[],"public_decree":"今年优先开垦边境农田。",
+  "strategy_summary":"将闲置人口转为农民，并尝试占据相邻空地。"}
 
-Population grows through food, safety, and settlement; never petition the god
-for people. Petitions may ask only for god powers: resources, weather,
-protection, or unowned territory. Never invent action names, resource names,
-faction IDs, petition types, or coordinates.
+Basic world:
+- You compete for land, food, safety, and long-term survival. Peace is a
+  strategy, not the default ending.
+- The world is a tile map. Terrain, weather, population, soldiers, houses,
+  resources, and ownership affect what your civilization can do.
+- Farmers increase food. Plains are naturally better for food. Rain usually
+  helps farming, while drought and storms make survival and work harder.
+- Lumberjacks increase wood. Forests are naturally better for wood. Wood is
+  mainly used to build houses.
+- Miners increase stone. Hills are naturally better for stone. Stone is stored
+  for later civilization systems.
+- Builders use wood to build houses. Houses raise population capacity but do
+  not create people instantly.
+- Food supports survival and future growth. Population growth creates idle
+  people, not specialized workers.
+- Soldiers are the only people who fight. Raids can take resources; attacks
+  can occupy enemy land if the battle is won and your people can move in.
+- Owned territory must have population from that faction. New territory and
+  captured territory require people to occupy it.
+- You only know factions your scouts have discovered. Unknown factions do not
+  exist for diplomacy or war planning until discovered.
+
+Restrict:
+- You do not directly edit the world. You submit strategic orders; the rule
+  engine validates them; ordinary NPC population executes legal orders.
+- Only idle population can become farmers, lumberjacks, miners, or builders.
+  Existing workers keep their current profession until future simulation rules
+  change them.
+- Leaders cannot ask the god for people and cannot turn existing workers back
+  into idle people.
+- Petitions may ask only for god powers: resources, weather, protection, or
+  unowned territory. Never petition for population or vague miracles.
+- War, raids, and occupation must obey visibility, adjacency, soldier
+  availability, and protection rules.
+- Do not repeatedly propose diplomacy that already matches the current
+  relation. If borders touch and you have enough soldiers, consider war, raids,
+  fortification, or deterrence.
+- Never invent action names, resource names, faction IDs, petition types, or
+  coordinates.
+
+For population_orders, workers means the number of idle people to convert or
+assign this turn, not the final target headcount for that profession. Build
+orders automatically spend wood; never add a separate resource_order spend for
+wood to pay for houses.
 """.strip()
 
 
@@ -225,23 +289,19 @@ class LeaderDecision:
         }
 
 
-INSPECT_REALM_TOOL: ToolSchema = {
+INSPECT_TOOL: ToolSchema = {
     "type": "function",
     "function": {
-        "name": "inspect_realm",
-        "description": "Inspect your faction's resources, people, diplomacy, and recent events.",
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
-
-INSPECT_TILES_TOOL: ToolSchema = {
-    "type": "function",
-    "function": {
-        "name": "inspect_tiles",
-        "description": "Inspect visible tiles by coordinates or by a center point and radius.",
+        "name": "inspect",
+        "description": "Inspect visible game information. Use mode='realm', mode='tiles', or mode='faction'.",
         "parameters": {
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["realm", "tiles", "faction"],
+                    "description": "realm returns your civilization summary; tiles returns visible map tiles; faction returns known information about one discovered faction.",
+                },
                 "tiles": {
                     "type": "array",
                     "items": {
@@ -262,22 +322,9 @@ INSPECT_TILES_TOOL: ToolSchema = {
                     "required": ["x", "y"],
                 },
                 "radius": {"type": "integer", "minimum": 0},
-            },
-        },
-    },
-}
-
-INSPECT_FACTION_TOOL: ToolSchema = {
-    "type": "function",
-    "function": {
-        "name": "inspect_faction",
-        "description": "Inspect known information about another faction.",
-        "parameters": {
-            "type": "object",
-            "properties": {
                 "faction_id": {"type": "string"},
             },
-            "required": ["faction_id"],
+            "required": ["mode"],
         },
     },
 }
@@ -313,7 +360,11 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                         "properties": {
                             "task": {"type": "string", "enum": list(POPULATION_TASKS)},
                             "target": _target_schema(),
-                            "workers": {"type": "integer", "minimum": 0},
+                            "workers": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "本回合转换/投入此任务的人数，不是该职业的最终目标人数。farm/gather_wood/mine_stone/build 只能使用目标地块的 idle 闲置人口。",
+                            },
                             "priority": {"type": "integer", "minimum": 1},
                         },
                         "required": ["task", "workers"],
@@ -428,17 +479,25 @@ class LeaderToolHandler(MethodToolHandler):
     ) -> None:
         super().__init__(
             (
-                INSPECT_REALM_TOOL,
-                INSPECT_TILES_TOOL,
-                INSPECT_FACTION_TOOL,
+                INSPECT_TOOL,
                 SUBMIT_LEADER_TURN_TOOL,
             )
         )
         self.faction_id = faction_id
         self._world_provider = world_provider
 
-    async def do_inspect_realm(self, arguments: Mapping[str, Any]) -> StepOutcome:
+    async def do_inspect(self, arguments: Mapping[str, Any]) -> StepOutcome:
         world = self._world_provider()
+        mode = str(arguments.get("mode", "")).strip()
+        if mode == "realm":
+            return StepOutcome(self._realm_inspection(world))
+        if mode == "tiles":
+            return StepOutcome({"tiles": self._tile_inspection(world, arguments)})
+        if mode == "faction":
+            return StepOutcome(self._faction_inspection(world, arguments))
+        return StepOutcome({"status": "error", "error": "unknown inspect mode"})
+
+    def _realm_inspection(self, world: WorldState) -> dict[str, Any]:
         faction = world.factions[self.faction_id]
         owned = world.faction_tiles(self.faction_id)
         recent_events = [
@@ -446,23 +505,33 @@ class LeaderToolHandler(MethodToolHandler):
             for event in world.events[-8:]
             if event.faction_id in {None, self.faction_id}
         ]
-        return StepOutcome(
-            {
-                "faction_id": self.faction_id,
-                "name": faction.name,
-                "leader_name": faction.leader_name,
-                "tick": world.tick,
-                "resources": faction.resources.as_dict(),
-                "population": world.total_population(self.faction_id),
-                "soldiers": world.total_soldiers(self.faction_id),
-                "territory_count": len(owned),
-                "diplomacy": dict(faction.diplomacy),
-                "recent_events": recent_events,
-            }
-        )
+        return {
+            "faction_id": self.faction_id,
+            "name": faction.name,
+            "leader_name": faction.leader_name,
+            "tick": world.tick,
+            "resources": faction.resources.as_dict(),
+            "population": world.total_population(self.faction_id),
+            "soldiers": world.total_soldiers(self.faction_id),
+            "jobs": world.total_jobs(self.faction_id),
+            "houses": world.total_houses(self.faction_id),
+            "population_capacity": world.population_capacity(self.faction_id),
+            "territory_count": len(owned),
+            "known_factions": sorted(faction.known_factions),
+            "diplomacy": {
+                other_id: faction.relation_to(other_id)
+                for other_id in sorted(faction.known_factions)
+                if other_id != self.faction_id
+            },
+            "last_plan_snapshot": dict(faction.last_plan_snapshot),
+            "recent_events": recent_events,
+        }
 
-    async def do_inspect_tiles(self, arguments: Mapping[str, Any]) -> StepOutcome:
-        world = self._world_provider()
+    def _tile_inspection(
+        self,
+        world: WorldState,
+        arguments: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
         coordinates = _requested_coordinates(arguments)
         tiles = []
         for x, y in coordinates:
@@ -473,34 +542,40 @@ class LeaderToolHandler(MethodToolHandler):
                 tiles.append({"x": x, "y": y, "visible": False})
                 continue
             tiles.append(_summarize_tile(world, x, y))
-        return StepOutcome({"tiles": tiles})
+        return tiles
 
-    async def do_inspect_faction(self, arguments: Mapping[str, Any]) -> StepOutcome:
-        world = self._world_provider()
+    def _faction_inspection(
+        self,
+        world: WorldState,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
         other_id = str(arguments.get("faction_id", "")).strip()
         if other_id not in world.factions:
-            return StepOutcome({"status": "error", "error": "unknown faction"})
+            return {"status": "error", "error": "unknown faction"}
+        if other_id not in world.factions[self.faction_id].known_factions:
+            return {"status": "unknown", "error": "faction has not been discovered"}
         other = world.factions[other_id]
         visible_owned = [
             tile
             for tile in world.faction_tiles(other_id)
             if world.is_visible(self.faction_id, tile.x, tile.y)
         ]
-        return StepOutcome(
-            {
-                "faction_id": other_id,
-                "name": other.name,
-                "relation": world.factions[self.faction_id].relation_to(other_id),
-                "visible_territory_count": len(visible_owned),
-                "visible_population": sum(tile.population_of(other_id) for tile in visible_owned),
-                "visible_soldiers": sum(tile.soldiers_of(other_id) for tile in visible_owned),
-                "recent_events": [
-                    event.as_dict()
-                    for event in world.events[-8:]
-                    if event.faction_id == other_id
-                ],
-            }
-        )
+        return {
+            "faction_id": other_id,
+            "name": other.name,
+            "relation": world.factions[self.faction_id].relation_to(other_id),
+            "visible_territory_count": len(visible_owned),
+            "visible_population": sum(tile.population_of(other_id) for tile in visible_owned),
+            "visible_soldiers": sum(tile.soldiers_of(other_id) for tile in visible_owned),
+            "visible_jobs": _sum_visible_jobs(visible_owned, other_id),
+            "visible_houses": sum(tile.houses for tile in visible_owned),
+            "visible_population_capacity": sum(tile.capacity() for tile in visible_owned),
+            "recent_events": [
+                event.as_dict()
+                for event in world.events[-8:]
+                if event.faction_id == other_id
+            ],
+        }
 
     async def do_submit_leader_turn(self, arguments: Mapping[str, Any]) -> StepOutcome:
         decision = LeaderDecision.from_mapping(dict(arguments))
@@ -573,16 +648,27 @@ def _build_leader_task(
             "terrain": tile.terrain,
             "population": tile.population_of(faction_id),
             "soldiers": tile.soldiers_of(faction_id),
+            "jobs": tile.professions_of(faction_id),
+            "houses": tile.houses,
+            "capacity": tile.capacity(),
+            "weather": tile.weather,
+            "weather_duration": tile.weather_duration,
         }
         for tile in world.faction_tiles(faction_id)
     ]
     expansion_candidates = _expansion_candidates(world, faction_id)
     border_targets = _border_enemy_targets(world, faction_id)
     dangerous_weather = _dangerous_weather_tiles(world, faction_id)
+    previous_execution = _previous_execution_snapshot(faction)
+    diplomacy_view = {
+        other: faction.relation_to(other)
+        for other in sorted(faction.known_factions)
+        if other != faction_id
+    }
     lines = [
         f"You lead faction {faction.name} ({faction_id}) at world tick {world.tick}.",
         f"Faction doctrine: {_faction_doctrine(faction_id)}",
-        "Use inspect tools if needed, then call submit_leader_turn.",
+        "Use inspect if needed, then call submit_leader_turn.",
         "Important language rule: write every player-facing sentence in Simplified Chinese / 简体中文。",
         "必须使用简体中文的字段：turn_intent, strategy_summary, public_decree, petition.reason, diplomacy message, resource purpose。",
         "Keep only enum/action/resource/faction IDs in English so the rule engine can parse them.",
@@ -598,16 +684,27 @@ def _build_leader_task(
         "Alliance from neutral is only a first trust step; war is valid when border pressure, crowding, or resource competition make peace costly.",
         "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
         "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
+        "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack or capture, include the matching military order. If you ask for weather, include a weather petition.",
+        "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
+        "Only idle people can become farmers, lumberjacks, miners, or builders. Do not assign more workers to a profession than the target tile has idle population.",
+        "There is no dismiss-worker or assign-back-to-idle order. Population growth is the normal source of new idle people.",
+        "For houses, submit a build population order only. Do not submit a separate wood spend order; the build action spends wood automatically.",
+        "Only discovered factions may be used in diplomacy or war planning.",
         "Good Chinese output examples: public_decree='粮仓告急，全族优先耕作。', strategy_summary='扩大东侧农田并防备兽人边境。', petition reason='粮食不足，请求上帝赐予应急粮食。'",
         f"Resources: {faction.resources.as_dict()}",
         f"Population: {world.total_population(faction_id)}",
         f"Soldiers: {world.total_soldiers(faction_id)}",
+        f"Jobs: {world.total_jobs(faction_id)}",
+        f"Houses: {world.total_houses(faction_id)}",
+        f"Population capacity: {world.population_capacity(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",
         f"Owned tiles: {owned_tiles}",
         f"Legal expansion candidates: {expansion_candidates[:8]}",
         f"Border enemy targets for legal war/raid planning: {border_targets[:8]}",
         f"Dangerous weather on your land: {dangerous_weather[:8]}",
-        f"Diplomacy: {faction.diplomacy}",
+        f"Known factions: {sorted(faction.known_factions)}",
+        f"Diplomacy: {diplomacy_view}",
+        f"Previous strategic turn actual result: {previous_execution}",
         "Only submit a no-op if there are no useful economic, defensive, expansion, or war actions.",
     ]
     if feedback:
@@ -629,9 +726,16 @@ def _summarize_tile(world: WorldState, x: int, y: int) -> dict[str, Any]:
         "visible": True,
         "terrain": tile.terrain,
         "weather": tile.weather,
+        "weather_duration": tile.weather_duration,
         "owner": tile.owner,
         "population": dict(tile.population),
         "soldiers": dict(tile.soldiers),
+        "professions": {
+            faction_id: tile.professions_of(faction_id)
+            for faction_id in tile.population
+        },
+        "houses": tile.houses,
+        "capacity": tile.capacity(),
         "protected": tile.protected,
     }
 
@@ -669,6 +773,8 @@ def _border_enemy_targets(
         for target in world.neighbors(origin.x, origin.y):
             if target.owner is None or target.owner == faction_id:
                 continue
+            if target.owner not in world.factions[faction_id].known_factions:
+                continue
             if not target.is_passable() or not world.is_visible(faction_id, target.x, target.y):
                 continue
             targets[(origin.x, origin.y, target.x, target.y)] = {
@@ -679,8 +785,10 @@ def _border_enemy_targets(
                 "origin_soldiers": soldiers,
                 "target_soldiers": target.soldiers_of(target.owner),
                 "target_population": target.population_of(target.owner),
+                "target_houses": target.houses,
                 "terrain": target.terrain,
                 "weather": target.weather,
+                "weather_duration": target.weather_duration,
                 "protected": target.protected,
             }
     return [targets[key] for key in sorted(targets)]
@@ -695,6 +803,7 @@ def _dangerous_weather_tiles(
             "x": tile.x,
             "y": tile.y,
             "weather": tile.weather,
+            "weather_duration": tile.weather_duration,
             "population": tile.population_of(faction_id),
             "soldiers": tile.soldiers_of(faction_id),
         }
@@ -711,6 +820,29 @@ def _faction_doctrine(faction_id: str) -> str:
     if faction_id == "human":
         return "Pragmatic settlers. Expand into open land first, then use war or deterrence when boxed in."
     return "Survive, expand, and protect your people."
+
+
+def _sum_visible_jobs(tiles, faction_id: str) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for tile in tiles:
+        for profession, amount in tile.professions_of(faction_id).items():
+            totals[profession] = totals.get(profession, 0) + amount
+    return totals
+
+
+def _previous_execution_snapshot(faction) -> dict[str, Any] | None:
+    snapshot = faction.last_plan_snapshot
+    if not snapshot:
+        return None
+    return {
+        "planned_tick": snapshot.get("tick"),
+        "leader_summary": snapshot.get("strategy_summary"),
+        "submitted_resources": snapshot.get("resources"),
+        "submitted_jobs": snapshot.get("jobs"),
+        "submitted_houses": snapshot.get("houses"),
+        "submitted_population_capacity": snapshot.get("population_capacity"),
+        "actual_after_execution": snapshot.get("after_execution"),
+    }
 
 
 def _requested_coordinates(arguments: Mapping[str, Any]) -> list[tuple[int, int]]:

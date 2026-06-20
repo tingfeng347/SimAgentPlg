@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from simagentplg.game.world import RESOURCE_TYPES, WEATHER_TYPES, WorldState
 
+DEFAULT_WEATHER_DURATION = {
+    "clear": 0,
+    "rain": 5,
+    "drought": 5,
+    "storm": 3,
+}
+
 
 class GodSystem:
     """Player-facing god powers with explicit event logging."""
@@ -23,14 +30,19 @@ class GodSystem:
             faction_id=faction_id,
         )
 
-    def set_weather(self, x: int, y: int, weather: str) -> None:
+    def set_weather(self, x: int, y: int, weather: str, duration: int | None = None) -> None:
         if weather not in WEATHER_TYPES:
             raise ValueError(f"unknown weather {weather!r}")
         tile = self.world.tile_at(x, y)
         tile.weather = weather
+        tile.weather_duration = (
+            max(0, duration)
+            if duration is not None
+            else DEFAULT_WEATHER_DURATION[weather]
+        )
         self.world.add_event(
             "god",
-            f"God changed weather at ({x}, {y}) to {weather}",
+            f"God changed weather at ({x}, {y}) to {weather} for {tile.weather_duration} ticks",
             faction_id=tile.owner,
         )
 
@@ -38,15 +50,32 @@ class GodSystem:
         if faction_id not in self.world.factions:
             raise ValueError(f"unknown faction {faction_id!r}")
         tile = self.world.tile_at(x, y)
+        if not tile.is_passable():
+            raise ValueError("cannot assign impassable territory")
         previous = tile.owner
+        moved = 0
+        if tile.population_of(faction_id) <= 0:
+            donor = _donor_tile(self.world, faction_id, exclude=(x, y))
+            if donor is None:
+                raise ValueError(
+                    f"faction {faction_id!r} has no movable population for territory claim"
+                )
+            donor.set_population(faction_id, donor.population_of(faction_id) - 1)
+            tile.set_population(faction_id, 1)
+            moved = 1
+        for other_id in list(tile.population):
+            if other_id != faction_id:
+                tile.set_population(other_id, 0)
+        for other_id in list(tile.soldiers):
+            if other_id != faction_id:
+                tile.soldiers.pop(other_id, None)
         tile.owner = faction_id
-        if tile.population_of(faction_id) == 0:
-            tile.population[faction_id] = 1
         self.world.add_event(
             "god",
-            f"God assigned tile ({x}, {y}) from {previous} to {faction_id}",
+            f"God assigned tile ({x}, {y}) from {previous} to {faction_id} with {moved} moved people",
             faction_id=faction_id,
         )
+        self.world.enforce_population_ownership()
 
     def protect_tile(self, x: int, y: int, protected: bool = True) -> None:
         tile = self.world.tile_at(x, y)
@@ -120,7 +149,13 @@ class GodSystem:
             x = int(request["x"])
             y = int(request["y"])
             weather = str(request.get("weather", "rain"))
-            self.set_weather(x, y, weather)
+            duration = request.get("duration")
+            self.set_weather(
+                x,
+                y,
+                weather,
+                int(duration) if duration is not None else None,
+            )
         elif kind == "territory":
             x = int(request["x"])
             y = int(request["y"])
@@ -131,3 +166,14 @@ class GodSystem:
             self.protect_tile(x, y, True)
         else:
             raise ValueError(f"unsupported petition kind {kind!r}")
+
+
+def _donor_tile(world: WorldState, faction_id: str, *, exclude: tuple[int, int]):
+    candidates = [
+        tile
+        for tile in world.faction_tiles(faction_id)
+        if (tile.x, tile.y) != exclude and tile.population_of(faction_id) > 1
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda tile: tile.population_of(faction_id))

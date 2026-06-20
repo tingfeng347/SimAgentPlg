@@ -6,7 +6,6 @@ from simagentplg.game.leader import LeaderDecision, validate_resource_name
 from simagentplg.game.world import (
     RESOURCE_TYPES,
     WEATHER_TYPES,
-    Petition,
     WorldState,
 )
 
@@ -20,8 +19,8 @@ POPULATION_TASKS = {
     "defend",
     "attack",
     "scout",
-    "idle",
 }
+PROFESSION_TASKS = {"farm", "gather_wood", "mine_stone", "build"}
 RESOURCE_ACTIONS = {"reserve", "spend", "trade", "tribute"}
 TERRITORY_ACTIONS = {"claim", "settle", "fortify", "abandon", "scout"}
 MILITARY_ACTIONS = {"muster", "defend", "attack", "raid", "retreat"}
@@ -63,6 +62,7 @@ class RuleEngine:
         errors.extend(self._validate_military_orders(world, faction_id, decision))
         errors.extend(self._validate_diplomacy_orders(world, faction_id, decision))
         errors.extend(self._validate_petitions(world, faction_id, decision))
+        errors.extend(self._validate_plan_matches_actions(decision))
         return RuleCheck(not errors, tuple(errors))
 
     def apply_decision(
@@ -76,6 +76,18 @@ class RuleEngine:
             return check
 
         faction = world.factions[faction_id]
+        faction.last_plan_snapshot = {
+            "tick": world.tick,
+            "resources": faction.resources.as_dict(),
+            "population": world.total_population(faction_id),
+            "soldiers": world.total_soldiers(faction_id),
+            "jobs": world.total_jobs(faction_id),
+            "houses": world.total_houses(faction_id),
+            "population_capacity": world.population_capacity(faction_id),
+            "strategy_summary": decision.strategy_summary or decision.turn_intent,
+            "public_decree": decision.public_decree,
+            "orders": decision.as_dict(),
+        }
         faction.active_orders = decision.as_dict()
         for order in decision.diplomacy_orders:
             relation, changed = self._apply_diplomacy(
@@ -129,6 +141,7 @@ class RuleEngine:
             if order.workers < 0:
                 errors.append(f"population_order {index}: workers must not be negative")
             total_workers += max(order.workers, 0)
+            target_tile = None
             if order.target is not None:
                 errors.extend(
                     self._validate_visible_target(
@@ -138,6 +151,21 @@ class RuleEngine:
                         f"population_order {index}",
                     )
                 )
+                if world.in_bounds(*order.target):
+                    target_tile = world.tile_at(*order.target)
+                    if order.task in {"farm", "gather_wood", "mine_stone", "build", "train", "defend"}:
+                        if target_tile.owner != faction_id:
+                            errors.append(
+                                f"population_order {index}: task {order.task!r} target must be owned by {faction_id}"
+                            )
+            elif order.task in PROFESSION_TASKS:
+                target_tile = _largest_population_tile(world, faction_id)
+            if target_tile is not None and order.task in PROFESSION_TASKS:
+                idle = target_tile.professions_of(faction_id).get("idle", 0)
+                if order.workers > idle:
+                    errors.append(
+                        f"population_order {index}: task {order.task!r} assigns {order.workers} workers but target has only {idle} idle population"
+                    )
         if total_workers > available:
             errors.append(
                 f"population orders assign {total_workers} workers but only {available} population exist"
@@ -153,6 +181,10 @@ class RuleEngine:
         errors: list[str] = []
         reserved: dict[str, int] = {resource: 0 for resource in RESOURCE_TYPES}
         faction = world.factions[faction_id]
+        has_build_order = any(
+            order.task == "build" and order.workers > 0
+            for order in decision.population_orders
+        )
         for index, order in enumerate(decision.resource_orders, start=1):
             if not validate_resource_name(order.resource):
                 errors.append(f"resource_order {index}: unknown resource {order.resource!r}")
@@ -161,6 +193,10 @@ class RuleEngine:
                 errors.append(f"resource_order {index}: unknown action {order.action!r}")
             if order.amount < 0:
                 errors.append(f"resource_order {index}: amount must not be negative")
+            if has_build_order and order.resource == "wood" and order.action == "spend":
+                errors.append(
+                    f"resource_order {index}: build orders spend wood automatically; do not add a separate wood spend"
+                )
             if order.action in {"spend", "trade", "tribute"}:
                 reserved[order.resource] += max(order.amount, 0)
                 if reserved[order.resource] > faction.resources.amount(order.resource):
@@ -193,6 +229,8 @@ class RuleEngine:
                     errors.append(f"{label}: target is owned by {tile.owner}")
                 if not self._adjacent_to_owned(world, faction_id, order.target):
                     errors.append(f"{label}: target must border owned territory")
+                if not _has_movable_population(world, faction_id):
+                    errors.append(f"{label}: faction has no movable population to occupy new territory")
             if order.action in {"fortify", "abandon"} and tile.owner != faction_id:
                 errors.append(f"{label}: target must be owned by {faction_id}")
         return errors
@@ -236,6 +274,8 @@ class RuleEngine:
                 target_tile = world.tile_at(*order.target)
                 if target_tile.owner in {None, faction_id}:
                     errors.append(f"{label}: target must be enemy-owned")
+                elif target_tile.owner not in world.factions[faction_id].known_factions:
+                    errors.append(f"{label}: target faction has not been discovered")
                 elif (
                     world.factions[faction_id].relation_to(target_tile.owner) == "allied"
                     and target_tile.owner not in declared_war_targets
@@ -255,8 +295,11 @@ class RuleEngine:
         for index, order in enumerate(decision.diplomacy_orders, start=1):
             if order.target_faction not in world.factions:
                 errors.append(f"diplomacy_order {index}: unknown target faction")
+                continue
             if order.target_faction == faction_id:
                 errors.append(f"diplomacy_order {index}: cannot target self")
+            if order.target_faction not in world.factions[faction_id].known_factions:
+                errors.append(f"diplomacy_order {index}: target faction has not been discovered")
             if order.proposal not in DIPLOMACY_PROPOSALS:
                 errors.append(f"diplomacy_order {index}: unknown proposal {order.proposal!r}")
         return errors
@@ -315,6 +358,42 @@ class RuleEngine:
                     errors.append(f"{label}: territory petition target must be passable")
                 if not self._adjacent_to_owned(world, faction_id, target):
                     errors.append(f"{label}: territory petition target must border owned territory")
+        return errors
+
+    def _validate_plan_matches_actions(self, decision: LeaderDecision) -> list[str]:
+        text = " ".join(
+            (
+                decision.turn_intent,
+                decision.strategy_summary,
+                decision.public_decree,
+                " ".join(order.message for order in decision.diplomacy_orders),
+            )
+        ).lower()
+        errors: list[str] = []
+        military_actions = {order.action for order in decision.military_orders}
+        territory_actions = {order.action for order in decision.territory_orders}
+        population_tasks = {order.task for order in decision.population_orders}
+        petition_types = {petition.kind for petition in decision.petitions}
+        diplomacy = {order.proposal for order in decision.diplomacy_orders}
+
+        if _contains_any(text, ("war", "attack", "raid", "开战", "战争", "进攻", "攻打", "突袭")):
+            if not (military_actions & {"attack", "raid"} or "war" in diplomacy):
+                errors.append("plan mentions war or attack but has no military attack/raid or war diplomacy order")
+        if _contains_any(text, ("capture", "占领", "夺取", "攻占")):
+            if "attack" not in military_actions:
+                errors.append("plan mentions capture but has no attack military order")
+        if _contains_any(text, ("build house", "houses", "住房", "房屋", "建房")):
+            if "build" not in population_tasks:
+                errors.append("plan mentions building houses but has no build population order")
+        if _contains_any(text, ("farm", "farmland", "耕", "农田", "种田")):
+            if "farm" not in population_tasks:
+                errors.append("plan mentions farming but has no farm population order")
+        if _contains_any(text, ("weather", "rain", "storm", "drought", "天气", "降雨", "风暴", "干旱", "好天气")):
+            if "weather" not in petition_types:
+                errors.append("plan mentions weather but has no weather petition")
+        if _contains_any(text, ("expand", "settle", "claim", "扩张", "开拓", "定居")):
+            if not (territory_actions & {"claim", "settle"}):
+                errors.append("plan mentions expansion or settlement but has no claim/settle territory order")
         return errors
 
     def _validate_visible_target(
@@ -386,3 +465,18 @@ def _int(value: object, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _has_movable_population(world: WorldState, faction_id: str) -> bool:
+    return any(tile.population_of(faction_id) > 8 for tile in world.faction_tiles(faction_id))
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _largest_population_tile(world: WorldState, faction_id: str):
+    owned = world.faction_tiles(faction_id)
+    if not owned:
+        return None
+    return max(owned, key=lambda tile: tile.population_of(faction_id))

@@ -25,6 +25,9 @@ def render_map(world: WorldState) -> str:
             glyph = FACTION_GLYPHS.get(tile.owner or "", "")
             if not glyph:
                 glyph = TERRAIN_GLYPHS[tile.terrain]
+            home_of = world.home_of_tile(x, y)
+            if home_of is not None:
+                glyph = FACTION_GLYPHS.get(home_of, "?").lower()
             if tile.weather == "storm":
                 glyph = "!"
             elif tile.weather == "drought":
@@ -44,6 +47,8 @@ def render_status(world: WorldState) -> str:
         lines.append(
             (
                 f"{faction.name} ({faction_id}) | leader={faction.leader_name} | "
+                f"home={faction.home_tile} | "
+                f"eliminated={faction.eliminated} | "
                 f"pop={world.total_population(faction_id)} | "
                 f"soldiers={world.total_soldiers(faction_id)} | "
                 f"tiles={len(world.faction_tiles(faction_id))} | "

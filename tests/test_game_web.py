@@ -44,8 +44,9 @@ class GameWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("上帝模拟器", response.text)
         self.assertIn("推进 5 刻", response.text)
-        self.assertIn("claimFactionSelect", response.text)
-        self.assertIn("划给领土", response.text)
+        self.assertNotIn("claimFactionSelect", response.text)
+        self.assertNotIn("划给领土", response.text)
+        self.assertNotIn("/api/god/claim", response.text)
         self.assertIn("weatherDuration", response.text)
         self.assertIn("祈求", response.text)
 
@@ -63,6 +64,7 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("professions", payload["tiles"][0])
         self.assertIn("houses", payload["tiles"][0])
         self.assertIn("capacity", payload["tiles"][0])
+        self.assertIn("home_of", payload["tiles"][0])
         self.assertIn("weather_duration", payload["tiles"][0])
         self.assertEqual(
             {faction["faction_id"] for faction in payload["factions"]},
@@ -78,11 +80,11 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("population_capacity", human)
         self.assertIn("known_factions", human)
         self.assertIn("last_plan_snapshot", human)
+        self.assertIn("home_tile", human)
+        self.assertIn("eliminated", human)
 
     def test_god_mutation_endpoints_return_updated_state(self) -> None:
         client = self.make_client()
-        engine = client.app.state.engine
-        claim_target = _adjacent_empty_tile(engine.world, "human")
 
         give = client.post(
             "/api/god/give",
@@ -92,43 +94,29 @@ class GameWebTests(unittest.TestCase):
             "/api/god/weather",
             json={"x": 0, "y": 0, "weather": "storm", "duration": 4},
         )
-        claim = client.post(
-            "/api/god/claim",
-            json={
-                "faction_id": "human",
-                "x": claim_target[0],
-                "y": claim_target[1],
-            },
-        )
 
         self.assertEqual(give.status_code, 200)
         self.assertEqual(weather.status_code, 200)
-        self.assertEqual(claim.status_code, 200)
-        payload = claim.json()
+        payload = weather.json()
         human = next(
             faction
             for faction in payload["factions"]
             if faction["faction_id"] == "human"
         )
         tile = payload["tiles"][0]
-        claimed = payload["tiles"][claim_target[1] * 12 + claim_target[0]]
         self.assertEqual(human["resources"]["food"], 127)
         self.assertEqual(tile["weather"], "storm")
         self.assertEqual(tile["weather_duration"], 4)
-        self.assertEqual(claimed["owner"], "human")
 
-    def test_god_claim_endpoint_rejects_non_adjacent_tile(self) -> None:
+    def test_god_claim_endpoint_is_removed(self) -> None:
         client = self.make_client()
-        engine = client.app.state.engine
-        target = _non_adjacent_empty_tile(engine.world, "human")
 
         response = client.post(
             "/api/god/claim",
-            json={"faction_id": "human", "x": target[0], "y": target[1]},
+            json={"faction_id": "human", "x": 0, "y": 0},
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("must border owned territory", response.json()["error"])
+        self.assertEqual(response.status_code, 404)
 
     def test_answer_petition_endpoint_updates_inbox(self) -> None:
         client = self.make_client()
@@ -182,30 +170,6 @@ class GameWebTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("unknown faction", response.json()["error"])
-
-
-def _adjacent_empty_tile(world, faction_id: str) -> tuple[int, int]:
-    for tile in world.faction_tiles(faction_id):
-        for neighbor in world.neighbors(tile.x, tile.y):
-            if neighbor.owner is None and neighbor.is_passable():
-                return (neighbor.x, neighbor.y)
-    raise AssertionError("no adjacent empty tile found")
-
-
-def _non_adjacent_empty_tile(world, faction_id: str) -> tuple[int, int]:
-    adjacent = {
-        (neighbor.x, neighbor.y)
-        for tile in world.faction_tiles(faction_id)
-        for neighbor in world.neighbors(tile.x, tile.y)
-    }
-    for tile in world.tiles:
-        if (
-            tile.owner is None
-            and tile.is_passable()
-            and (tile.x, tile.y) not in adjacent
-        ):
-            return (tile.x, tile.y)
-    raise AssertionError("no non-adjacent empty tile found")
 
 
 if __name__ == "__main__":

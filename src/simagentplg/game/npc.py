@@ -24,6 +24,8 @@ class NPCExecutor:
 
     def apply_passive_tick(self, world: WorldState) -> None:
         for faction_id, faction in world.factions.items():
+            if faction.eliminated:
+                continue
             produced = {resource: 0 for resource in RESOURCE_TYPES}
             for tile in world.faction_tiles(faction_id):
                 population = tile.population_of(faction_id)
@@ -58,6 +60,9 @@ class NPCExecutor:
 
     def execute_active_orders(self, world: WorldState, faction_id: str) -> None:
         faction = world.factions[faction_id]
+        if faction.eliminated:
+            faction.active_orders = {}
+            return
         orders = faction.active_orders
         if not orders:
             return
@@ -125,12 +130,6 @@ class NPCExecutor:
                 self._train_soldiers(world, faction_id, target, workers)
             elif task == "settle" and target is not None:
                 self._settle_tile(world, faction_id, target)
-            elif task == "scout":
-                world.add_event(
-                    "scout",
-                    f"{faction_id} scouts around {target}",
-                    faction_id=faction_id,
-                )
 
     def _execute_territory_orders(
         self,
@@ -179,6 +178,18 @@ class NPCExecutor:
                         target,
                         force_ratio,
                         capture=action == "attack",
+                    )
+            elif action == "move":
+                origin = _target_tuple(order.get("origin"))
+                target = _target_tuple(order.get("target"))
+                force_ratio = float(order.get("force_ratio", 0.5))
+                if origin is not None and target is not None:
+                    self._move_soldiers(
+                        world,
+                        faction_id,
+                        origin,
+                        target,
+                        force_ratio,
                     )
             elif action in {"muster", "defend"}:
                 origin = _target_tuple(order.get("origin"))
@@ -229,7 +240,11 @@ class NPCExecutor:
             return
         donor = _largest_idle_tile(world, faction_id, adjacent_to=target)
         moved = 0
-        if donor is not None and target_tile.capacity() >= SETTLEMENT_IDLE_COST:
+        if (
+            donor is not None
+            and donor.population_of(faction_id) > SETTLEMENT_IDLE_COST
+            and target_tile.capacity() >= SETTLEMENT_IDLE_COST
+        ):
             moved = SETTLEMENT_IDLE_COST
             _remove_idle_people(donor, faction_id, moved)
             target_tile.set_population(faction_id, moved)
@@ -267,6 +282,32 @@ class NPCExecutor:
         world.add_event(
             "military",
             f"{faction_id} trained {trained} soldiers at {target}",
+            faction_id=faction_id,
+        )
+
+    def _move_soldiers(
+        self,
+        world: WorldState,
+        faction_id: str,
+        origin: tuple[int, int],
+        target: tuple[int, int],
+        force_ratio: float,
+    ) -> None:
+        origin_tile = world.tile_at(*origin)
+        target_tile = world.tile_at(*target)
+        if origin_tile.owner != faction_id or target_tile.owner != faction_id:
+            return
+        if abs(origin[0] - target[0]) + abs(origin[1] - target[1]) != 1:
+            return
+        available = origin_tile.soldiers_of(faction_id)
+        moved = min(available, max(1, int(available * force_ratio)))
+        if moved <= 0:
+            return
+        origin_tile.soldiers[faction_id] = available - moved
+        target_tile.soldiers[faction_id] = target_tile.soldiers_of(faction_id) + moved
+        world.add_event(
+            "military",
+            f"{faction_id} moved {moved} soldiers from {origin} to {target}",
             faction_id=faction_id,
         )
 
@@ -443,7 +484,11 @@ class NPCExecutor:
             return
 
         migrants = SETTLEMENT_IDLE_COST
-        if _idle_count(origin_tile, faction_id) < migrants or target_tile.capacity() < migrants:
+        if (
+            _idle_count(origin_tile, faction_id) < migrants
+            or origin_tile.population_of(faction_id) <= migrants
+            or target_tile.capacity() < migrants
+        ):
             origin_tile.soldiers[faction_id] = origin_tile.soldiers_of(faction_id) + survivors
             _damage_defender_population(target_tile, defender_id, severe=False)
             world.add_event(
@@ -471,6 +516,7 @@ class NPCExecutor:
             f"{faction_id} captured {target} from {defender_id} with {migrants} settlers and took {_format_loot(loot)}",
             faction_id=faction_id,
         )
+        world.eliminate_faction_if_home_captured(defender_id, faction_id)
 
 
 def _weather_multiplier(weather: str) -> float:
@@ -545,6 +591,8 @@ def _largest_idle_tile(
     candidates = []
     for tile in world.faction_tiles(faction_id):
         if adjacent_to is not None and abs(tile.x - adjacent_to[0]) + abs(tile.y - adjacent_to[1]) != 1:
+            continue
+        if tile.population_of(faction_id) <= SETTLEMENT_IDLE_COST:
             continue
         if _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST:
             candidates.append(tile)

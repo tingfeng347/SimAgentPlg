@@ -31,7 +31,7 @@ class GameEngine:
         *,
         leaders: dict[str, LeaderControllerProtocol] | None = None,
         strategy_interval: int = 5,
-        retry_limit: int = 2,
+        retry_limit: int = 9,
         rules: RuleEngine | None = None,
         npc: NPCExecutor | None = None,
         log_ticks: bool = False,
@@ -80,7 +80,11 @@ class GameEngine:
         return self.world
 
     async def _run_strategic_turns(self) -> None:
-        faction_ids = sorted(self.world.factions)
+        faction_ids = sorted(
+            faction_id
+            for faction_id, faction in self.world.factions.items()
+            if not faction.eliminated
+        )
         for faction_id in faction_ids:
             controller = self.leaders.get(faction_id)
             if controller is None:
@@ -175,7 +179,7 @@ class GameEngine:
     def _record_discoveries(self) -> None:
         for faction_id, other_id in self.world.discover_factions():
             self.world.add_event(
-                "scout",
+                "discovery",
                 f"{faction_id} discovered {other_id}",
                 faction_id=faction_id,
             )

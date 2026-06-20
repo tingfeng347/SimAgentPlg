@@ -19,12 +19,11 @@ POPULATION_TASKS = {
     "train",
     "defend",
     "attack",
-    "scout",
 }
 PROFESSION_TASKS = {"farm", "gather_wood", "mine_stone", "build"}
 RESOURCE_ACTIONS = {"reserve", "spend", "trade", "tribute"}
-TERRITORY_ACTIONS = {"claim", "settle", "fortify", "abandon", "scout"}
-MILITARY_ACTIONS = {"muster", "defend", "attack", "raid", "retreat"}
+TERRITORY_ACTIONS = {"claim", "settle", "fortify", "abandon"}
+MILITARY_ACTIONS = {"muster", "defend", "attack", "raid", "retreat", "move"}
 DIPLOMACY_PROPOSALS = {
     "alliance",
     "trade",
@@ -54,6 +53,8 @@ class RuleEngine:
         errors: list[str] = []
         if faction_id not in world.factions:
             return RuleCheck(False, (f"unknown faction {faction_id!r}",))
+        if world.factions[faction_id].eliminated:
+            return RuleCheck(False, (f"faction {faction_id!r} has been eliminated",))
         if not decision.turn_intent:
             errors.append("turn_intent is required")
 
@@ -265,14 +266,22 @@ class RuleEngine:
                         errors.append(f"{label}: origin has no soldiers")
             if order.target is not None:
                 errors.extend(self._validate_visible_target(world, faction_id, order.target, label))
-            if order.action in {"attack", "raid"}:
+            if order.action in {"attack", "raid", "move"}:
                 if order.origin is None or order.target is None:
-                    errors.append(f"{label}: attack and raid require origin and target")
+                    errors.append(f"{label}: {order.action} requires origin and target")
                     continue
                 if not world.in_bounds(*order.origin) or not world.in_bounds(*order.target):
                     continue
                 if not self._adjacent(order.origin, order.target):
                     errors.append(f"{label}: target must be adjacent to origin")
+                if order.action == "move":
+                    origin_tile = world.tile_at(*order.origin)
+                    target_tile = world.tile_at(*order.target)
+                    if origin_tile.owner != faction_id:
+                        errors.append(f"{label}: origin must be owned by {faction_id}")
+                    if target_tile.owner != faction_id:
+                        errors.append(f"{label}: move target must be owned by {faction_id}")
+                    continue
                 target_tile = world.tile_at(*order.target)
                 if target_tile.owner in {None, faction_id}:
                     errors.append(f"{label}: target must be enemy-owned")
@@ -378,7 +387,7 @@ class RuleEngine:
         petition_types = {petition.kind for petition in decision.petitions}
         diplomacy = {order.proposal for order in decision.diplomacy_orders}
 
-        if _contains_any(text, ("war", "attack", "raid", "开战", "战争", "进攻", "攻打", "突袭", "攻占")):
+        if _contains_action_mention(text, ("war", "attack", "raid", "开战", "战争", "进攻", "攻打", "突袭", "攻占")):
             if not (military_actions & {"attack", "raid"} or "war" in diplomacy):
                 errors.append(
                     "plan mentions war/attack/raid. If this is a military action, submit attack/raid or war diplomacy; if this is peaceful expansion, use claim/settle wording and avoid war words."
@@ -388,16 +397,35 @@ class RuleEngine:
                 errors.append(
                     "plan mentions capturing enemy territory but has no attack military order"
                 )
-        if _contains_any(text, ("build house", "houses", "住房", "房屋", "建房")):
+        if _contains_action_mention(text, ("build house", "houses", "住房", "房屋", "建房")):
             if "build" not in population_tasks:
                 errors.append("plan mentions building houses but has no build population order")
-        if _contains_any(text, ("farm", "farmland", "耕", "农田", "种田")):
+        if _contains_action_mention(text, ("farm", "farmland", "耕", "农田", "种田")):
             if "farm" not in population_tasks:
                 errors.append("plan mentions farming but has no farm population order")
-        if _contains_any(text, ("weather", "rain", "storm", "drought", "天气", "降雨", "风暴", "干旱", "好天气")):
+        if _contains_action_mention(
+            text,
+            (
+                "weather petition",
+                "set weather",
+                "make rain",
+                "summon rain",
+                "请求天气",
+                "祈求天气",
+                "改变天气",
+                "天气神迹",
+                "请求降雨",
+                "祈求降雨",
+                "赐予降雨",
+                "制造风暴",
+                "驱散风暴",
+                "降雨",
+                "求雨",
+            ),
+        ):
             if "weather" not in petition_types:
                 errors.append("plan mentions weather but has no weather petition")
-        if _contains_any(text, ("expand", "settle", "claim", "扩张", "开拓", "定居", "纳入疆域", "占据空地", "占领新土地", "占领空地")):
+        if _contains_action_mention(text, ("expand", "settle", "claim", "扩张", "开拓", "定居", "纳入疆域", "占据空地", "占领新土地", "占领空地")):
             if not (territory_actions & {"claim", "settle"}):
                 errors.append("plan mentions expansion or settlement but has no claim/settle territory order")
         return errors
@@ -410,6 +438,10 @@ class RuleEngine:
     ) -> list[str]:
         idle_by_tile = {
             (tile.x, tile.y): _idle_count(tile, faction_id)
+            for tile in world.faction_tiles(faction_id)
+        }
+        population_by_tile = {
+            (tile.x, tile.y): tile.population_of(faction_id)
             for tile in world.faction_tiles(faction_id)
         }
         owned = set(idle_by_tile)
@@ -448,12 +480,21 @@ class RuleEngine:
                     label,
                     errors,
                 )
+                _consume_population_budget(
+                    population_by_tile,
+                    owned,
+                    (tile.x, tile.y),
+                    _trained_count(order.workers),
+                    label,
+                    errors,
+                )
             elif order.task == "settle" and order.target is not None:
                 _consume_settlement_budget(
                     world,
                     order.target,
                     label,
                     idle_by_tile,
+                    population_by_tile,
                     owned,
                     errors,
                 )
@@ -469,6 +510,7 @@ class RuleEngine:
                 order.target,
                 f"territory_order {index}",
                 idle_by_tile,
+                population_by_tile,
                 owned,
                 errors,
             )
@@ -567,6 +609,43 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
 
 
+def _contains_action_mention(text: str, needles: tuple[str, ...]) -> bool:
+    for needle in needles:
+        start = 0
+        while True:
+            index = text.find(needle, start)
+            if index < 0:
+                break
+            context = text[max(0, index - 10): index + len(needle) + 10]
+            if not _contains_any(
+                context,
+                (
+                    "不",
+                    "无",
+                    "没有",
+                    "无需",
+                    "暂不",
+                    "避免",
+                    "防止",
+                    "防备",
+                    "警惕",
+                    "准备",
+                    "未来",
+                    "考虑",
+                    "not ",
+                    "no ",
+                    "avoid",
+                    "without",
+                    "prepare",
+                    "future",
+                    "consider",
+                ),
+            ):
+                return True
+            start = index + len(needle)
+    return False
+
+
 def _mentions_military_capture(text: str) -> bool:
     return _contains_any(
         text,
@@ -662,11 +741,27 @@ def _consume_idle_budget(
         errors.append(f"{label}: idle population budget is overcommitted")
 
 
+def _consume_population_budget(
+    population_by_tile: dict[tuple[int, int], int],
+    owned: set[tuple[int, int]],
+    key: tuple[int, int],
+    amount: int,
+    label: str,
+    errors: list[str],
+) -> None:
+    if amount <= 0 or key not in owned:
+        return
+    population_by_tile[key] = population_by_tile.get(key, 0) - amount
+    if population_by_tile[key] <= 0:
+        errors.append(f"{label}: would leave source tile without population")
+
+
 def _consume_settlement_budget(
     world: WorldState,
     target: tuple[int, int],
     label: str,
     idle_by_tile: dict[tuple[int, int], int],
+    population_by_tile: dict[tuple[int, int], int],
     owned: set[tuple[int, int]],
     errors: list[str],
 ) -> None:
@@ -677,21 +772,37 @@ def _consume_settlement_budget(
         return
     if not tile.is_passable():
         return
-    donor_key = _best_adjacent_idle_donor(target, idle_by_tile, owned)
+    donor_key = _best_adjacent_idle_donor(
+        target,
+        idle_by_tile,
+        population_by_tile,
+        owned,
+    )
     if donor_key is None:
-        errors.append(f"{label}: faction has no idle population to occupy new territory")
+        errors.append(
+            f"{label}: faction has no idle population to occupy new territory while leaving the source tile populated"
+        )
         return
-    if idle_by_tile[donor_key] < SETTLEMENT_IDLE_COST or tile.capacity() < SETTLEMENT_IDLE_COST:
-        errors.append(f"{label}: faction has no idle population to occupy new territory")
+    if (
+        idle_by_tile[donor_key] < SETTLEMENT_IDLE_COST
+        or population_by_tile.get(donor_key, 0) <= SETTLEMENT_IDLE_COST
+        or tile.capacity() < SETTLEMENT_IDLE_COST
+    ):
+        errors.append(
+            f"{label}: faction has no idle population to occupy new territory while leaving the source tile populated"
+        )
         return
     idle_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
+    population_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
     idle_by_tile[target] = idle_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
+    population_by_tile[target] = population_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
     owned.add(target)
 
 
 def _best_adjacent_idle_donor(
     target: tuple[int, int],
     idle_by_tile: dict[tuple[int, int], int],
+    population_by_tile: dict[tuple[int, int], int],
     owned: set[tuple[int, int]],
 ) -> tuple[int, int] | None:
     candidates = [
@@ -699,6 +810,7 @@ def _best_adjacent_idle_donor(
         for key in owned
         if abs(key[0] - target[0]) + abs(key[1] - target[1]) == 1
         and idle_by_tile.get(key, 0) >= SETTLEMENT_IDLE_COST
+        and population_by_tile.get(key, 0) > SETTLEMENT_IDLE_COST
     ]
     if not candidates:
         return None

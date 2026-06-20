@@ -23,11 +23,10 @@ POPULATION_TASKS = (
     "train",
     "defend",
     "attack",
-    "scout",
 )
 RESOURCE_ACTIONS = ("reserve", "spend", "trade", "tribute")
-TERRITORY_ACTIONS = ("claim", "settle", "fortify", "abandon", "scout")
-MILITARY_ACTIONS = ("muster", "defend", "attack", "raid", "retreat")
+TERRITORY_ACTIONS = ("claim", "settle", "fortify", "abandon")
+MILITARY_ACTIONS = ("muster", "defend", "attack", "raid", "retreat", "move")
 DIPLOMACY_PROPOSALS = (
     "alliance",
     "trade",
@@ -63,8 +62,9 @@ Tool usage:
 - Call inspect with {"mode": "tiles", "tiles": [{"x": 1, "y": 2}]} to inspect
   specific visible coordinates. You may also call inspect with {"mode": "tiles",
   "center": {"x": 1, "y": 2}, "radius": 2} to inspect a small visible area.
-  Tile results include terrain, weather, owner, population, soldiers,
-  professions, houses, capacity, and protection if the tile is visible.
+  Tile results include terrain, weather, owner, home marker, population,
+  soldiers, professions, houses, capacity, and protection if the tile is
+  visible.
 - Call inspect with {"mode": "faction", "faction_id": "elf"} only for a
   discovered faction. It returns known relation, visible territory, visible
   population, visible soldiers, visible jobs, visible houses, and recent events.
@@ -78,15 +78,18 @@ Tool usage:
   order list empty if you do not need that category.
 - submit_leader_turn example:
   {"turn_intent":"增加粮食、修建房屋并扩张边境","population_orders":[{"task":"farm",
-  "target":{"x":3,"y":4},"workers":3},{"task":"build",
-  "target":{"x":3,"y":4},"workers":3}],"territory_orders":[{"action":"claim",
+  "target":{"x":3,"y":4},"workers":2},{"task":"build",
+  "target":{"x":3,"y":4},"workers":2}],"territory_orders":[{"action":"claim",
   "target":{"x":4,"y":4}}],"military_orders":[],"diplomacy_orders":[],
   "petitions":[],"public_decree":"今年优先开垦边境农田。",
-  "strategy_summary":"用3名闲置人口耕作、3名建房，并用3名迁入相邻空地。"}
+  "strategy_summary":"用2名闲置人口耕作、2名建房，并用1名闲置人口迁入相邻空地。"}
 
 Basic world:
 - You compete for land, food, safety, and long-term survival. Peace is a
   strategy, not the default ending.
+- Your final objective is to gain more territory, suppress rival civilizations,
+  and eventually defeat the other races. Alliances, trade, and peace are tools
+  for expansion, survival, and future victory, not the final goal.
 - The world is a tile map. Terrain, weather, population, soldiers, houses,
   resources, and ownership affect what your civilization can do.
 - Farmers increase food. Plains are naturally better for food. Rain usually
@@ -101,10 +104,18 @@ Basic world:
   people, not specialized workers.
 - Soldiers are the only people who fight. Raids can take resources; attacks
   can occupy enemy land if the battle is won and idle people can move in.
+- Soldiers can move only between adjacent owned tiles with the move military
+  action. Use move to reinforce the home tile, mass at a border, or prepare an
+  attack path; it moves soldiers, not population or idle people.
+- Each civilization has a home tile. Losing your home tile eliminates your
+  civilization: your population and soldiers become 0, your remaining resources
+  transfer to the captor, and your leader stops taking turns.
+- The default starting home tile has 10 farmers, 5 idle people, 5 soldiers,
+  and 2 houses. Initial resources are food=120, wood=80, and stone=40.
 - Owned territory must have population from that faction. New territory and
   captured territory require idle people to occupy it.
-- You only know factions your scouts have discovered. Unknown factions do not
-  exist for diplomacy or war planning until discovered.
+- You only know factions discovered through your territory visibility. Unknown
+  factions do not exist for diplomacy or war planning until discovered.
 
 Restrict:
 - You do not directly edit the world. You submit strategic orders; the rule
@@ -112,17 +123,31 @@ Restrict:
 - Only idle population can become farmers, lumberjacks, miners, or builders.
   Existing workers keep their current profession until future simulation rules
   change them.
-- Peaceful claim/settle consumes exactly 3 idle people per new territory. This
+- Peaceful claim/settle consumes exactly 1 idle person per new territory. This
   cost shares the same idle budget as farming, lumberjacking, mining, building,
   training, and defending.
-- With 10 idle people, claim 1 tile + farm 3 + build 3 is legal. Claim 2 tiles
-  + farm 3 + build 3 + train is illegal because it overuses idle people.
+- A claim/settle source tile must still have at least 1 civilian population
+  after sending 1 idle settler. Do not drain a 1-population frontier tile to
+  settle another tile. Soldiers do not keep ownership by
+  themselves.
+- With 5 idle people, claim 1 tile + farm 2 + build 2 is legal. Claim 2 tiles
+  + farm 2 + build 2 is illegal because it overuses idle people.
 - Leaders cannot ask the god for people and cannot turn existing workers back
   into idle people.
+- Idle people should usually be used deliberately for safe expansion,
+  terrain-matched work, house building, training, or defense. Do not leave idle
+  people unused for many turns without a concrete strategic reason.
+- Exception: if border war has happened or you plan to attack and occupy an
+  adjacent enemy tile, you may preserve at least 1 idle person on the attacking
+  origin tile. Captured land can only be occupied by idle people moving from
+  the battle origin tile into the battle target tile; idle people elsewhere in
+  the realm cannot occupy that captured tile.
 - Petitions may ask only for god powers: resources, weather, protection, or
   unowned territory. Never petition for population or vague miracles.
 - War, raids, and occupation must obey visibility, adjacency, soldier
   availability, and protection rules.
+- Protect your home tile. If a visible enemy home tile can be captured, it is a
+  decisive target because capturing it eliminates that civilization.
 - Do not repeatedly propose diplomacy that already matches the current
   relation. If borders touch and you have enough soldiers, consider war, raids,
   fortification, or deterrence.
@@ -528,6 +553,9 @@ class LeaderToolHandler(MethodToolHandler):
             "houses": world.total_houses(self.faction_id),
             "population_capacity": world.population_capacity(self.faction_id),
             "territory_count": len(owned),
+            "home_tile": _target_to_dict(faction.home_tile),
+            "home_owner": world.home_owner(self.faction_id),
+            "eliminated": faction.eliminated,
             "known_factions": sorted(faction.known_factions),
             "diplomacy": {
                 other_id: faction.relation_to(other_id)
@@ -575,6 +603,13 @@ class LeaderToolHandler(MethodToolHandler):
             "faction_id": other_id,
             "name": other.name,
             "relation": world.factions[self.faction_id].relation_to(other_id),
+            "visible_home_tile": (
+                _target_to_dict(other.home_tile)
+                if other.home_tile is not None
+                and world.is_visible(self.faction_id, *other.home_tile)
+                else None
+            ),
+            "eliminated": other.eliminated,
             "visible_territory_count": len(visible_owned),
             "visible_population": sum(tile.population_of(other_id) for tile in visible_owned),
             "visible_soldiers": sum(tile.soldiers_of(other_id) for tile in visible_owned),
@@ -667,6 +702,7 @@ def _build_leader_task(
         }
         for tile in world.faction_tiles(faction_id)
     ]
+    idle_focus_tiles = _idle_focus_tiles(world, faction_id)
     expansion_candidates = _expansion_candidates(world, faction_id)
     border_targets = _border_enemy_targets(world, faction_id)
     dangerous_weather = _dangerous_weather_tiles(world, faction_id)
@@ -680,6 +716,7 @@ def _build_leader_task(
         f"You lead faction {faction.name} ({faction_id}) at world tick {world.tick}.",
         f"Faction doctrine: {_faction_doctrine(faction_id)}",
         "Use inspect if needed, then call submit_leader_turn.",
+        "Long-term objective: gain more territory, build decisive strength, and defeat rival civilizations.",
         "Important language rule: write every player-facing sentence in Simplified Chinese / 简体中文。",
         "必须使用简体中文的字段：turn_intent, strategy_summary, public_decree, petition.reason, diplomacy message, resource purpose。",
         "Keep only enum/action/resource/faction IDs in English so the rule engine can parse them.",
@@ -691,14 +728,19 @@ def _build_leader_task(
         f"- diplomacy proposal: {', '.join(DIPLOMACY_PROPOSALS)}",
         f"- petition type: {', '.join(PETITION_TYPES)}",
         "Use only visible coordinates.",
+        "Use military action move to transfer soldiers only between adjacent owned tiles. It cannot move population or idle people.",
+        "Protect your home tile: if it is captured by another faction, your civilization is eliminated and all remaining resources go to the captor.",
         "Do not refresh diplomacy that already matches the current relation.",
         "Alliance from neutral is only a first trust step; war is valid when border pressure, crowding, or resource competition make peace costly.",
         "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
         "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
+        "If idle people exist, normally use them for safe expansion, terrain-matched work, house building, training, or defense.",
+        "War occupation exception: if adjacent border war has happened, or you plan to attack and occupy an adjacent enemy tile, reserve at least 1 idle person on that exact attacking origin tile. Captured land can only be occupied by idle people moving from the battle origin tile into the battle target tile; idle people on other tiles do not count.",
         "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack, raid, or capture enemy territory, include the matching military order. If you ask for weather, include a weather petition.",
         "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
         "Only idle people can become farmers, lumberjacks, miners, or builders. Do not assign more workers to a profession than the target tile has idle population.",
         f"Each claim/settle territory order consumes exactly {SETTLEMENT_IDLE_COST} idle people from an adjacent owned tile. Count this cost together with profession and training orders before submitting.",
+        "A claim/settle source tile must keep at least 1 civilian after settlers leave. Do not use a 1-person new outpost as the source for another same-turn claim, and do not combine its last civilian with training.",
         "There is no dismiss-worker or assign-back-to-idle order. Population growth is the normal source of new idle people.",
         "For houses, submit a build population order only. Do not submit a separate wood spend order; the build action spends wood automatically.",
         "Only discovered factions may be used in diplomacy or war planning.",
@@ -708,9 +750,11 @@ def _build_leader_task(
         f"Soldiers: {world.total_soldiers(faction_id)}",
         f"Jobs: {world.total_jobs(faction_id)}",
         f"Current idle budget: {world.total_jobs(faction_id).get('idle', 0)} idle people; each claim/settle costs {SETTLEMENT_IDLE_COST} idle people.",
+        f"Idle focus tiles: {idle_focus_tiles[:10]}",
         f"Houses: {world.total_houses(faction_id)}",
         f"Population capacity: {world.population_capacity(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",
+        f"Home tile status: {_home_tile_status(world, faction_id)}",
         f"Owned tiles: {owned_tiles}",
         f"Legal expansion candidates: {expansion_candidates[:8]}",
         f"Border enemy targets for legal war/raid planning: {border_targets[:8]}",
@@ -741,6 +785,7 @@ def _summarize_tile(world: WorldState, x: int, y: int) -> dict[str, Any]:
         "weather": tile.weather,
         "weather_duration": tile.weather_duration,
         "owner": tile.owner,
+        "home_of": world.home_of_tile(tile.x, tile.y),
         "population": dict(tile.population),
         "soldiers": dict(tile.soldiers),
         "professions": {
@@ -764,13 +809,80 @@ def _expansion_candidates(
                 continue
             if not world.is_visible(faction_id, neighbor.x, neighbor.y):
                 continue
+            sources = _settlement_sources(world, faction_id, neighbor.x, neighbor.y)
             candidates[(neighbor.x, neighbor.y)] = {
                 "x": neighbor.x,
                 "y": neighbor.y,
                 "terrain": neighbor.terrain,
                 "weather": neighbor.weather,
+                "settlement_sources": sources,
             }
     return [candidates[key] for key in sorted(candidates)]
+
+
+def _idle_focus_tiles(
+    world: WorldState,
+    faction_id: str,
+) -> list[dict[str, Any]]:
+    tiles = []
+    for tile in world.faction_tiles(faction_id):
+        population = tile.population_of(faction_id)
+        idle = tile.professions_of(faction_id).get("idle", 0)
+        if idle <= 0:
+            continue
+        safe_idle = min(idle, max(0, population - 1))
+        tiles.append(
+            {
+                "x": tile.x,
+                "y": tile.y,
+                "terrain": tile.terrain,
+                "weather": tile.weather,
+                "population": population,
+                "idle": idle,
+                "soldiers": tile.soldiers_of(faction_id),
+                "jobs": tile.professions_of(faction_id),
+                "houses": tile.houses,
+                "capacity": tile.capacity(),
+                "safe_settlement_groups": safe_idle // SETTLEMENT_IDLE_COST,
+                "recommended_idle_uses": _recommended_idle_uses(tile.terrain),
+            }
+        )
+    return sorted(tiles, key=lambda item: (-item["idle"], item["x"], item["y"]))
+
+
+def _recommended_idle_uses(terrain: str) -> list[str]:
+    if terrain == "plain":
+        return ["farm", "build", "train"]
+    if terrain == "forest":
+        return ["gather_wood", "build", "train"]
+    if terrain == "hill":
+        return ["mine_stone", "build", "train"]
+    return ["build", "train"]
+
+
+def _settlement_sources(
+    world: WorldState,
+    faction_id: str,
+    x: int,
+    y: int,
+) -> list[dict[str, Any]]:
+    sources = []
+    for source in world.neighbors(x, y):
+        if source.owner != faction_id:
+            continue
+        population = source.population_of(faction_id)
+        idle = source.professions_of(faction_id).get("idle", 0)
+        safe_idle = min(idle, max(0, population - 1))
+        sources.append(
+            {
+                "x": source.x,
+                "y": source.y,
+                "population": population,
+                "idle": idle,
+                "safe_settlement_groups": safe_idle // SETTLEMENT_IDLE_COST,
+            }
+        )
+    return sorted(sources, key=lambda item: (item["x"], item["y"]))
 
 
 def _border_enemy_targets(
@@ -796,6 +908,16 @@ def _border_enemy_targets(
                 "owner": target.owner,
                 "relation": relation_map.get(target.owner, "neutral"),
                 "origin_soldiers": soldiers,
+                "origin_population": origin.population_of(faction_id),
+                "origin_idle": origin.professions_of(faction_id).get("idle", 0),
+                "origin_can_supply_occupation": (
+                    origin.professions_of(faction_id).get("idle", 0) >= SETTLEMENT_IDLE_COST
+                    and origin.population_of(faction_id) > SETTLEMENT_IDLE_COST
+                    and target.capacity() >= SETTLEMENT_IDLE_COST
+                ),
+                "target_is_enemy_home": (
+                    world.factions[target.owner].home_tile == (target.x, target.y)
+                ),
                 "target_soldiers": target.soldiers_of(target.owner),
                 "target_population": target.population_of(target.owner),
                 "target_houses": target.houses,
@@ -825,13 +947,39 @@ def _dangerous_weather_tiles(
     ]
 
 
+def _home_tile_status(world: WorldState, faction_id: str) -> dict[str, Any]:
+    faction = world.factions[faction_id]
+    if faction.home_tile is None:
+        return {"home_tile": None, "eliminated": faction.eliminated}
+    tile = world.tile_at(*faction.home_tile)
+    adjacent_enemies = [
+        {
+            "x": neighbor.x,
+            "y": neighbor.y,
+            "owner": neighbor.owner,
+            "soldiers": neighbor.soldiers_of(neighbor.owner) if neighbor.owner else 0,
+        }
+        for neighbor in world.neighbors(tile.x, tile.y)
+        if neighbor.owner is not None and neighbor.owner != faction_id
+    ]
+    return {
+        "home_tile": _target_to_dict(faction.home_tile),
+        "owner": tile.owner,
+        "population": tile.population_of(faction_id),
+        "soldiers": tile.soldiers_of(faction_id),
+        "protected": tile.protected,
+        "eliminated": faction.eliminated,
+        "adjacent_enemies": adjacent_enemies,
+    }
+
+
 def _faction_doctrine(faction_id: str) -> str:
     if faction_id == "orc":
-        return "Aggressive raiders. Prefer expansion, mustering, raids, and war when strong border targets exist."
+        return "Aggressive conquerors. Prefer expansion and war; preserve idle settlers for adjacent attacks, otherwise convert idle people to food, wood, stone, building, or training."
     if faction_id == "elf":
-        return "Defensive stewards. Prefer forests, protection, and alliances, but strike first against border crowding or threats."
+        return "Defensive stewards. Prefer forests, protection, and alliances, but actively expand when safe candidates and idle people exist; prepare idle settlers and soldiers after border war."
     if faction_id == "human":
-        return "Pragmatic settlers. Expand into open land first, then use war or deterrence when boxed in."
+        return "Pragmatic settlers. Expand into open land when safe candidates and idle people exist, then use war or deterrence when boxed in; prepare idle settlers and soldiers after border war."
     return "Survive, expand, and protect your people."
 
 

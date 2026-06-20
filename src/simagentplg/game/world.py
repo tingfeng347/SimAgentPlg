@@ -9,7 +9,9 @@ WEATHER_TYPES = ("clear", "rain", "drought", "storm")
 TERRAIN_TYPES = ("plain", "forest", "hill", "water", "mountain")
 DEFAULT_FACTIONS = ("human", "elf", "orc")
 PROFESSION_TYPES = ("farmer", "lumberjack", "miner", "builder", "idle")
-SETTLEMENT_IDLE_COST = 3
+SETTLEMENT_IDLE_COST = 1
+MAX_START_DISTANCE = 8
+MIN_START_DISTANCE = 4
 BASE_TILE_CAPACITY = {
     "plain": 60,
     "forest": 45,
@@ -190,6 +192,8 @@ class Faction:
     active_orders: dict[str, Any] = field(default_factory=dict)
     known_factions: set[str] = field(default_factory=set)
     last_plan_snapshot: dict[str, Any] = field(default_factory=dict)
+    home_tile: tuple[int, int] | None = None
+    eliminated: bool = False
 
     def relation_to(self, other_faction: str) -> str:
         return self.diplomacy.get(other_faction, "neutral")
@@ -240,6 +244,18 @@ class WorldState:
     def faction_tiles(self, faction_id: str) -> list[Tile]:
         return [tile for tile in self.tiles if tile.owner == faction_id]
 
+    def home_owner(self, faction_id: str) -> str | None:
+        home = self.factions[faction_id].home_tile
+        if home is None:
+            return None
+        return self.tile_at(*home).owner
+
+    def home_of_tile(self, x: int, y: int) -> str | None:
+        for faction_id, faction in self.factions.items():
+            if faction.home_tile == (x, y):
+                return faction_id
+        return None
+
     def total_population(self, faction_id: str) -> int:
         return sum(tile.population_of(faction_id) for tile in self.tiles)
 
@@ -260,6 +276,8 @@ class WorldState:
         return totals
 
     def visible_tiles(self, faction_id: str, radius: int = 2) -> set[tuple[int, int]]:
+        if self.factions[faction_id].eliminated:
+            return set()
         visible: set[tuple[int, int]] = set()
         for owned in self.faction_tiles(faction_id):
             for y in range(owned.y - radius, owned.y + radius + 1):
@@ -274,15 +292,65 @@ class WorldState:
     def discover_factions(self) -> list[tuple[str, str]]:
         discoveries: list[tuple[str, str]] = []
         for faction_id, faction in self.factions.items():
+            if faction.eliminated:
+                continue
             faction.known_factions.add(faction_id)
             visible = self.visible_tiles(faction_id)
             for other_id in self.factions:
-                if other_id == faction_id or other_id in faction.known_factions:
+                if (
+                    other_id == faction_id
+                    or other_id in faction.known_factions
+                    or self.factions[other_id].eliminated
+                ):
                     continue
                 if any((tile.x, tile.y) in visible for tile in self.faction_tiles(other_id)):
                     faction.known_factions.add(other_id)
                     discoveries.append((faction_id, other_id))
         return discoveries
+
+    def eliminate_faction_if_home_captured(
+        self,
+        defeated_id: str,
+        conqueror_id: str,
+    ) -> bool:
+        if defeated_id == conqueror_id:
+            return False
+        defeated = self.factions[defeated_id]
+        if defeated.eliminated or defeated.home_tile is None:
+            return False
+        home_tile = self.tile_at(*defeated.home_tile)
+        if home_tile.owner != conqueror_id:
+            return False
+
+        conqueror = self.factions[conqueror_id]
+        transferred: dict[str, int] = {}
+        for resource in RESOURCE_TYPES:
+            amount = defeated.resources.amount(resource)
+            transferred[resource] = amount
+            if amount > 0:
+                defeated.resources.remove(resource, amount)
+                conqueror.resources.add(resource, amount)
+
+        for tile in self.tiles:
+            tile.set_population(defeated_id, 0)
+            tile.soldiers.pop(defeated_id, None)
+            if tile.owner == defeated_id:
+                tile.owner = None
+                tile.houses = 0
+
+        defeated.active_orders = {}
+        defeated.eliminated = True
+        self.add_event(
+            "elimination",
+            (
+                f"{defeated_id} was eliminated when {conqueror_id} captured "
+                f"home tile {defeated.home_tile}; resources transferred "
+                f"food={transferred['food']} wood={transferred['wood']} "
+                f"stone={transferred['stone']}"
+            ),
+            faction_id=conqueror_id,
+        )
+        return True
 
     def enforce_population_ownership(self) -> None:
         for tile in self.tiles:
@@ -431,15 +499,16 @@ def _seed_faction_land(
     center: tuple[int, int],
 ) -> None:
     cx, cy = center
+    world.factions[faction_id].home_tile = center
     tile = world.tile_at(cx, cy)
     if not tile.is_passable():
         tile.terrain = "plain"
     tile.owner = faction_id
-    tile.houses = 16
-    tile.set_population(faction_id, 40)
-    tile.professions[faction_id]["farmer"] = 30
+    tile.houses = 2
+    tile.set_population(faction_id, 15)
+    tile.professions[faction_id]["farmer"] = 10
     tile.ensure_professions(faction_id)
-    tile.soldiers[faction_id] = 20
+    tile.soldiers[faction_id] = 5
 
 
 def _random_start_positions(
@@ -451,21 +520,28 @@ def _random_start_positions(
     rng.shuffle(coordinates)
     starts: dict[str, tuple[int, int]] = {}
     for faction_id in faction_ids:
-        target = _pop_random_start(
-            coordinates,
-            starts.values(),
-            min_distance=3,
-        )
-        if target is None:
+        target = None
+        for min_distance in _start_distance_tiers(world):
             target = _pop_random_start(
                 coordinates,
                 starts.values(),
-                min_distance=1,
+                min_distance=min_distance,
             )
+            if target is not None:
+                break
         if target is None:
             raise ValueError("world is too small to place all factions")
         starts[faction_id] = target
     return starts
+
+
+def _start_distance_tiers(world: WorldState) -> tuple[int, ...]:
+    preferred = min(
+        MAX_START_DISTANCE,
+        max(MIN_START_DISTANCE, min(world.width, world.height) - 2),
+    )
+    tiers = [preferred, 6, 4, 3, 1]
+    return tuple(dict.fromkeys(distance for distance in tiers if distance <= preferred))
 
 
 def _pop_random_start(

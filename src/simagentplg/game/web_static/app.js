@@ -4,7 +4,6 @@ const tileTip = document.getElementById("tileTip");
 const worldMeta = document.getElementById("worldMeta");
 const pauseBanner = document.getElementById("pauseBanner");
 const factionSelect = document.getElementById("factionSelect");
-const claimFactionSelect = document.getElementById("claimFactionSelect");
 const resourceSelect = document.getElementById("resourceSelect");
 const weatherSelect = document.getElementById("weatherSelect");
 const weatherDuration = document.getElementById("weatherDuration");
@@ -105,10 +104,11 @@ const eventKindNames = {
   god: "神迹",
   rule_reject: "规则拒绝",
   resource: "资源",
-  scout: "侦察",
+  discovery: "发现",
   territory: "领土",
   military: "军事",
   battle: "战斗",
+  elimination: "淘汰",
   diplomacy: "外交",
   petition: "祈求",
   decree: "法令",
@@ -145,7 +145,6 @@ function wireControls() {
   document.getElementById("tickFive").addEventListener("click", () => tick(5));
   document.getElementById("giveButton").addEventListener("click", giveResource);
   document.getElementById("weatherButton").addEventListener("click", setWeather);
-  document.getElementById("claimButton").addEventListener("click", claimTile);
 
   canvas.addEventListener("mousemove", onCanvasMove);
   canvas.addEventListener("mouseleave", () => {
@@ -180,14 +179,6 @@ async function setWeather() {
     y: Number(coordY.value),
     weather: weatherSelect.value,
     duration: Number(weatherDuration.value),
-  });
-}
-
-async function claimTile() {
-  await mutate("/api/god/claim", {
-    faction_id: claimFactionSelect.value,
-    x: Number(coordX.value),
-    y: Number(coordY.value),
   });
 }
 
@@ -232,7 +223,6 @@ function setButtonsDisabled(disabled) {
 function hydrateControls() {
   const factionIds = state.factions.map((faction) => faction.faction_id);
   syncOptions(factionSelect, factionIds, factionNames);
-  syncOptions(claimFactionSelect, factionIds, factionNames);
   syncOptions(resourceSelect, state.resources, resourceNames);
   syncOptions(weatherSelect, state.weather_types, weatherNames);
 }
@@ -331,6 +321,10 @@ function drawMap() {
       ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
     }
 
+    if (tile.home_of) {
+      drawHomeStar(x, y, tileSize);
+    }
+
     if (selectedTile && selectedTile.x === tile.x && selectedTile.y === tile.y) {
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 2;
@@ -343,6 +337,30 @@ function drawMap() {
   }
 }
 
+function drawHomeStar(x, y, size) {
+  const cx = x + size * 0.23;
+  const cy = y + size * 0.23;
+  const outer = Math.max(4, size * 0.16);
+  const inner = outer * 0.48;
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < 10; i += 1) {
+    const radius = i % 2 === 0 ? outer : inner;
+    const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+    const px = cx + Math.cos(angle) * radius;
+    const py = cy + Math.sin(angle) * radius;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = "#ffe27a";
+  ctx.strokeStyle = "#1b1b1b";
+  ctx.lineWidth = 1.5;
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function renderFactions() {
   factionsEl.innerHTML = "";
   state.factions.forEach((faction) => {
@@ -351,9 +369,10 @@ function renderFactions() {
     row.innerHTML = `
       <div class="faction-title">
         <span>${displayFaction(faction.faction_id)}</span>
-        <span class="tag ${faction.faction_id}">阵营</span>
+        <span class="tag ${faction.faction_id}">${faction.eliminated ? "已淘汰" : "阵营"}</span>
       </div>
       <div class="metric-line">首领：${displayLeader(faction.leader_name)}</div>
+      <div class="metric-line">出生地 ${formatHomeTile(faction.home_tile)}${faction.eliminated ? " · 已淘汰" : ""}</div>
       <div class="metric-line">人口 ${faction.population}/${faction.population_capacity} · 士兵 ${faction.soldiers} · 领土 ${faction.territory_count}</div>
       <div class="metric-line">房屋 ${faction.houses} · 职业 ${formatJobs(faction.jobs)}</div>
       <div class="metric-line">食物 ${faction.resources.food} · 木材 ${faction.resources.wood} · 石料 ${faction.resources.stone}</div>
@@ -448,6 +467,7 @@ function tileDetails(tile) {
   return `
     <strong>(${tile.x}, ${tile.y})</strong><br>
     地形：${displayTerrain(tile.terrain)}<br>
+    出生地：${tile.home_of ? displayFaction(tile.home_of) : "无"}<br>
     天气：${displayWeather(tile.weather)}${tile.weather_duration ? `（剩余 ${tile.weather_duration} 刻）` : ""}<br>
     归属：${tile.owner ? displayFaction(tile.owner) : "无"}<br>
     房屋：${tile.houses || 0} · 容量：${tile.capacity || 0}<br>
@@ -455,6 +475,11 @@ function tileDetails(tile) {
     士兵：${soldiers}<br>
     职业：<br>${jobs}
   `;
+}
+
+function formatHomeTile(homeTile) {
+  if (!homeTile) return "未知";
+  return `(${homeTile.x}, ${homeTile.y})`;
 }
 
 function formatDiplomacy(diplomacy) {
@@ -538,9 +563,6 @@ function formatEvent(event) {
   match = message.match(/^(\w+) built (\d+) houses at \((\d+), (\d+)\)$/);
   if (match) return `${displayFaction(match[1])} 在（${match[3]}, ${match[4]}）建造 ${match[2]} 间房屋`;
 
-  match = message.match(/^(\w+) scouts around (.+)$/);
-  if (match) return `${displayFaction(match[1])} 侦察 ${formatTarget(match[2])} 周边`;
-
   match = message.match(/^(\w+) discovered (\w+)$/);
   if (match) return `${displayFaction(match[1])} 发现了 ${displayFaction(match[2])}`;
 
@@ -561,6 +583,12 @@ function formatEvent(event) {
 
   match = message.match(/^(\w+) captured (.+) from (\w+)(?: with (\d+) settlers and took (.*))?$/);
   if (match) return `${displayFaction(match[1])} 从 ${displayFaction(match[3])} 手中占领 ${formatTarget(match[2])}${match[4] ? `，迁入 ${match[4]} 人，缴获 ${formatLoot(match[5])}` : ""}`;
+
+  match = message.match(/^(\w+) was eliminated when (\w+) captured home tile (.+); resources transferred food=(\d+) wood=(\d+) stone=(\d+)$/);
+  if (match) return `${displayFaction(match[2])} 占领 ${displayFaction(match[1])} 出生地 ${formatTarget(match[3])}，${displayFaction(match[1])} 被淘汰，资源转移：食物 ${match[4]}、木材 ${match[5]}、石料 ${match[6]}`;
+
+  match = message.match(/^(\w+) moved (\d+) soldiers from (.+) to (.+)$/);
+  if (match) return `${displayFaction(match[1])} 从 ${formatTarget(match[3])} 调动 ${match[2]} 名士兵到 ${formatTarget(match[4])}`;
 
   match = message.match(/^(\w+) raided (.+) from (\w+) and took (.*)$/);
   if (match) return `${displayFaction(match[1])} 突袭 ${displayFaction(match[3])} 的 ${formatTarget(match[2])}，缴获 ${formatLoot(match[4])}`;

@@ -140,16 +140,28 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         )
         for faction_id in first.factions:
             self.assertEqual(len(first.faction_tiles(faction_id)), 1)
-            self.assertEqual(first.total_population(faction_id), 40)
-            self.assertEqual(first.total_soldiers(faction_id), 20)
+            self.assertEqual(first.total_population(faction_id), 15)
+            self.assertEqual(first.total_soldiers(faction_id), 5)
+            self.assertEqual(first.total_houses(faction_id), 2)
             jobs = first.total_jobs(faction_id)
-            self.assertEqual(jobs["farmer"], 30)
+            self.assertEqual(jobs["farmer"], 10)
             self.assertEqual(jobs["lumberjack"], 0)
             self.assertEqual(jobs["miner"], 0)
             self.assertEqual(jobs["builder"], 0)
-            self.assertEqual(jobs["idle"], 10)
+            self.assertEqual(jobs["idle"], 5)
+            self.assertIsNotNone(first.factions[faction_id].home_tile)
+            self.assertEqual(first.home_owner(faction_id), faction_id)
+            home = first.factions[faction_id].home_tile
+            self.assertEqual(first.home_of_tile(*home), faction_id)
         self.assertIn("Tick 0", render_map(first))
         self.assertIn("Human", render_status(first))
+
+    def test_starting_home_tiles_are_not_too_close(self) -> None:
+        default_world = create_default_world(width=32, height=20, seed=123)
+        web_sized_world = create_default_world(width=12, height=8, seed=9)
+
+        self.assertGreaterEqual(_minimum_home_distance(default_world), 8)
+        self.assertGreaterEqual(_minimum_home_distance(web_sized_world), 6)
 
     def test_god_commands_change_world_and_inbox(self) -> None:
         world = create_default_world(seed=1)
@@ -174,6 +186,29 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         engine.god.answer_petition(1, True)
         self.assertEqual(world.petitions[0].status, "approved")
         self.assertEqual(world.factions["human"].resources.wood, 85)
+
+    def test_god_claiming_home_tile_eliminates_previous_owner(self) -> None:
+        world = create_default_world(seed=1)
+        engine = GameEngine(world)
+        human = world.faction_tiles("human")[0]
+        target = world.neighbors(human.x, human.y)[0]
+        target.terrain = "plain"
+        target.owner = "elf"
+        target.set_population("elf", 6)
+        world.factions["elf"].home_tile = (target.x, target.y)
+        world.factions["elf"].resources.food = 33
+        world.factions["elf"].resources.wood = 22
+        world.factions["elf"].resources.stone = 11
+        before = world.factions["human"].resources.as_dict()
+
+        engine.god.claim_tile("human", target.x, target.y)
+
+        self.assertTrue(world.factions["elf"].eliminated)
+        self.assertEqual(world.total_population("elf"), 0)
+        self.assertEqual(world.total_soldiers("elf"), 0)
+        self.assertEqual(world.factions["human"].resources.food, before["food"] + 33)
+        self.assertEqual(world.factions["human"].resources.wood, before["wood"] + 22)
+        self.assertEqual(world.factions["human"].resources.stone, before["stone"] + 11)
 
     def test_god_claim_must_border_existing_territory(self) -> None:
         world = create_default_world(seed=1)
@@ -260,9 +295,9 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(check.accepted, check.errors)
         npc.execute_active_orders(world, "human")
 
-        self.assertGreater(worker_tile.professions_of("human")["farmer"], 30)
+        self.assertGreater(worker_tile.professions_of("human")["farmer"], 10)
         self.assertEqual(world.tile_at(*target).owner, "human")
-        self.assertEqual(world.tile_at(*target).population_of("human"), 3)
+        self.assertEqual(world.tile_at(*target).population_of("human"), 1)
 
     def test_idle_budget_allows_one_claim_with_jobs(self) -> None:
         world = create_default_world(seed=30)
@@ -282,12 +317,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "farm",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 2,
                     },
                     {
                         "task": "build",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 2,
                     },
                 ],
                 "territory_orders": [
@@ -301,10 +336,10 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         npc.execute_active_orders(world, "human")
 
         self.assertEqual(target.owner, "human")
-        self.assertEqual(target.population_of("human"), 3)
+        self.assertEqual(target.population_of("human"), 1)
         jobs = world.total_jobs("human")
-        self.assertEqual(jobs["farmer"], 33)
-        self.assertEqual(jobs["builder"], 3)
+        self.assertEqual(jobs["farmer"], 12)
+        self.assertEqual(jobs["builder"], 2)
 
     def test_settlement_moves_idle_without_reducing_farmers(self) -> None:
         world = create_default_world(seed=30)
@@ -337,9 +372,72 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         after_jobs = world.total_jobs("human")
         self.assertEqual(after_jobs["farmer"], before_jobs["farmer"])
         self.assertEqual(after_jobs["idle"], before_jobs["idle"])
-        self.assertEqual(targets[0].population_of("human"), 3)
-        self.assertEqual(targets[1].population_of("human"), 3)
+        self.assertEqual(targets[0].population_of("human"), 1)
+        self.assertEqual(targets[1].population_of("human"), 1)
         self.assertEqual(len(world.faction_tiles("human")), 3)
+
+    def test_settlement_does_not_drain_source_tile_population(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        target = _adjacent_empty_tile(world, "human")
+        origin.set_population("human", 2)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 2,
+        }
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "训练一名士兵并派一人扩张",
+                "population_orders": [
+                    {
+                        "task": "train",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 5,
+                    }
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target[0], "y": target[1]}}
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(
+            any("source tile populated" in error for error in check.errors),
+            check.errors,
+        )
+
+    def test_npc_refuses_settlement_that_would_empty_source_tile(self) -> None:
+        world = create_default_world(seed=30)
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = _adjacent_empty_tile(world, "human")
+        target_tile = world.tile_at(*target)
+        origin.set_population("human", 1)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 1,
+        }
+        world.factions["human"].active_orders = {
+            "territory_orders": [
+                {"action": "claim", "target": {"x": target[0], "y": target[1]}}
+            ]
+        }
+
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(origin.owner, "human")
+        self.assertIsNone(target_tile.owner)
+        self.assertTrue(any("failed to settle" in event.message for event in world.events))
 
     def test_idle_budget_rejects_jobs_and_settlement_overcommit(self) -> None:
         world = create_default_world(seed=30)
@@ -366,7 +464,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(check.accepted)
         self.assertTrue(any("idle population" in error for error in check.errors))
-        self.assertTrue(any("current idle=10" in error for error in check.errors))
+        self.assertTrue(any("current idle=5" in error for error in check.errors))
 
     def test_idle_budget_rejects_common_turn_five_overcommit(self) -> None:
         world = create_default_world(seed=30)
@@ -386,12 +484,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "farm",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 5,
                     },
                     {
                         "task": "build",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 4,
                     },
                     {
                         "task": "train",
@@ -409,8 +507,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         check = rules.validate_decision(world, "human", decision)
 
         self.assertFalse(check.accepted)
-        self.assertTrue(any("claim/settle need=6" in error for error in check.errors))
-        self.assertTrue(any("jobs/training need=7" in error for error in check.errors))
+        self.assertTrue(any("claim/settle need=2" in error for error in check.errors))
+        self.assertTrue(any("jobs/training need=10" in error for error in check.errors))
 
     def test_peaceful_occupation_text_with_claim_is_not_military_capture(self) -> None:
         world = create_default_world(seed=30)
@@ -448,6 +546,19 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(check.accepted)
         self.assertTrue(any("capturing enemy territory" in error for error in check.errors))
+
+    def test_negated_plan_keywords_do_not_require_matching_orders(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "天气晴好，无需祈求天气；暂不发动进攻，也不做任何领土扩张。",
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertTrue(check.accepted, check.errors)
 
     def test_npc_grows_population_from_food_and_capacity(self) -> None:
         world = create_default_world(seed=31)
@@ -511,6 +622,152 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(target.population_of("human"), 0)
         self.assertEqual(world.factions["human"].relation_to("elf"), "war")
         self.assertTrue(any(event.kind == "battle" for event in world.events))
+
+    def test_military_move_transfers_soldiers_between_adjacent_owned_tiles(self) -> None:
+        world = create_default_world(seed=36)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = _adjacent_empty_tile(world, "human")
+        target_tile = world.tile_at(*target)
+        target_tile.terrain = "plain"
+        target_tile.owner = "human"
+        target_tile.set_population("human", 3)
+        target_tile.soldiers["human"] = 0
+        origin.soldiers["human"] = 20
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "调兵防守边境",
+                "military_orders": [
+                    {
+                        "action": "move",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": target_tile.x, "y": target_tile.y},
+                        "force_ratio": 0.5,
+                    }
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        npc.execute_active_orders(world, "human")
+
+        self.assertTrue(check.accepted, check.errors)
+        self.assertEqual(origin.soldiers_of("human"), 10)
+        self.assertEqual(target_tile.soldiers_of("human"), 10)
+        self.assertTrue(any("moved 10 soldiers" in event.message for event in world.events))
+
+    def test_military_move_requires_adjacent_owned_target(self) -> None:
+        world = create_default_world(seed=36)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        target = _non_adjacent_empty_tile(world, "human")
+        target_tile = world.tile_at(*target)
+        target_tile.terrain = "plain"
+        target_tile.owner = "human"
+        target_tile.set_population("human", 3)
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "远距离调兵",
+                "military_orders": [
+                    {
+                        "action": "move",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": target_tile.x, "y": target_tile.y},
+                        "force_ratio": 1,
+                    }
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("adjacent" in error for error in check.errors))
+
+    def test_capturing_home_tile_eliminates_defender_and_transfers_resources(self) -> None:
+        world = create_default_world(seed=37)
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "elf"
+        target.set_population("elf", 5)
+        target.soldiers["elf"] = 1
+        world.factions["elf"].home_tile = (target.x, target.y)
+        world.factions["elf"].resources.food = 60
+        world.factions["elf"].resources.wood = 30
+        world.factions["elf"].resources.stone = 12
+        world.factions["human"].known_factions.add("elf")
+        origin.set_population("human", 10)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 10,
+        }
+        origin.soldiers["human"] = 30
+        before = world.factions["human"].resources.as_dict()
+        world.factions["human"].active_orders = {
+            "military_orders": [
+                {
+                    "action": "attack",
+                    "origin": {"x": origin.x, "y": origin.y},
+                    "target": {"x": target.x, "y": target.y},
+                    "force_ratio": 1,
+                }
+            ]
+        }
+
+        npc.execute_active_orders(world, "human")
+
+        self.assertTrue(world.factions["elf"].eliminated)
+        self.assertEqual(world.total_population("elf"), 0)
+        self.assertEqual(world.total_soldiers("elf"), 0)
+        self.assertEqual(
+            world.factions["elf"].resources.as_dict(),
+            {"food": 0, "wood": 0, "stone": 0},
+        )
+        self.assertEqual(world.factions["human"].resources.food, before["food"] + 60)
+        self.assertEqual(world.factions["human"].resources.wood, before["wood"] + 30)
+        self.assertEqual(world.factions["human"].resources.stone, before["stone"] + 12)
+        self.assertEqual(target.owner, "human")
+        self.assertTrue(any(event.kind == "elimination" for event in world.events))
+
+    def test_capturing_non_home_tile_does_not_eliminate_defender(self) -> None:
+        world = create_default_world(seed=37)
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "elf"
+        target.set_population("elf", 5)
+        target.soldiers["elf"] = 1
+        world.factions["human"].known_factions.add("elf")
+        origin.set_population("human", 10)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 10,
+        }
+        origin.soldiers["human"] = 30
+        world.factions["human"].active_orders = {
+            "military_orders": [
+                {
+                    "action": "attack",
+                    "origin": {"x": origin.x, "y": origin.y},
+                    "target": {"x": target.x, "y": target.y},
+                    "force_ratio": 1,
+                }
+            ]
+        }
+
+        npc.execute_active_orders(world, "human")
+
+        self.assertFalse(world.factions["elf"].eliminated)
 
     def test_successful_attack_loots_resource_share(self) -> None:
         world = create_default_world(seed=37)
@@ -656,7 +913,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "build",
                         "target": {"x": tile.x, "y": tile.y},
-                        "workers": 10,
+                        "workers": 5,
                     }
                 ],
             }
@@ -909,6 +1166,59 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("There is no dismiss-worker or assign-back-to-idle order", task)
         self.assertNotIn("assign them back to idle", LEADER_SYSTEM_PROMPT)
 
+    def test_leader_task_emphasizes_victory_idle_use_and_occupation_reserve(self) -> None:
+        world = create_default_world(seed=49)
+
+        task = _build_leader_task(world, "human", None)
+
+        self.assertIn("final objective", LEADER_SYSTEM_PROMPT)
+        self.assertIn("defeat the other races", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Soldiers can move only between adjacent owned tiles", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Losing your home tile eliminates your", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Protect your home tile", LEADER_SYSTEM_PROMPT)
+        self.assertIn("10 farmers, 5 idle people, 5 soldiers", LEADER_SYSTEM_PROMPT)
+        self.assertIn("2 houses", LEADER_SYSTEM_PROMPT)
+        self.assertIn("food=120, wood=80, and stone=40", LEADER_SYSTEM_PROMPT)
+        self.assertIn('"workers":2', LEADER_SYSTEM_PROMPT)
+        self.assertIn("Idle people should usually be used deliberately", LEADER_SYSTEM_PROMPT)
+        self.assertIn("preserve at least 1 idle person on the attacking", LEADER_SYSTEM_PROMPT)
+        self.assertIn("battle origin tile into the battle target tile", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Long-term objective", task)
+        self.assertIn("defeat rival civilizations", task)
+        self.assertIn("Home tile status:", task)
+        self.assertIn("move", task)
+        self.assertIn("Idle focus tiles:", task)
+        self.assertIn("recommended_idle_uses", task)
+        self.assertIn("safe_settlement_groups", task)
+        self.assertIn("settlement_sources", task)
+        self.assertIn("reserve at least 1 idle person on that exact attacking origin tile", task)
+        self.assertIn("idle people on other tiles do not count", task)
+
+    def test_leader_task_marks_border_origin_idle_for_occupation(self) -> None:
+        world = create_default_world(seed=52)
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "orc"
+        target.set_population("orc", 5)
+        target.soldiers["orc"] = 0
+        world.factions["human"].known_factions.add("orc")
+        origin.set_population("human", 5)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 5,
+        }
+        origin.soldiers["human"] = 20
+
+        task = _build_leader_task(world, "human", None)
+
+        self.assertIn("'origin_idle': 5", task)
+        self.assertIn("'origin_can_supply_occupation': True", task)
+        self.assertIn("'target_is_enemy_home': False", task)
+
     def test_leader_task_includes_previous_execution_snapshot(self) -> None:
         world = create_default_world(seed=48)
         world.factions["human"].last_plan_snapshot = {
@@ -1002,8 +1312,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             {"mode": "faction", "faction_id": "elf"}
         )
 
-        self.assertEqual(realm.data["population"], 40)
-        self.assertEqual(realm.data["jobs"]["farmer"], 30)
+        self.assertEqual(realm.data["population"], 15)
+        self.assertEqual(realm.data["jobs"]["farmer"], 10)
         self.assertEqual(tiles.data["tiles"][0]["owner"], "human")
         self.assertEqual(faction.data["faction_id"], "elf")
 
@@ -1073,12 +1383,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "farm",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 5,
                     },
                     {
                         "task": "build",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 4,
                     },
                     {
                         "task": "train",
@@ -1099,12 +1409,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "farm",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 2,
                     },
                     {
                         "task": "build",
                         "target": {"x": origin.x, "y": origin.y},
-                        "workers": 3,
+                        "workers": 2,
                     },
                 ],
                 "territory_orders": [
@@ -1126,8 +1436,54 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         await engine.tick()
 
         self.assertFalse(world.paused)
-        self.assertIn("current idle=10", human.feedback[1] or "")
+        self.assertIn("current idle=5", human.feedback[1] or "")
         self.assertEqual(targets[0].owner, "human")
+
+    async def test_engine_default_allows_ten_decision_attempts(self) -> None:
+        world = create_default_world(seed=51)
+        bad = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "break rules until final retry",
+                "resource_orders": [
+                    {"resource": "food", "action": "spend", "amount": 9999}
+                ],
+            }
+        )
+        human = ScriptedLeader("human", [bad] * 9 + [hold()])
+        engine = GameEngine(
+            world,
+            strategy_interval=1,
+            leaders={
+                "human": human,
+                "elf": ScriptedLeader("elf", [hold()]),
+                "orc": ScriptedLeader("orc", [hold()]),
+            },
+        )
+
+        await engine.tick()
+
+        self.assertFalse(world.paused)
+        self.assertEqual(len(human.feedback), 10)
+        self.assertIsNone(human.feedback[0])
+        self.assertTrue(all(feedback for feedback in human.feedback[1:]))
+
+    async def test_engine_skips_eliminated_leader(self) -> None:
+        world = create_default_world(seed=52)
+        world.factions["elf"].eliminated = True
+        world.factions["elf"].active_orders = {"population_orders": []}
+        engine = GameEngine(
+            world,
+            strategy_interval=1,
+            leaders={
+                "human": ScriptedLeader("human", [hold()]),
+                "orc": ScriptedLeader("orc", [hold()]),
+            },
+        )
+
+        await engine.tick()
+
+        self.assertFalse(world.paused)
+        self.assertEqual(world.factions["elf"].active_orders, {})
 
     async def test_engine_asks_leaders_in_parallel(self) -> None:
         world = create_default_world(seed=8)
@@ -1212,6 +1568,20 @@ def _start_positions(world) -> dict[str, list[tuple[int, int]]]:
         faction_id: [(tile.x, tile.y) for tile in world.faction_tiles(faction_id)]
         for faction_id in sorted(world.factions)
     }
+
+
+def _minimum_home_distance(world) -> int:
+    homes = [
+        faction.home_tile
+        for faction in world.factions.values()
+        if faction.home_tile is not None
+    ]
+    distances = [
+        abs(first[0] - second[0]) + abs(first[1] - second[1])
+        for index, first in enumerate(homes)
+        for second in homes[index + 1:]
+    ]
+    return min(distances)
 
 
 if __name__ == "__main__":

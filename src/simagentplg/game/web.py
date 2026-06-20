@@ -40,12 +40,6 @@ class WeatherRequest(BaseModel):
     duration: int | None = Field(default=None, ge=0, le=50)
 
 
-class ClaimRequest(BaseModel):
-    faction_id: str
-    x: int
-    y: int
-
-
 class AnswerRequest(BaseModel):
     petition_id: int
     approve: bool
@@ -122,18 +116,6 @@ def create_game_app(engine: GameEngine | None = None) -> FastAPI:
             return _error(exc)
         return serialize_state(app.state.engine.world)
 
-    @app.post("/api/god/claim")
-    async def claim(request: ClaimRequest):
-        try:
-            app.state.engine.god.claim_tile(
-                request.faction_id,
-                request.x,
-                request.y,
-            )
-        except Exception as exc:
-            return _error(exc)
-        return serialize_state(app.state.engine.world)
-
     @app.post("/api/god/answer")
     async def answer(request: AnswerRequest):
         try:
@@ -164,6 +146,7 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
                 "y": tile.y,
                 "terrain": tile.terrain,
                 "owner": tile.owner,
+                "home_of": world.home_of_tile(tile.x, tile.y),
                 "weather": tile.weather,
                 "weather_duration": tile.weather_duration,
                 "population": dict(tile.population),
@@ -190,6 +173,12 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
                 "houses": world.total_houses(faction_id),
                 "population_capacity": world.population_capacity(faction_id),
                 "territory_count": len(world.faction_tiles(faction_id)),
+                "home_tile": (
+                    {"x": faction.home_tile[0], "y": faction.home_tile[1]}
+                    if faction.home_tile is not None
+                    else None
+                ),
+                "eliminated": faction.eliminated,
                 "known_factions": sorted(faction.known_factions),
                 "diplomacy": {
                     other_id: faction.relation_to(other_id)

@@ -92,6 +92,8 @@ class GodSystem:
             f"God assigned tile ({x}, {y}) from {previous} to {faction_id} with {moved} moved people",
             faction_id=faction_id,
         )
+        if previous is not None:
+            self.world.eliminate_faction_if_home_captured(previous, faction_id)
         self.world.enforce_population_ownership()
 
     def protect_tile(self, x: int, y: int, protected: bool = True) -> None:

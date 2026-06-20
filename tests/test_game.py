@@ -154,11 +154,11 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
     def test_god_commands_change_world_and_inbox(self) -> None:
         world = create_default_world(seed=1)
         engine = GameEngine(world)
+        claim_target = _adjacent_empty_tile(world, "human")
 
         engine.god.give_resource("human", "food", 25)
         engine.god.set_weather(0, 0, "storm")
-        world.tile_at(0, 0).terrain = "plain"
-        engine.god.claim_tile("human", 0, 0)
+        engine.god.claim_tile("human", *claim_target)
         world.add_petition(
             faction_id="human",
             kind="resources",
@@ -168,12 +168,20 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(world.factions["human"].resources.food, 145)
         self.assertEqual(world.tile_at(0, 0).weather, "storm")
-        self.assertEqual(world.tile_at(0, 0).owner, "human")
+        self.assertEqual(world.tile_at(*claim_target).owner, "human")
         self.assertIn("build a shrine", render_inbox(world))
 
         engine.god.answer_petition(1, True)
         self.assertEqual(world.petitions[0].status, "approved")
         self.assertEqual(world.factions["human"].resources.wood, 85)
+
+    def test_god_claim_must_border_existing_territory(self) -> None:
+        world = create_default_world(seed=1)
+        engine = GameEngine(world)
+        target = _non_adjacent_empty_tile(world, "human")
+
+        with self.assertRaisesRegex(ValueError, "must border owned territory"):
+            engine.god.claim_tile("human", *target)
 
     def test_world_merges_duplicate_pending_petitions(self) -> None:
         world = create_default_world(seed=11)
@@ -239,7 +247,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "task": "farm",
                         "target": {"x": worker_tile.x, "y": worker_tile.y},
-                        "workers": 10,
+                        "workers": 2,
                     }
                 ],
                 "territory_orders": [
@@ -254,6 +262,192 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(worker_tile.professions_of("human")["farmer"], 30)
         self.assertEqual(world.tile_at(*target).owner, "human")
+        self.assertEqual(world.tile_at(*target).population_of("human"), 3)
+
+    def test_idle_budget_allows_one_claim_with_jobs(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = None
+        target.population.clear()
+        target.professions.clear()
+        target.soldiers.clear()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "占领新土地并纳入疆域，同时安排耕作和建房",
+                "population_orders": [
+                    {
+                        "task": "farm",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "build",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target.x, "y": target.y}}
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(target.population_of("human"), 3)
+        jobs = world.total_jobs("human")
+        self.assertEqual(jobs["farmer"], 33)
+        self.assertEqual(jobs["builder"], 3)
+
+    def test_settlement_moves_idle_without_reducing_farmers(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        targets = world.neighbors(origin.x, origin.y)[:2]
+        self.assertEqual(len(targets), 2)
+        for tile in targets:
+            tile.terrain = "plain"
+            tile.owner = None
+            tile.population.clear()
+            tile.professions.clear()
+            tile.soldiers.clear()
+        before_jobs = world.total_jobs("human")
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "向两块相邻土地扩张",
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": tile.x, "y": tile.y}}
+                    for tile in targets
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        after_jobs = world.total_jobs("human")
+        self.assertEqual(after_jobs["farmer"], before_jobs["farmer"])
+        self.assertEqual(after_jobs["idle"], before_jobs["idle"])
+        self.assertEqual(targets[0].population_of("human"), 3)
+        self.assertEqual(targets[1].population_of("human"), 3)
+        self.assertEqual(len(world.faction_tiles("human")), 3)
+
+    def test_idle_budget_rejects_jobs_and_settlement_overcommit(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        target = _adjacent_empty_tile(world, "human")
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "把全部闲置人口转为农民并扩张",
+                "population_orders": [
+                    {
+                        "task": "farm",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 10,
+                    }
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target[0], "y": target[1]}}
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("idle population" in error for error in check.errors))
+        self.assertTrue(any("current idle=10" in error for error in check.errors))
+
+    def test_idle_budget_rejects_common_turn_five_overcommit(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        targets = world.neighbors(origin.x, origin.y)[:2]
+        for tile in targets:
+            tile.terrain = "plain"
+            tile.owner = None
+            tile.population.clear()
+            tile.professions.clear()
+            tile.soldiers.clear()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "扩张两块领土，增加农民，修建房屋并训练新兵",
+                "population_orders": [
+                    {
+                        "task": "farm",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "build",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "train",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 5,
+                    },
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": tile.x, "y": tile.y}}
+                    for tile in targets
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("claim/settle need=6" in error for error in check.errors))
+        self.assertTrue(any("jobs/training need=7" in error for error in check.errors))
+
+    def test_peaceful_occupation_text_with_claim_is_not_military_capture(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = None
+        target.population.clear()
+        target.professions.clear()
+        target.soldiers.clear()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "占领新土地并纳入疆域",
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target.x, "y": target.y}}
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertTrue(check.accepted, check.errors)
+
+    def test_military_capture_text_without_attack_is_rejected(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "攻占敌方领地并夺取对方资源",
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("capturing enemy territory" in error for error in check.errors))
 
     def test_npc_grows_population_from_food_and_capacity(self) -> None:
         world = create_default_world(seed=31)
@@ -844,6 +1038,97 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             any(event.kind == "rule_reject" for event in world.events)
         )
 
+    async def test_engine_tick_logging_includes_events_and_faction_status(self) -> None:
+        world = create_default_world(seed=50)
+        engine = GameEngine(
+            world,
+            strategy_interval=999,
+            leaders={},
+            log_ticks=True,
+        )
+
+        with self.assertLogs("game-engine", level="INFO") as captured:
+            await engine.tick()
+
+        output = "\n".join(captured.output)
+        self.assertIn("第 1 刻事件", output)
+        self.assertIn("第 1 刻阵营 | human", output)
+        self.assertIn("人口=", output)
+        self.assertIn("资源=", output)
+
+    async def test_engine_retries_idle_budget_feedback_then_accepts(self) -> None:
+        world = create_default_world(seed=30)
+        origin = world.faction_tiles("human")[0]
+        targets = world.neighbors(origin.x, origin.y)[:2]
+        for tile in targets:
+            tile.terrain = "plain"
+            tile.owner = None
+            tile.population.clear()
+            tile.professions.clear()
+            tile.soldiers.clear()
+        bad = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "扩张两块领土，增加农民，修建房屋并训练新兵",
+                "population_orders": [
+                    {
+                        "task": "farm",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "build",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "train",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 5,
+                    },
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": tile.x, "y": tile.y}}
+                    for tile in targets
+                ],
+            }
+        )
+        good = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "占领新土地并安排耕作建房",
+                "population_orders": [
+                    {
+                        "task": "farm",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                    {
+                        "task": "build",
+                        "target": {"x": origin.x, "y": origin.y},
+                        "workers": 3,
+                    },
+                ],
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": targets[0].x, "y": targets[0].y}}
+                ],
+            }
+        )
+        human = ScriptedLeader("human", [bad, good])
+        engine = GameEngine(
+            world,
+            strategy_interval=1,
+            leaders={
+                "human": human,
+                "elf": ScriptedLeader("elf", [hold()]),
+                "orc": ScriptedLeader("orc", [hold()]),
+            },
+        )
+
+        await engine.tick()
+
+        self.assertFalse(world.paused)
+        self.assertIn("current idle=10", human.feedback[1] or "")
+        self.assertEqual(targets[0].owner, "human")
+
     async def test_engine_asks_leaders_in_parallel(self) -> None:
         world = create_default_world(seed=8)
         leaders = {
@@ -902,6 +1187,24 @@ def _adjacent_empty_tile(world, faction_id: str) -> tuple[int, int]:
             ):
                 return (neighbor.x, neighbor.y)
     raise AssertionError("no adjacent empty tile found")
+
+
+def _non_adjacent_empty_tile(world, faction_id: str) -> tuple[int, int]:
+    owned = {(tile.x, tile.y) for tile in world.faction_tiles(faction_id)}
+    adjacent = {
+        (neighbor.x, neighbor.y)
+        for tile in world.faction_tiles(faction_id)
+        for neighbor in world.neighbors(tile.x, tile.y)
+    }
+    for tile in world.tiles:
+        if (
+            tile.owner is None
+            and tile.is_passable()
+            and (tile.x, tile.y) not in owned
+            and (tile.x, tile.y) not in adjacent
+        ):
+            return (tile.x, tile.y)
+    raise AssertionError("no non-adjacent empty tile found")
 
 
 def _start_positions(world) -> dict[str, list[tuple[int, int]]]:

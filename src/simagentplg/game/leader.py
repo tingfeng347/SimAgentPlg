@@ -7,7 +7,12 @@ from typing import Any
 
 from simagentplg import BaseAgent, MethodToolHandler, ModelConfig, StepOutcome
 from simagentplg.handlers.base import ToolSchema
-from simagentplg.game.world import DEFAULT_FACTIONS, RESOURCE_TYPES, WorldState
+from simagentplg.game.world import (
+    DEFAULT_FACTIONS,
+    RESOURCE_TYPES,
+    SETTLEMENT_IDLE_COST,
+    WorldState,
+)
 
 POPULATION_TASKS = (
     "farm",
@@ -72,11 +77,12 @@ Tool usage:
   diplomacy_orders, petitions, public_decree, and strategy_summary. Leave an
   order list empty if you do not need that category.
 - submit_leader_turn example:
-  {"turn_intent":"增加粮食并扩张边境","population_orders":[{"task":"farm",
-  "target":{"x":3,"y":4},"workers":5}],"territory_orders":[{"action":"claim",
+  {"turn_intent":"增加粮食、修建房屋并扩张边境","population_orders":[{"task":"farm",
+  "target":{"x":3,"y":4},"workers":3},{"task":"build",
+  "target":{"x":3,"y":4},"workers":3}],"territory_orders":[{"action":"claim",
   "target":{"x":4,"y":4}}],"military_orders":[],"diplomacy_orders":[],
   "petitions":[],"public_decree":"今年优先开垦边境农田。",
-  "strategy_summary":"将闲置人口转为农民，并尝试占据相邻空地。"}
+  "strategy_summary":"用3名闲置人口耕作、3名建房，并用3名迁入相邻空地。"}
 
 Basic world:
 - You compete for land, food, safety, and long-term survival. Peace is a
@@ -94,9 +100,9 @@ Basic world:
 - Food supports survival and future growth. Population growth creates idle
   people, not specialized workers.
 - Soldiers are the only people who fight. Raids can take resources; attacks
-  can occupy enemy land if the battle is won and your people can move in.
+  can occupy enemy land if the battle is won and idle people can move in.
 - Owned territory must have population from that faction. New territory and
-  captured territory require people to occupy it.
+  captured territory require idle people to occupy it.
 - You only know factions your scouts have discovered. Unknown factions do not
   exist for diplomacy or war planning until discovered.
 
@@ -106,6 +112,11 @@ Restrict:
 - Only idle population can become farmers, lumberjacks, miners, or builders.
   Existing workers keep their current profession until future simulation rules
   change them.
+- Peaceful claim/settle consumes exactly 3 idle people per new territory. This
+  cost shares the same idle budget as farming, lumberjacking, mining, building,
+  training, and defending.
+- With 10 idle people, claim 1 tile + farm 3 + build 3 is legal. Claim 2 tiles
+  + farm 3 + build 3 + train is illegal because it overuses idle people.
 - Leaders cannot ask the god for people and cannot turn existing workers back
   into idle people.
 - Petitions may ask only for god powers: resources, weather, protection, or
@@ -684,9 +695,10 @@ def _build_leader_task(
         "Alliance from neutral is only a first trust step; war is valid when border pressure, crowding, or resource competition make peace costly.",
         "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
         "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
-        "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack or capture, include the matching military order. If you ask for weather, include a weather petition.",
+        "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack, raid, or capture enemy territory, include the matching military order. If you ask for weather, include a weather petition.",
         "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
         "Only idle people can become farmers, lumberjacks, miners, or builders. Do not assign more workers to a profession than the target tile has idle population.",
+        f"Each claim/settle territory order consumes exactly {SETTLEMENT_IDLE_COST} idle people from an adjacent owned tile. Count this cost together with profession and training orders before submitting.",
         "There is no dismiss-worker or assign-back-to-idle order. Population growth is the normal source of new idle people.",
         "For houses, submit a build population order only. Do not submit a separate wood spend order; the build action spends wood automatically.",
         "Only discovered factions may be used in diplomacy or war planning.",
@@ -695,6 +707,7 @@ def _build_leader_task(
         f"Population: {world.total_population(faction_id)}",
         f"Soldiers: {world.total_soldiers(faction_id)}",
         f"Jobs: {world.total_jobs(faction_id)}",
+        f"Current idle budget: {world.total_jobs(faction_id).get('idle', 0)} idle people; each claim/settle costs {SETTLEMENT_IDLE_COST} idle people.",
         f"Houses: {world.total_houses(faction_id)}",
         f"Population capacity: {world.population_capacity(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",

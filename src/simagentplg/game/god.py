@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from simagentplg.game.world import RESOURCE_TYPES, WEATHER_TYPES, WorldState
+from simagentplg.game.world import (
+    RESOURCE_TYPES,
+    SETTLEMENT_IDLE_COST,
+    WEATHER_TYPES,
+    WorldState,
+)
 
 DEFAULT_WEATHER_DURATION = {
     "clear": 0,
@@ -53,16 +58,28 @@ class GodSystem:
         if not tile.is_passable():
             raise ValueError("cannot assign impassable territory")
         previous = tile.owner
+        if previous != faction_id and not _borders_owned_tile(
+            self.world,
+            faction_id,
+            x,
+            y,
+        ):
+            raise ValueError("territory claim target must border owned territory")
         moved = 0
         if tile.population_of(faction_id) <= 0:
-            donor = _donor_tile(self.world, faction_id, exclude=(x, y))
+            donor = _donor_tile(
+                self.world,
+                faction_id,
+                target=(x, y),
+                exclude=(x, y),
+            )
             if donor is None:
                 raise ValueError(
-                    f"faction {faction_id!r} has no movable population for territory claim"
+                    f"faction {faction_id!r} has no idle population for territory claim"
                 )
-            donor.set_population(faction_id, donor.population_of(faction_id) - 1)
-            tile.set_population(faction_id, 1)
-            moved = 1
+            _remove_idle_people(donor, faction_id, SETTLEMENT_IDLE_COST)
+            tile.set_population(faction_id, SETTLEMENT_IDLE_COST)
+            moved = SETTLEMENT_IDLE_COST
         for other_id in list(tile.population):
             if other_id != faction_id:
                 tile.set_population(other_id, 0)
@@ -168,12 +185,49 @@ class GodSystem:
             raise ValueError(f"unsupported petition kind {kind!r}")
 
 
-def _donor_tile(world: WorldState, faction_id: str, *, exclude: tuple[int, int]):
+def _borders_owned_tile(
+    world: WorldState,
+    faction_id: str,
+    x: int,
+    y: int,
+) -> bool:
+    return any(tile.owner == faction_id for tile in world.neighbors(x, y))
+
+
+def _donor_tile(
+    world: WorldState,
+    faction_id: str,
+    *,
+    target: tuple[int, int],
+    exclude: tuple[int, int],
+):
     candidates = [
         tile
         for tile in world.faction_tiles(faction_id)
-        if (tile.x, tile.y) != exclude and tile.population_of(faction_id) > 1
+        if (tile.x, tile.y) != exclude
+        and abs(tile.x - target[0]) + abs(tile.y - target[1]) == 1
+        and _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda tile: tile.population_of(faction_id))
+    return max(candidates, key=lambda tile: _idle_count(tile, faction_id))
+
+
+def _idle_count(tile, faction_id: str) -> int:
+    return tile.professions_of(faction_id).get("idle", 0)
+
+
+def _remove_idle_people(tile, faction_id: str, amount: int) -> int:
+    tile.ensure_professions(faction_id)
+    jobs = tile.professions.get(faction_id)
+    if jobs is None:
+        return 0
+    moved = min(amount, jobs.get("idle", 0), tile.population_of(faction_id))
+    if moved <= 0:
+        return 0
+    jobs["idle"] = jobs.get("idle", 0) - moved
+    tile.population[faction_id] = tile.population_of(faction_id) - moved
+    if tile.population[faction_id] <= 0:
+        tile.population.pop(faction_id, None)
+    tile.ensure_professions(faction_id)
+    return moved

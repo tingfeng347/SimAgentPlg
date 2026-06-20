@@ -68,7 +68,7 @@ def create_engine(
         )
         for faction_id in DEFAULT_FACTIONS
     }
-    return GameEngine(world, leaders=leaders)
+    return GameEngine(world, leaders=leaders, log_ticks=True)
 
 
 def create_game_app(engine: GameEngine | None = None) -> FastAPI:

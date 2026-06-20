@@ -550,8 +550,8 @@ function formatEvent(event) {
   match = message.match(/^(\w+) lost tile \((\d+), (\d+)\) because no people remained$/);
   if (match) return `${displayFaction(match[1])} 因无人居住失去（${match[2]}, ${match[3]}）`;
 
-  match = message.match(/^(\w+) failed to settle tile (.+) because no movable people were available$/);
-  if (match) return `${displayFaction(match[1])} 无法迁入 ${formatTarget(match[2])}：没有可迁人口`;
+  match = message.match(/^(\w+) failed to settle tile (.+) because no (?:idle|movable) people were available$/);
+  if (match) return `${displayFaction(match[1])} 无法迁入 ${formatTarget(match[2])}：没有闲置人口`;
 
   match = message.match(/^(\w+) settled tile (.+) with (\d+) people$/);
   if (match) return `${displayFaction(match[1])} 迁入 ${formatTarget(match[2])}，人口 ${match[3]}`;
@@ -565,8 +565,8 @@ function formatEvent(event) {
   match = message.match(/^(\w+) raided (.+) from (\w+) and took (.*)$/);
   if (match) return `${displayFaction(match[1])} 突袭 ${displayFaction(match[3])} 的 ${formatTarget(match[2])}，缴获 ${formatLoot(match[4])}`;
 
-  match = message.match(/^(\w+) won at (.+) but could not occupy without movable people and took (.*)$/);
-  if (match) return `${displayFaction(match[1])} 赢下 ${formatTarget(match[2])}，但没有可迁人口，未能占领；缴获 ${formatLoot(match[3])}`;
+  match = message.match(/^(\w+) won at (.+) but could not occupy without (?:idle|movable) people and took (.*)$/);
+  if (match) return `${displayFaction(match[1])} 赢下 ${formatTarget(match[2])}，但没有闲置人口，未能占领；缴获 ${formatLoot(match[3])}`;
 
   match = message.match(/^(\w+) attacked (\w+) at (.+) and failed$/);
   if (match) return `${displayFaction(match[1])} 进攻 ${displayFaction(match[2])} 的 ${formatTarget(match[3])} 失败`;

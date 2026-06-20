@@ -40,7 +40,7 @@ async def main() -> None:
         )
         for faction_id in DEFAULT_FACTIONS
     }
-    engine = GameEngine(world, leaders=leaders)
+    engine = GameEngine(world, leaders=leaders, log_ticks=True)
 
     print(render_map(world))
     print("Commands: map, status, tick [n], give, weather, claim, inbox, answer, log, quit")

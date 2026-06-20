@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
+from simagentplg.logger import get_logger
 from simagentplg.game.god import GodSystem
 from simagentplg.game.leader import LeaderDecision
 from simagentplg.game.npc import NPCExecutor
@@ -33,6 +34,7 @@ class GameEngine:
         retry_limit: int = 2,
         rules: RuleEngine | None = None,
         npc: NPCExecutor | None = None,
+        log_ticks: bool = False,
     ) -> None:
         if strategy_interval <= 0:
             raise ValueError("strategy_interval must be positive")
@@ -46,6 +48,8 @@ class GameEngine:
         self.rules = rules or RuleEngine()
         self.npc = npc or NPCExecutor()
         self.god = GodSystem(self.world)
+        self.log_ticks = log_ticks
+        self.logger = get_logger("game-engine")
 
     async def tick(self, count: int = 1) -> WorldState:
         if count <= 0:
@@ -54,6 +58,7 @@ class GameEngine:
         for _ in range(count):
             if self.world.paused:
                 break
+            event_start = len(self.world.events)
             self.world.tick += 1
             self._advance_weather()
             self.npc.apply_passive_tick(self.world)
@@ -70,6 +75,8 @@ class GameEngine:
                 self._record_discoveries()
 
             self.world.add_event("tick", f"Tick {self.world.tick} completed")
+            if self.log_ticks:
+                self._log_tick(event_start)
         return self.world
 
     async def _run_strategic_turns(self) -> None:
@@ -171,4 +178,40 @@ class GameEngine:
                 "scout",
                 f"{faction_id} discovered {other_id}",
                 faction_id=faction_id,
+            )
+
+    def _log_tick(self, event_start: int) -> None:
+        events = self.world.events[event_start:]
+        self.logger.info(
+            "第 %d 刻结束：events=%d paused=%s",
+            self.world.tick,
+            len(events),
+            self.world.paused,
+        )
+        for event in events:
+            self.logger.info(
+                "第 %d 刻事件 | %s | %s | %s",
+                event.tick,
+                event.kind,
+                event.faction_id or "world",
+                event.message,
+            )
+        for faction_id, faction in sorted(self.world.factions.items()):
+            jobs = self.world.total_jobs(faction_id)
+            self.logger.info(
+                (
+                    "第 %d 刻阵营 | %s | 人口=%d/%d 士兵=%d 领土=%d 房屋=%d "
+                    "资源=%s 职业=%s 已发现=%s 外交=%s"
+                ),
+                self.world.tick,
+                faction_id,
+                self.world.total_population(faction_id),
+                self.world.population_capacity(faction_id),
+                self.world.total_soldiers(faction_id),
+                len(self.world.faction_tiles(faction_id)),
+                self.world.total_houses(faction_id),
+                faction.resources.as_dict(),
+                jobs,
+                sorted(faction.known_factions),
+                dict(sorted(faction.diplomacy.items())),
             )

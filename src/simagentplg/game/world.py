@@ -9,6 +9,7 @@ WEATHER_TYPES = ("clear", "rain", "drought", "storm")
 TERRAIN_TYPES = ("plain", "forest", "hill", "water", "mountain")
 DEFAULT_FACTIONS = ("human", "elf", "orc")
 PROFESSION_TYPES = ("farmer", "lumberjack", "miner", "builder", "idle")
+SETTLEMENT_IDLE_COST = 3
 BASE_TILE_CAPACITY = {
     "plain": 60,
     "forest": 45,

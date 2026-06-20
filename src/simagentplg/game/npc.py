@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from simagentplg.game.world import PROFESSION_TYPES, RESOURCE_TYPES, WorldState
+from simagentplg.game.world import (
+    PROFESSION_TYPES,
+    RESOURCE_TYPES,
+    SETTLEMENT_IDLE_COST,
+    WorldState,
+)
 
 HOUSE_WOOD_COST = 10
 
@@ -222,16 +227,16 @@ class NPCExecutor:
         target_tile = world.tile_at(*target)
         if target_tile.owner is not None:
             return
-        donor = _largest_population_tile(world, faction_id)
+        donor = _largest_idle_tile(world, faction_id, adjacent_to=target)
         moved = 0
-        if donor is not None and donor.population_of(faction_id) > 8:
-            moved = min(8, donor.population_of(faction_id) // 4, target_tile.capacity())
-            donor.set_population(faction_id, donor.population_of(faction_id) - moved)
+        if donor is not None and target_tile.capacity() >= SETTLEMENT_IDLE_COST:
+            moved = SETTLEMENT_IDLE_COST
+            _remove_idle_people(donor, faction_id, moved)
             target_tile.set_population(faction_id, moved)
         if moved <= 0:
             world.add_event(
                 "territory",
-                f"{faction_id} failed to settle tile {target} because no movable people were available",
+                f"{faction_id} failed to settle tile {target} because no idle people were available",
                 faction_id=faction_id,
             )
             return
@@ -254,10 +259,10 @@ class NPCExecutor:
             return
         trained = max(1, workers // 5)
         population = tile.population_of(faction_id)
-        trained = min(trained, max(0, population // 3))
+        trained = min(trained, _idle_count(tile, faction_id), max(0, population // 3))
         if trained <= 0:
             return
-        tile.set_population(faction_id, population - trained)
+        _remove_idle_people(tile, faction_id, trained)
         tile.soldiers[faction_id] = tile.soldiers_of(faction_id) + trained
         world.add_event(
             "military",
@@ -437,18 +442,18 @@ class NPCExecutor:
             )
             return
 
-        migrants = min(3, max(0, origin_tile.population_of(faction_id) - 1), target_tile.capacity())
-        if migrants <= 0:
+        migrants = SETTLEMENT_IDLE_COST
+        if _idle_count(origin_tile, faction_id) < migrants or target_tile.capacity() < migrants:
             origin_tile.soldiers[faction_id] = origin_tile.soldiers_of(faction_id) + survivors
             _damage_defender_population(target_tile, defender_id, severe=False)
             world.add_event(
                 "battle",
-                f"{faction_id} won at {target} but could not occupy without movable people and took {_format_loot(loot)}",
+                f"{faction_id} won at {target} but could not occupy without idle people and took {_format_loot(loot)}",
                 faction_id=faction_id,
             )
             return
 
-        origin_tile.set_population(faction_id, origin_tile.population_of(faction_id) - migrants)
+        _remove_idle_people(origin_tile, faction_id, migrants)
         for other_id in list(target_tile.population):
             if other_id != faction_id:
                 target_tile.set_population(other_id, 0)
@@ -529,6 +534,45 @@ def _largest_population_tile(world: WorldState, faction_id: str):
     if not owned:
         return None
     return max(owned, key=lambda tile: tile.population_of(faction_id))
+
+
+def _largest_idle_tile(
+    world: WorldState,
+    faction_id: str,
+    *,
+    adjacent_to: tuple[int, int] | None = None,
+):
+    candidates = []
+    for tile in world.faction_tiles(faction_id):
+        if adjacent_to is not None and abs(tile.x - adjacent_to[0]) + abs(tile.y - adjacent_to[1]) != 1:
+            continue
+        if _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST:
+            candidates.append(tile)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda tile: _idle_count(tile, faction_id))
+
+
+def _idle_count(tile, faction_id: str) -> int:
+    return tile.professions_of(faction_id).get("idle", 0)
+
+
+def _remove_idle_people(tile, faction_id: str, amount: int) -> int:
+    if amount <= 0:
+        return 0
+    tile.ensure_professions(faction_id)
+    jobs = tile.professions.get(faction_id)
+    if jobs is None:
+        return 0
+    moved = min(amount, jobs.get("idle", 0), tile.population_of(faction_id))
+    if moved <= 0:
+        return 0
+    jobs["idle"] = jobs.get("idle", 0) - moved
+    tile.population[faction_id] = tile.population_of(faction_id) - moved
+    if tile.population[faction_id] <= 0:
+        tile.population.pop(faction_id, None)
+    tile.ensure_professions(faction_id)
+    return moved
 
 
 def _loot_from_defender(world: WorldState, defender_id: str) -> dict[str, int]:

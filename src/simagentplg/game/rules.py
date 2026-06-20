@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from simagentplg.game.leader import LeaderDecision, validate_resource_name
 from simagentplg.game.world import (
     RESOURCE_TYPES,
+    SETTLEMENT_IDLE_COST,
     WEATHER_TYPES,
     WorldState,
 )
@@ -63,6 +64,7 @@ class RuleEngine:
         errors.extend(self._validate_diplomacy_orders(world, faction_id, decision))
         errors.extend(self._validate_petitions(world, faction_id, decision))
         errors.extend(self._validate_plan_matches_actions(decision))
+        errors.extend(self._validate_idle_budget(world, faction_id, decision))
         return RuleCheck(not errors, tuple(errors))
 
     def apply_decision(
@@ -230,7 +232,7 @@ class RuleEngine:
                 if not self._adjacent_to_owned(world, faction_id, order.target):
                     errors.append(f"{label}: target must border owned territory")
                 if not _has_movable_population(world, faction_id):
-                    errors.append(f"{label}: faction has no movable population to occupy new territory")
+                    errors.append(f"{label}: faction has no idle population to occupy new territory")
             if order.action in {"fortify", "abandon"} and tile.owner != faction_id:
                 errors.append(f"{label}: target must be owned by {faction_id}")
         return errors
@@ -376,12 +378,16 @@ class RuleEngine:
         petition_types = {petition.kind for petition in decision.petitions}
         diplomacy = {order.proposal for order in decision.diplomacy_orders}
 
-        if _contains_any(text, ("war", "attack", "raid", "开战", "战争", "进攻", "攻打", "突袭")):
+        if _contains_any(text, ("war", "attack", "raid", "开战", "战争", "进攻", "攻打", "突袭", "攻占")):
             if not (military_actions & {"attack", "raid"} or "war" in diplomacy):
-                errors.append("plan mentions war or attack but has no military attack/raid or war diplomacy order")
-        if _contains_any(text, ("capture", "占领", "夺取", "攻占")):
+                errors.append(
+                    "plan mentions war/attack/raid. If this is a military action, submit attack/raid or war diplomacy; if this is peaceful expansion, use claim/settle wording and avoid war words."
+                )
+        if _mentions_military_capture(text):
             if "attack" not in military_actions:
-                errors.append("plan mentions capture but has no attack military order")
+                errors.append(
+                    "plan mentions capturing enemy territory but has no attack military order"
+                )
         if _contains_any(text, ("build house", "houses", "住房", "房屋", "建房")):
             if "build" not in population_tasks:
                 errors.append("plan mentions building houses but has no build population order")
@@ -391,9 +397,92 @@ class RuleEngine:
         if _contains_any(text, ("weather", "rain", "storm", "drought", "天气", "降雨", "风暴", "干旱", "好天气")):
             if "weather" not in petition_types:
                 errors.append("plan mentions weather but has no weather petition")
-        if _contains_any(text, ("expand", "settle", "claim", "扩张", "开拓", "定居")):
+        if _contains_any(text, ("expand", "settle", "claim", "扩张", "开拓", "定居", "纳入疆域", "占据空地", "占领新土地", "占领空地")):
             if not (territory_actions & {"claim", "settle"}):
                 errors.append("plan mentions expansion or settlement but has no claim/settle territory order")
+        return errors
+
+    def _validate_idle_budget(
+        self,
+        world: WorldState,
+        faction_id: str,
+        decision: LeaderDecision,
+    ) -> list[str]:
+        idle_by_tile = {
+            (tile.x, tile.y): _idle_count(tile, faction_id)
+            for tile in world.faction_tiles(faction_id)
+        }
+        owned = set(idle_by_tile)
+        total_idle = sum(idle_by_tile.values())
+        budget = _idle_budget_need(world, decision)
+        errors: list[str] = []
+
+        for index, order in sorted(
+            enumerate(decision.population_orders, start=1),
+            key=lambda item: item[1].priority,
+        ):
+            if order.workers <= 0:
+                continue
+            label = f"population_order {index}"
+            if order.task in PROFESSION_TASKS:
+                tile = _order_owned_tile(world, faction_id, order.target)
+                if tile is None:
+                    continue
+                _consume_idle_budget(
+                    idle_by_tile,
+                    (tile.x, tile.y),
+                    order.workers,
+                    label,
+                    errors,
+                )
+            elif order.task in {"train", "defend"} and order.target is not None:
+                if not world.in_bounds(*order.target):
+                    continue
+                tile = world.tile_at(*order.target)
+                if tile.owner != faction_id:
+                    continue
+                _consume_idle_budget(
+                    idle_by_tile,
+                    (tile.x, tile.y),
+                    _trained_count(order.workers),
+                    label,
+                    errors,
+                )
+            elif order.task == "settle" and order.target is not None:
+                _consume_settlement_budget(
+                    world,
+                    order.target,
+                    label,
+                    idle_by_tile,
+                    owned,
+                    errors,
+                )
+
+        for index, order in sorted(
+            enumerate(decision.territory_orders, start=1),
+            key=lambda item: item[1].priority,
+        ):
+            if order.action not in {"claim", "settle"}:
+                continue
+            _consume_settlement_budget(
+                world,
+                order.target,
+                f"territory_order {index}",
+                idle_by_tile,
+                owned,
+                errors,
+            )
+
+        if errors and budget["total"] > total_idle:
+            errors.append(
+                (
+                    f"idle budget exceeded: current idle={total_idle}, "
+                    f"claim/settle need={budget['settlement']} "
+                    f"({budget['settlement_count']} x {SETTLEMENT_IDLE_COST}), "
+                    f"jobs/training need={budget['jobs_training']}, "
+                    f"total needed={budget['total']}"
+                )
+            )
         return errors
 
     def _validate_visible_target(
@@ -468,11 +557,73 @@ def _int(value: object, default: int) -> int:
 
 
 def _has_movable_population(world: WorldState, faction_id: str) -> bool:
-    return any(tile.population_of(faction_id) > 8 for tile in world.faction_tiles(faction_id))
+    return any(
+        _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST
+        for tile in world.faction_tiles(faction_id)
+    )
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
+
+
+def _mentions_military_capture(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "capture enemy",
+            "capture hostile",
+            "capture rival",
+            "enemy territory",
+            "hostile territory",
+            "军事占领",
+            "攻占",
+            "占领敌",
+            "占领对方",
+            "占领其领",
+            "夺取敌",
+            "夺取对方",
+            "夺取其领",
+        ),
+    )
+
+
+def _idle_budget_need(
+    world: WorldState,
+    decision: LeaderDecision,
+) -> dict[str, int]:
+    jobs_training = 0
+    settlement_count = 0
+    for order in decision.population_orders:
+        if order.workers <= 0:
+            continue
+        if order.task in PROFESSION_TASKS:
+            jobs_training += order.workers
+        elif order.task in {"train", "defend"}:
+            jobs_training += _trained_count(order.workers)
+        elif order.task == "settle" and order.target is not None:
+            if _counts_as_new_territory(world, order.target):
+                settlement_count += 1
+    for order in decision.territory_orders:
+        if order.action in {"claim", "settle"} and _counts_as_new_territory(world, order.target):
+            settlement_count += 1
+    settlement = settlement_count * SETTLEMENT_IDLE_COST
+    return {
+        "jobs_training": jobs_training,
+        "settlement_count": settlement_count,
+        "settlement": settlement,
+        "total": jobs_training + settlement,
+    }
+
+
+def _counts_as_new_territory(
+    world: WorldState,
+    target: tuple[int, int],
+) -> bool:
+    if not world.in_bounds(*target):
+        return False
+    tile = world.tile_at(*target)
+    return tile.owner is None and tile.is_passable()
 
 
 def _largest_population_tile(world: WorldState, faction_id: str):
@@ -480,3 +631,85 @@ def _largest_population_tile(world: WorldState, faction_id: str):
     if not owned:
         return None
     return max(owned, key=lambda tile: tile.population_of(faction_id))
+
+
+def _order_owned_tile(
+    world: WorldState,
+    faction_id: str,
+    target: tuple[int, int] | None,
+):
+    if target is None:
+        return _largest_population_tile(world, faction_id)
+    if not world.in_bounds(*target):
+        return None
+    tile = world.tile_at(*target)
+    if tile.owner != faction_id:
+        return None
+    return tile
+
+
+def _consume_idle_budget(
+    idle_by_tile: dict[tuple[int, int], int],
+    key: tuple[int, int],
+    amount: int,
+    label: str,
+    errors: list[str],
+) -> None:
+    if amount <= 0:
+        return
+    idle_by_tile[key] = idle_by_tile.get(key, 0) - amount
+    if idle_by_tile[key] < 0:
+        errors.append(f"{label}: idle population budget is overcommitted")
+
+
+def _consume_settlement_budget(
+    world: WorldState,
+    target: tuple[int, int],
+    label: str,
+    idle_by_tile: dict[tuple[int, int], int],
+    owned: set[tuple[int, int]],
+    errors: list[str],
+) -> None:
+    if not world.in_bounds(*target):
+        return
+    tile = world.tile_at(*target)
+    if tile.owner is not None or target in owned:
+        return
+    if not tile.is_passable():
+        return
+    donor_key = _best_adjacent_idle_donor(target, idle_by_tile, owned)
+    if donor_key is None:
+        errors.append(f"{label}: faction has no idle population to occupy new territory")
+        return
+    if idle_by_tile[donor_key] < SETTLEMENT_IDLE_COST or tile.capacity() < SETTLEMENT_IDLE_COST:
+        errors.append(f"{label}: faction has no idle population to occupy new territory")
+        return
+    idle_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
+    idle_by_tile[target] = idle_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
+    owned.add(target)
+
+
+def _best_adjacent_idle_donor(
+    target: tuple[int, int],
+    idle_by_tile: dict[tuple[int, int], int],
+    owned: set[tuple[int, int]],
+) -> tuple[int, int] | None:
+    candidates = [
+        key
+        for key in owned
+        if abs(key[0] - target[0]) + abs(key[1] - target[1]) == 1
+        and idle_by_tile.get(key, 0) >= SETTLEMENT_IDLE_COST
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda key: idle_by_tile.get(key, 0))
+
+
+def _trained_count(workers: int) -> int:
+    if workers <= 0:
+        return 0
+    return max(1, workers // 5)
+
+
+def _idle_count(tile, faction_id: str) -> int:
+    return tile.professions_of(faction_id).get("idle", 0)

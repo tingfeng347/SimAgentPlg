@@ -183,6 +183,24 @@ class GameEvent:
 
 
 @dataclass(slots=True)
+class GodChatMessage:
+    message_id: int
+    tick: int
+    faction_id: str
+    speaker: str
+    content: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "tick": self.tick,
+            "faction_id": self.faction_id,
+            "speaker": self.speaker,
+            "content": self.content,
+        }
+
+
+@dataclass(slots=True)
 class Faction:
     faction_id: str
     name: str
@@ -209,9 +227,11 @@ class WorldState:
     factions: dict[str, Faction] = field(default_factory=dict)
     events: list[GameEvent] = field(default_factory=list)
     petitions: list[Petition] = field(default_factory=list)
+    god_chats: list[GodChatMessage] = field(default_factory=list)
     paused: bool = False
     pause_reason: str | None = None
     _next_petition_id: int = 1
+    _next_chat_message_id: int = 1
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -383,6 +403,42 @@ class WorldState:
         )
         self.events.append(event)
         return event
+
+    def add_god_chat_message(
+        self,
+        *,
+        faction_id: str,
+        speaker: str,
+        content: str,
+    ) -> GodChatMessage:
+        message = GodChatMessage(
+            message_id=self._next_chat_message_id,
+            tick=self.tick,
+            faction_id=faction_id,
+            speaker=speaker,
+            content=content,
+        )
+        self._next_chat_message_id += 1
+        self.god_chats.append(message)
+        self.add_event(
+            "god_chat",
+            f"{speaker} privately messaged {faction_id}: {content}",
+            faction_id=faction_id,
+        )
+        return message
+
+    def recent_god_chat(
+        self,
+        faction_id: str,
+        *,
+        limit: int = 8,
+    ) -> list[GodChatMessage]:
+        messages = [
+            message for message in self.god_chats if message.faction_id == faction_id
+        ]
+        if limit <= 0:
+            return messages
+        return messages[-limit:]
 
     def add_petition(
         self,

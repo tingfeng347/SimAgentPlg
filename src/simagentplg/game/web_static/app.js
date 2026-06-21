@@ -12,6 +12,10 @@ const coordX = document.getElementById("coordX");
 const coordY = document.getElementById("coordY");
 const factionsEl = document.getElementById("factions");
 const petitionsEl = document.getElementById("petitions");
+const godChatFactionSelect = document.getElementById("godChatFactionSelect");
+const godChatMessages = document.getElementById("godChatMessages");
+const godChatInput = document.getElementById("godChatInput");
+const godChatButton = document.getElementById("godChatButton");
 const eventsEl = document.getElementById("events");
 
 let state = null;
@@ -111,6 +115,7 @@ const eventKindNames = {
   elimination: "淘汰",
   diplomacy: "外交",
   petition: "祈求",
+  god_chat: "私聊",
   decree: "法令",
   leader: "首领",
   population: "人口",
@@ -145,6 +150,8 @@ function wireControls() {
   document.getElementById("tickFive").addEventListener("click", () => tick(5));
   document.getElementById("giveButton").addEventListener("click", giveResource);
   document.getElementById("weatherButton").addEventListener("click", setWeather);
+  godChatButton.addEventListener("click", sendGodChat);
+  godChatFactionSelect.addEventListener("change", renderGodChat);
 
   canvas.addEventListener("mousemove", onCanvasMove);
   canvas.addEventListener("mouseleave", () => {
@@ -189,6 +196,20 @@ async function answerPetition(petitionId, approve) {
   });
 }
 
+async function sendGodChat() {
+  const message = godChatInput.value.trim();
+  if (!message) return;
+  await mutate(
+    "/api/god/chat",
+    {
+      faction_id: godChatFactionSelect.value,
+      message,
+    },
+    "首领正在回应...",
+  );
+  godChatInput.value = "";
+}
+
 async function mutate(path, body, busyLabel = "处理中...") {
   if (requestBusy) return;
   requestBusy = true;
@@ -223,6 +244,7 @@ function setButtonsDisabled(disabled) {
 function hydrateControls() {
   const factionIds = state.factions.map((faction) => faction.faction_id);
   syncOptions(factionSelect, factionIds, factionNames);
+  syncOptions(godChatFactionSelect, factionIds, factionNames);
   syncOptions(resourceSelect, state.resources, resourceNames);
   syncOptions(weatherSelect, state.weather_types, weatherNames);
 }
@@ -251,6 +273,7 @@ function render() {
   drawMap();
   renderFactions();
   renderPetitions();
+  renderGodChat();
   renderEvents();
 }
 
@@ -412,6 +435,28 @@ function renderPetitions() {
   });
 }
 
+function renderGodChat() {
+  const factionId = godChatFactionSelect.value || (state.factions[0] || {}).faction_id;
+  const messages = (state.god_chats || []).filter(
+    (message) => message.faction_id === factionId,
+  );
+  godChatMessages.innerHTML = "";
+  if (!messages.length) {
+    godChatMessages.innerHTML = `<div class="metric-line">暂无私聊。神谕只会影响首领意图，不会自动兑现资源。</div>`;
+    return;
+  }
+  messages.forEach((message) => {
+    const row = document.createElement("div");
+    row.className = `god-chat-message ${message.speaker}`;
+    row.innerHTML = `
+      <div class="god-chat-meta">第 ${message.tick} 刻 · ${displayChatSpeaker(message.speaker)}</div>
+      <div>${escapeHtml(message.content)}</div>
+    `;
+    godChatMessages.appendChild(row);
+  });
+  godChatMessages.scrollTop = godChatMessages.scrollHeight;
+}
+
 function renderEvents() {
   eventsEl.innerHTML = "";
   state.events.slice().reverse().forEach((event) => {
@@ -544,6 +589,9 @@ function formatEvent(event) {
 
   match = message.match(/^God sent (\w+) to \((\d+), (\d+)\)$/);
   if (match) return `上帝向（${match[2]}, ${match[3]}）降下${displayDisaster(match[1])}`;
+
+  match = message.match(/^(god|leader) privately messaged (\w+): (.*)$/);
+  if (match) return `${displayChatSpeaker(match[1])} 私聊 ${displayFaction(match[2])}：${match[3]}`;
 
   match = message.match(/^God rejected petition (\d+) from (\w+)$/);
   if (match) return `上帝拒绝了 ${displayFaction(match[2])} 的 #${match[1]} 祈求`;
@@ -694,11 +742,26 @@ function displayDisaster(value) {
   return displayWeather(value);
 }
 
+function displayChatSpeaker(value) {
+  if (value === "god") return "上帝";
+  if (value === "leader") return "首领";
+  return value;
+}
+
 function weatherShortLabel(value) {
   if (value === "rain") return "雨";
   if (value === "drought") return "旱";
   if (value === "storm") return "暴";
   return "";
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function formatLoot(value = "") {

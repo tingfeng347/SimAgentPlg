@@ -45,6 +45,11 @@ class AnswerRequest(BaseModel):
     approve: bool
 
 
+class GodChatRequest(BaseModel):
+    faction_id: str
+    message: str = Field(min_length=1)
+
+
 def create_engine(
     *,
     seed: int = 7,
@@ -127,6 +132,49 @@ def create_game_app(engine: GameEngine | None = None) -> FastAPI:
             return _error(exc)
         return serialize_state(app.state.engine.world)
 
+    @app.post("/api/god/chat")
+    async def god_chat(request: GodChatRequest):
+        if app.state.tick_lock.locked():
+            return JSONResponse(
+                {"error": "world is already advancing"},
+                status_code=409,
+            )
+        async with app.state.tick_lock:
+            world = app.state.engine.world
+            try:
+                faction = world.factions.get(request.faction_id)
+                if faction is None:
+                    raise ValueError(f"unknown faction {request.faction_id!r}")
+                if faction.eliminated:
+                    raise ValueError(f"faction {request.faction_id!r} is eliminated")
+                message = request.message.strip()
+                if not message:
+                    raise ValueError("message must not be empty")
+                controller = app.state.engine.leaders.get(request.faction_id)
+                if controller is None:
+                    raise ValueError(
+                        f"missing leader controller for faction {request.faction_id}"
+                    )
+                chat_method = getattr(controller, "chat_with_god", None)
+                if chat_method is None:
+                    raise ValueError(
+                        f"leader {request.faction_id} cannot answer god chat"
+                    )
+                world.add_god_chat_message(
+                    faction_id=request.faction_id,
+                    speaker="god",
+                    content=message,
+                )
+                reply = await chat_method(world)
+                world.add_god_chat_message(
+                    faction_id=request.faction_id,
+                    speaker="leader",
+                    content=reply,
+                )
+            except Exception as exc:
+                return _error(exc)
+            return serialize_state(world)
+
     return app
 
 
@@ -193,6 +241,10 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
             petition.as_dict()
             for petition in world.petitions
             if petition.status == "pending"
+        ],
+        "god_chats": [
+            message.as_dict()
+            for message in world.god_chats[-80:]
         ],
         "events": [
             event.as_dict()

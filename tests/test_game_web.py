@@ -11,6 +11,7 @@ class WebLeader:
     def __init__(self, faction_id: str) -> None:
         self.faction_id = faction_id
         self.calls = 0
+        self.chat_calls = 0
 
     async def decide(
         self,
@@ -20,6 +21,11 @@ class WebLeader:
     ) -> LeaderDecision:
         self.calls += 1
         return LeaderDecision(turn_intent="hold position")
+
+    async def chat_with_god(self, world) -> str:
+        self.chat_calls += 1
+        latest = world.recent_god_chat(self.faction_id)[-1]
+        return f"谨遵神谕：{latest.content}"
 
 
 class GameWebTests(unittest.TestCase):
@@ -49,6 +55,9 @@ class GameWebTests(unittest.TestCase):
         self.assertNotIn("/api/god/claim", response.text)
         self.assertIn("weatherDuration", response.text)
         self.assertIn("祈求", response.text)
+        self.assertIn("神谕私聊", response.text)
+        self.assertIn("godChatFactionSelect", response.text)
+        self.assertIn("发送神谕", response.text)
 
     def test_state_endpoint_returns_renderable_world(self) -> None:
         client = self.make_client()
@@ -82,6 +91,7 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("last_plan_snapshot", human)
         self.assertIn("home_tile", human)
         self.assertIn("eliminated", human)
+        self.assertEqual(payload["god_chats"], [])
 
     def test_god_mutation_endpoints_return_updated_state(self) -> None:
         client = self.make_client()
@@ -136,6 +146,82 @@ class GameWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["petitions"], [])
         self.assertEqual(engine.world.petitions[0].status, "approved")
+
+    def test_god_chat_endpoint_records_private_reply_without_mutating_world(self) -> None:
+        client = self.make_client()
+        engine = client.app.state.engine
+        before_resources = engine.world.factions["human"].resources.as_dict()
+        before_population = engine.world.total_population("human")
+        before_soldiers = engine.world.total_soldiers("human")
+        before_territory = len(engine.world.faction_tiles("human"))
+
+        response = client.post(
+            "/api/god/chat",
+            json={
+                "faction_id": "human",
+                "message": "若你攻打兽人，我会赐予粮食。",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        chats = [
+            message
+            for message in payload["god_chats"]
+            if message["faction_id"] == "human"
+        ]
+        self.assertEqual([message["speaker"] for message in chats], ["god", "leader"])
+        self.assertEqual(chats[0]["content"], "若你攻打兽人，我会赐予粮食。")
+        self.assertIn("谨遵神谕", chats[1]["content"])
+        self.assertEqual(engine.leaders["human"].chat_calls, 1)
+        self.assertEqual(engine.world.factions["human"].resources.as_dict(), before_resources)
+        self.assertEqual(engine.world.total_population("human"), before_population)
+        self.assertEqual(engine.world.total_soldiers("human"), before_soldiers)
+        self.assertEqual(len(engine.world.faction_tiles("human")), before_territory)
+        self.assertEqual(engine.world.factions["human"].active_orders, {})
+
+    def test_god_chat_endpoint_rejects_invalid_requests(self) -> None:
+        client = self.make_client()
+
+        empty = client.post(
+            "/api/god/chat",
+            json={"faction_id": "human", "message": "   "},
+        )
+        missing = client.post(
+            "/api/god/chat",
+            json={"faction_id": "missing", "message": "回应我。"},
+        )
+
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("message must not be empty", empty.json()["error"])
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("unknown faction", missing.json()["error"])
+
+    def test_god_chat_endpoint_rejects_eliminated_faction(self) -> None:
+        client = self.make_client()
+        client.app.state.engine.world.factions["human"].eliminated = True
+
+        response = client.post(
+            "/api/god/chat",
+            json={"faction_id": "human", "message": "回应我。"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("is eliminated", response.json()["error"])
+
+    def test_god_chat_endpoint_rejects_concurrent_request(self) -> None:
+        client = self.make_client()
+        asyncio.run(client.app.state.tick_lock.acquire())
+        try:
+            response = client.post(
+                "/api/god/chat",
+                json={"faction_id": "human", "message": "回应我。"},
+            )
+        finally:
+            client.app.state.tick_lock.release()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "world is already advancing")
 
     def test_tick_endpoint_advances_world_and_fake_leaders(self) -> None:
         client = self.make_client(strategy_interval=1)

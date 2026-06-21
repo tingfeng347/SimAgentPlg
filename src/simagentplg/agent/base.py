@@ -257,6 +257,7 @@ class BaseAgent:
                 messages=cast(Any, messages),
                 temperature=self.config.temperature,
                 tools=cast(Any, tools),
+                extra_body={"thinking": {"type": "enabled"}}
             )
         except Exception as exc:
             raise RuntimeError(f"chat completion failed: {exc}") from exc

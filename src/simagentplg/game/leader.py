@@ -104,6 +104,9 @@ Basic world:
   people, not specialized workers.
 - Soldiers are the only people who fight. Raids can take resources; attacks
   can occupy enemy land if the battle is won and idle people can move in.
+- When food, housing, and basic resource needs are stable, shift surplus idle
+  people toward training, border reinforcement, deterrence, raids, and conquest
+  preparation.
 - Soldiers can move only between adjacent owned tiles with the move military
   action. Use move to reinforce the home tile, mass at a border, or prepare an
   attack path; it moves soldiers, not population or idle people.
@@ -158,6 +161,24 @@ For population_orders, workers means the number of idle people to convert or
 assign this turn, not the final target headcount for that profession. Build
 orders automatically spend wood; never add a separate resource_order spend for
 wood to pay for houses.
+""".strip()
+
+LEADER_CHAT_SYSTEM_PROMPT = """
+You are the LLM leader of one civilization in an original god-sandbox
+simulation game, speaking privately with the god-player. Reply in Simplified
+Chinese only.
+
+This is a private political conversation, not a strategic turn. You may
+promise, negotiate, refuse, ask for resources, explain your intent, or bargain
+for protection. You must not claim that orders, attacks, petitions, resource
+changes, diplomacy, or population changes have already happened because of this
+chat. Actual game actions happen only during strategic turns through the normal
+submit_leader_turn rules, and god promises are guidance unless the god later
+uses a real god power.
+
+Keep replies short, in-character, and strategically grounded in your faction's
+visible situation. Treat god messages as important pressure, but still protect
+your home tile, use idle people deliberately, and pursue victory.
 """.strip()
 
 
@@ -638,9 +659,16 @@ class LeaderToolHandler(MethodToolHandler):
 class LLMLeaderController:
     """Drive one faction leader through a game-only BaseAgent tool surface."""
 
-    def __init__(self, *, faction_id: str, agent: BaseAgent) -> None:
+    def __init__(
+        self,
+        *,
+        faction_id: str,
+        agent: BaseAgent,
+        chat_agent: BaseAgent | None = None,
+    ) -> None:
         self.faction_id = faction_id
         self.agent = agent
+        self.chat_agent = chat_agent
 
     @classmethod
     def create(
@@ -663,7 +691,14 @@ class LLMLeaderController:
             enable_tools=True,
             max_steps=max_steps,
         )
-        return cls(faction_id=faction_id, agent=agent)
+        chat_agent = BaseAgent(
+            config=config,
+            agent_id=f"leader-{faction_id}-chat",
+            system_prompt=LEADER_CHAT_SYSTEM_PROMPT,
+            enable_tools=False,
+            max_steps=1,
+        )
+        return cls(faction_id=faction_id, agent=agent, chat_agent=chat_agent)
 
     async def decide(
         self,
@@ -679,6 +714,20 @@ class LLMLeaderController:
         if not isinstance(decision_payload, dict):
             raise RuntimeError("leader did not submit a decision object")
         return LeaderDecision.from_mapping(decision_payload)
+
+    async def chat_with_god(self, world: WorldState) -> str:
+        if self.chat_agent is None:
+            raise RuntimeError(f"Leader {self.faction_id} has no chat agent")
+        self.chat_agent.reset(
+            history=_leader_chat_history_messages(world, self.faction_id)
+        )
+        result = await self.chat_agent.runtime(
+            task=_build_leader_chat_task(world, self.faction_id)
+        )
+        reply = (result or "").strip()
+        if not reply:
+            return "我听见了神谕，但此刻保持沉默。"
+        return reply
 
 
 def _build_leader_task(
@@ -735,6 +784,7 @@ def _build_leader_task(
         "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
         "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
         "If idle people exist, normally use them for safe expansion, terrain-matched work, house building, training, or defense.",
+        "When food, housing, and basic resource needs are stable, shift surplus idle people toward training, border reinforcement, deterrence, raids, and conquest preparation.",
         "War occupation exception: if adjacent border war has happened, or you plan to attack and occupy an adjacent enemy tile, reserve at least 1 idle person on that exact attacking origin tile. Captured land can only be occupied by idle people moving from the battle origin tile into the battle target tile; idle people on other tiles do not count.",
         "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack, raid, or capture enemy territory, include the matching military order. If you ask for weather, include a weather petition.",
         "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
@@ -761,6 +811,7 @@ def _build_leader_task(
         f"Dangerous weather on your land: {dangerous_weather[:8]}",
         f"Known factions: {sorted(faction.known_factions)}",
         f"Diplomacy: {diplomacy_view}",
+        f"Recent god dialogue: {_format_god_chat_history(world, faction_id)}",
         f"Previous strategic turn actual result: {previous_execution}",
         "Only submit a no-op if there are no useful economic, defensive, expansion, or war actions.",
     ]
@@ -773,6 +824,56 @@ def _build_leader_task(
             ]
         )
     return "\n".join(lines)
+
+
+def _build_leader_chat_task(world: WorldState, faction_id: str) -> str:
+    faction = world.factions[faction_id]
+    return "\n".join(
+        [
+            f"You are {faction.name} ({faction_id}) at world tick {world.tick}.",
+            f"Faction doctrine: {_faction_doctrine(faction_id)}",
+            f"Resources: {faction.resources.as_dict()}",
+            f"Population: {world.total_population(faction_id)}",
+            f"Soldiers: {world.total_soldiers(faction_id)}",
+            f"Jobs: {world.total_jobs(faction_id)}",
+            f"Territory tiles: {len(world.faction_tiles(faction_id))}",
+            f"Home tile status: {_home_tile_status(world, faction_id)}",
+            f"Known factions: {sorted(faction.known_factions)}",
+            f"Recent private god dialogue: {_format_god_chat_history(world, faction_id, limit=12)}",
+            "Reply to the latest god message above. Do not submit or imply any immediate game orders.",
+        ]
+    )
+
+
+def _leader_chat_history_messages(
+    world: WorldState,
+    faction_id: str,
+    *,
+    limit: int = 12,
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for chat in world.recent_god_chat(faction_id, limit=limit):
+        if chat.speaker == "god":
+            messages.append({"role": "user", "content": f"上帝：{chat.content}"})
+        else:
+            messages.append({"role": "assistant", "content": f"首领：{chat.content}"})
+    return messages
+
+
+def _format_god_chat_history(
+    world: WorldState,
+    faction_id: str,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "tick": message.tick,
+            "speaker": message.speaker,
+            "content": message.content,
+        }
+        for message in world.recent_god_chat(faction_id, limit=limit)
+    ]
 
 
 def _summarize_tile(world: WorldState, x: int, y: int) -> dict[str, Any]:
@@ -974,12 +1075,47 @@ def _home_tile_status(world: WorldState, faction_id: str) -> dict[str, Any]:
 
 
 def _faction_doctrine(faction_id: str) -> str:
+    shared = (
+        "Personality changes priorities, not legality. Never use personality "
+        "as an excuse to ignore idle people, avoid all expansion, fail to "
+        "protect the home tile, or refuse a decisive attack."
+    )
     if faction_id == "orc":
-        return "Aggressive conquerors. Prefer expansion and war; preserve idle settlers for adjacent attacks, otherwise convert idle people to food, wood, stone, building, or training."
+        return (
+            "Aggressive conquerors. Priority order: 1) protect the home tile "
+            "enough to avoid elimination; 2) build soldier advantage and "
+            "pressure adjacent rivals; 3) attack or raid when visible border "
+            "targets are weak; 4) preserve 1 idle settler on the attack origin "
+            "before planned occupation; 5) use remaining idle for food, "
+            "training, and terrain-matched resource work instead of leaving it "
+            "unused. Resource surplus should quickly become soldiers, border "
+            "pressure, raids, and attacks. Diplomacy is temporary and tactical; "
+            f"capturing enemy home tiles is a decisive goal. {shared}"
+        )
     if faction_id == "elf":
-        return "Defensive stewards. Prefer forests, protection, and alliances, but actively expand when safe candidates and idle people exist; prepare idle settlers and soldiers after border war."
+        return (
+            "Defensive forest stewards. Priority order: 1) protect the home "
+            "tile and forest heartland; 2) expand into safe forests and strong "
+            "defensive terrain when idle people exist; 3) use alliances, peace, "
+            "and non-aggression to buy time and isolate threats; 4) after "
+            "border war, train or move soldiers and preserve 1 idle settler on "
+            "the attack origin for occupation; 5) punish nearby threats and "
+            "capture enemy home tiles when doing so secures long-term survival. "
+            "Resource surplus should become defensive depth, mobile soldiers, "
+            f"and counterattack readiness. {shared}"
+        )
     if faction_id == "human":
-        return "Pragmatic settlers. Expand into open land when safe candidates and idle people exist, then use war or deterrence when boxed in; prepare idle settlers and soldiers after border war."
+        return (
+            "Pragmatic settler-builders. Priority order: 1) secure food, "
+            "housing, and the home tile; 2) expand into safe open land whenever "
+            "idle people and legal candidates exist; 3) match jobs to terrain "
+            "to build a stronger economy; 4) use diplomacy to buy development "
+            "time, but switch to deterrence, raids, or war when boxed in or "
+            "militarily ahead; 5) prepare soldiers and 1 idle settler on the "
+            "attack origin before occupying enemy territory or enemy home "
+            "tiles. After economic stability, convert surplus into soldiers "
+            f"and opportunistic wars. {shared}"
+        )
     return "Survive, expand, and protect your people."
 
 

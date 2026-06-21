@@ -532,12 +532,14 @@ def _weather_multiplier(weather: str) -> float:
 def _food_output(tile, farmers: int) -> int:
     if farmers <= 0:
         return 0
-    terrain_factor = {
-        "plain": 1.0,
-        "forest": 0.45,
-        "hill": 0.25,
-    }.get(tile.terrain, 0.0)
-    return max(0, int(farmers * terrain_factor * _weather_multiplier(tile.weather) / 5))
+    terrain_divisor = {
+        "plain": 3,
+        "forest": 6,
+        "hill": 10,
+    }.get(tile.terrain)
+    if terrain_divisor is None:
+        return 0
+    return max(0, int(farmers * _weather_multiplier(tile.weather) / terrain_divisor))
 
 
 def _wood_output(tile, lumberjacks: int) -> int:

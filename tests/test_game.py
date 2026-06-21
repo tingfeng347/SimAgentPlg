@@ -20,10 +20,13 @@ from simagentplg.game import (
     render_status,
 )
 from simagentplg.game.leader import (
+    LEADER_CHAT_SYSTEM_PROMPT,
     LEADER_SYSTEM_PROMPT,
     SUBMIT_LEADER_TURN_TOOL,
     _build_leader_task,
+    _faction_doctrine,
 )
+from simagentplg.game.npc import _food_output
 
 TEST_CONFIG = ModelConfig(
     model="test-model",
@@ -240,6 +243,32 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(world.petitions), 1)
         self.assertEqual(world.petitions[0].request["amount"], 80)
         self.assertEqual(world.petitions[0].urgency, "high")
+
+    def test_world_records_private_god_chat_by_faction(self) -> None:
+        world = create_default_world(seed=20)
+
+        first = world.add_god_chat_message(
+            faction_id="human",
+            speaker="god",
+            content="攻打兽人，我会赐予粮食。",
+        )
+        world.add_god_chat_message(
+            faction_id="elf",
+            speaker="god",
+            content="守住森林。",
+        )
+        third = world.add_god_chat_message(
+            faction_id="human",
+            speaker="leader",
+            content="我们会考虑边境战机。",
+        )
+
+        human_messages = world.recent_god_chat("human")
+        self.assertEqual(first.message_id, 1)
+        self.assertEqual(third.message_id, 3)
+        self.assertEqual([message.message_id for message in human_messages], [1, 3])
+        self.assertEqual(human_messages[0].speaker, "god")
+        self.assertTrue(any(event.kind == "god_chat" for event in world.events))
 
     def test_rule_engine_rejects_illegal_leader_orders(self) -> None:
         world = create_default_world(seed=2)
@@ -570,6 +599,30 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(world.total_population("human"), before)
         self.assertTrue(any(event.kind == "population" for event in world.events))
+
+    def test_farmer_food_output_is_higher_on_good_farmland(self) -> None:
+        farmers = 10
+
+        self.assertEqual(
+            _food_output(SimpleNamespace(terrain="plain", weather="clear"), farmers),
+            3,
+        )
+        self.assertEqual(
+            _food_output(SimpleNamespace(terrain="plain", weather="rain"), farmers),
+            4,
+        )
+        self.assertEqual(
+            _food_output(SimpleNamespace(terrain="forest", weather="clear"), farmers),
+            1,
+        )
+        self.assertEqual(
+            _food_output(SimpleNamespace(terrain="hill", weather="clear"), farmers),
+            1,
+        )
+        self.assertEqual(
+            _food_output(SimpleNamespace(terrain="water", weather="clear"), farmers),
+            0,
+        )
 
     def test_weather_damages_population_on_owned_tiles(self) -> None:
         world = create_default_world(seed=32)
@@ -1181,10 +1234,13 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("food=120, wood=80, and stone=40", LEADER_SYSTEM_PROMPT)
         self.assertIn('"workers":2', LEADER_SYSTEM_PROMPT)
         self.assertIn("Idle people should usually be used deliberately", LEADER_SYSTEM_PROMPT)
+        self.assertIn("When food, housing, and basic resource needs are stable", LEADER_SYSTEM_PROMPT)
+        self.assertIn("border reinforcement, deterrence, raids", LEADER_SYSTEM_PROMPT)
         self.assertIn("preserve at least 1 idle person on the attacking", LEADER_SYSTEM_PROMPT)
         self.assertIn("battle origin tile into the battle target tile", LEADER_SYSTEM_PROMPT)
         self.assertIn("Long-term objective", task)
         self.assertIn("defeat rival civilizations", task)
+        self.assertIn("shift surplus idle people toward training", task)
         self.assertIn("Home tile status:", task)
         self.assertIn("move", task)
         self.assertIn("Idle focus tiles:", task)
@@ -1193,6 +1249,57 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("settlement_sources", task)
         self.assertIn("reserve at least 1 idle person on that exact attacking origin tile", task)
         self.assertIn("idle people on other tiles do not count", task)
+
+    def test_leader_task_includes_only_own_recent_god_dialogue(self) -> None:
+        world = create_default_world(seed=50)
+        world.add_god_chat_message(
+            faction_id="human",
+            speaker="god",
+            content="攻打兽人，我会赐予粮食。",
+        )
+        world.add_god_chat_message(
+            faction_id="elf",
+            speaker="god",
+            content="守住森林，不要相信人类。",
+        )
+
+        task = _build_leader_task(world, "human", None)
+
+        self.assertIn("Recent god dialogue", task)
+        self.assertIn("攻打兽人", task)
+        self.assertNotIn("不要相信人类", task)
+        self.assertIn("private political conversation", LEADER_CHAT_SYSTEM_PROMPT)
+        self.assertIn("Actual game actions happen only during strategic turns", LEADER_CHAT_SYSTEM_PROMPT)
+        self.assertIn("must not claim that orders", LEADER_CHAT_SYSTEM_PROMPT)
+
+    def test_faction_doctrines_express_distinct_priorities(self) -> None:
+        orc = _faction_doctrine("orc")
+        elf = _faction_doctrine("elf")
+        human = _faction_doctrine("human")
+
+        self.assertIn("Aggressive conquerors", orc)
+        self.assertIn("build soldier advantage", orc)
+        self.assertIn("capturing enemy home tiles", orc)
+        self.assertIn("Diplomacy is temporary and tactical", orc)
+        self.assertIn("Resource surplus should quickly become soldiers", orc)
+
+        self.assertIn("Defensive forest stewards", elf)
+        self.assertIn("forest heartland", elf)
+        self.assertIn("alliances, peace, and non-aggression", elf)
+        self.assertIn("punish nearby threats", elf)
+        self.assertIn("Resource surplus should become defensive depth", elf)
+
+        self.assertIn("Pragmatic settler-builders", human)
+        self.assertIn("secure food, housing", human)
+        self.assertIn("safe open land", human)
+        self.assertIn("switch to deterrence, raids, or war", human)
+        self.assertIn("After economic stability, convert surplus into soldiers", human)
+
+        for doctrine in (orc, elf, human):
+            self.assertIn("Personality changes priorities, not legality", doctrine)
+            self.assertIn("ignore idle people", doctrine)
+            self.assertIn("protect the home tile", doctrine)
+            self.assertIn("decisive attack", doctrine)
 
     def test_leader_task_marks_border_origin_idle_for_occupation(self) -> None:
         world = create_default_world(seed=52)
@@ -1287,6 +1394,38 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                 "submit_leader_turn",
             ],
         )
+
+    async def test_llm_leader_controller_answers_god_chat_without_tools(self) -> None:
+        world = create_default_world(seed=4)
+        world.add_god_chat_message(
+            faction_id="human",
+            speaker="god",
+            content="若你攻打兽人，我会赐予粮食。",
+        )
+        strategic_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human",
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+        chat_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human-chat",
+            system_prompt=LEADER_CHAT_SYSTEM_PROMPT,
+            enable_tools=False,
+            max_steps=1,
+            client=FakeClient([FakeMessage(content="我会整军观察兽人的边境。")]),
+        )
+        controller = LLMLeaderController(
+            faction_id="human",
+            agent=strategic_agent,
+            chat_agent=chat_agent,
+        )
+
+        reply = await controller.chat_with_god(world)
+
+        self.assertEqual(reply, "我会整军观察兽人的边境。")
+        self.assertEqual(chat_agent.tools, [])
 
     async def test_leader_inspect_tool_combines_observation_modes(self) -> None:
         world = create_default_world(seed=4)

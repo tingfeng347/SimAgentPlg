@@ -29,6 +29,7 @@ body {
 
 button,
 input,
+textarea,
 select {
   font: inherit;
 }
@@ -53,6 +54,7 @@ button:disabled {
 }
 
 input,
+textarea,
 select {
   min-height: 34px;
   width: 100%;
@@ -61,6 +63,12 @@ select {
   color: var(--text);
   border-radius: 6px;
   padding: 0 8px;
+}
+
+textarea {
+  min-height: 78px;
+  padding: 8px;
+  resize: vertical;
 }
 
 label {
@@ -176,7 +184,7 @@ h2 {
 
 .side-pane {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
   border-left: 1px solid var(--line);
@@ -235,12 +243,60 @@ h2 {
   min-height: 30px;
 }
 
+.god-chat-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.god-chat-messages {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #2d363f;
+  background: #14191e;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.god-chat-message {
+  max-width: 92%;
+  border: 1px solid #33404a;
+  background: #202832;
+  border-radius: 6px;
+  padding: 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.god-chat-message.god {
+  justify-self: end;
+  border-color: #5d8ca8;
+  background: #1d3140;
+}
+
+.god-chat-message.leader {
+  justify-self: start;
+}
+
+.god-chat-meta {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.god-chat-compose {
+  display: grid;
+  gap: 8px;
+}
+
 .events-panel {
   overflow: hidden;
 }
 
 #events {
-  max-height: calc(100vh - 430px);
+  max-height: calc(100vh - 650px);
   overflow: auto;
 }
 

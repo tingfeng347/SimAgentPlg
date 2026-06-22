@@ -234,6 +234,8 @@ def serialize_state(world: WorldState) -> dict[str, Any]:
                     if other_id != faction_id
                 },
                 "last_plan_snapshot": dict(faction.last_plan_snapshot),
+                "leader_memory": dict(faction.leader_memory),
+                "leader_context_window_count": len(faction.leader_context_window),
             }
             for faction_id, faction in sorted(world.factions.items())
         ],

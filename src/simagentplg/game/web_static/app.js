@@ -620,8 +620,11 @@ function formatEvent(event) {
   match = message.match(/^(\w+) lost tile \((\d+), (\d+)\) because no people remained$/);
   if (match) return `${displayFaction(match[1])} 因无人居住失去（${match[2]}, ${match[3]}）`;
 
-  match = message.match(/^(\w+) failed to settle tile (.+) because no (?:idle|movable) people were available$/);
-  if (match) return `${displayFaction(match[1])} 无法迁入 ${formatTarget(match[2])}：没有闲置人口`;
+  match = message.match(/^(\w+) failed to settle tile (.+) because no (?:idle people|movable people|movable civilians) were available$/);
+  if (match) return `${displayFaction(match[1])} 无法迁入 ${formatTarget(match[2])}：没有可迁平民`;
+
+  match = message.match(/^(\w+) settled tile (.+) from (.+) with (\d+) (\w+)(?: and claimed it)?$/);
+  if (match) return `${displayFaction(match[1])} 从 ${formatTarget(match[3])} 迁入 ${formatTarget(match[2])}：${match[4]} 名${displayProfession(match[5])}`;
 
   match = message.match(/^(\w+) settled tile (.+) with (\d+) people$/);
   if (match) return `${displayFaction(match[1])} 迁入 ${formatTarget(match[2])}，人口 ${match[3]}`;
@@ -629,8 +632,8 @@ function formatEvent(event) {
   match = message.match(/^(\w+) trained (\d+) soldiers at (.+)$/);
   if (match) return `${displayFaction(match[1])} 在 ${formatTarget(match[3])} 训练了 ${match[2]} 名士兵`;
 
-  match = message.match(/^(\w+) captured (.+) from (\w+)(?: with (\d+) settlers and took (.*))?$/);
-  if (match) return `${displayFaction(match[1])} 从 ${displayFaction(match[3])} 手中占领 ${formatTarget(match[2])}${match[4] ? `，迁入 ${match[4]} 人，缴获 ${formatLoot(match[5])}` : ""}`;
+  match = message.match(/^(\w+) captured (.+) from (\w+)(?: with (\d+) (settlers|soldiers) and took (.*))?$/);
+  if (match) return `${displayFaction(match[1])} 从 ${displayFaction(match[3])} 手中占领 ${formatTarget(match[2])}${match[4] ? `，${match[5] === "soldiers" ? "驻守士兵" : "迁入"} ${match[4]}，缴获 ${formatLoot(match[6])}` : ""}`;
 
   match = message.match(/^(\w+) was eliminated when (\w+) captured home tile (.+); resources transferred food=(\d+) wood=(\d+) stone=(\d+)$/);
   if (match) return `${displayFaction(match[2])} 占领 ${displayFaction(match[1])} 出生地 ${formatTarget(match[3])}，${displayFaction(match[1])} 被淘汰，资源转移：食物 ${match[4]}、木材 ${match[5]}、石料 ${match[6]}`;
@@ -640,9 +643,6 @@ function formatEvent(event) {
 
   match = message.match(/^(\w+) raided (.+) from (\w+) and took (.*)$/);
   if (match) return `${displayFaction(match[1])} 突袭 ${displayFaction(match[3])} 的 ${formatTarget(match[2])}，缴获 ${formatLoot(match[4])}`;
-
-  match = message.match(/^(\w+) won at (.+) but could not occupy without (?:idle|movable) people and took (.*)$/);
-  if (match) return `${displayFaction(match[1])} 赢下 ${formatTarget(match[2])}，但没有闲置人口，未能占领；缴获 ${formatLoot(match[3])}`;
 
   match = message.match(/^(\w+) attacked (\w+) at (.+) and failed$/);
   if (match) return `${displayFaction(match[1])} 进攻 ${displayFaction(match[2])} 的 ${formatTarget(match[3])} 失败`;

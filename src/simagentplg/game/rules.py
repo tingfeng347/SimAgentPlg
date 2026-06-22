@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from simagentplg.game.leader import LeaderDecision, validate_resource_name
+from simagentplg.game.migration import (
+    CIVILIAN_PROFESSION_PRIORITY,
+    CIVILIAN_PROFESSION_TYPES,
+)
 from simagentplg.game.world import (
     RESOURCE_TYPES,
     SETTLEMENT_IDLE_COST,
@@ -228,12 +232,31 @@ class RuleEngine:
             if order.action in {"claim", "settle"}:
                 if not tile.is_passable():
                     errors.append(f"{label}: target terrain is not passable")
-                if tile.owner not in {None, faction_id}:
+                if order.action == "claim" and tile.owner is not None:
+                    errors.append(f"{label}: claim target must be unowned")
+                if order.action == "settle" and tile.owner not in {None, faction_id}:
                     errors.append(f"{label}: target is owned by {tile.owner}")
-                if not self._adjacent_to_owned(world, faction_id, order.target):
+                if order.profession is not None and order.profession not in CIVILIAN_PROFESSION_TYPES:
+                    errors.append(f"{label}: unknown civilian profession {order.profession!r}")
+                if order.origin is not None:
+                    errors.extend(
+                        self._validate_visible_target(
+                            world,
+                            faction_id,
+                            order.origin,
+                            f"{label} origin",
+                        )
+                    )
+                    if world.in_bounds(*order.origin):
+                        origin_tile = world.tile_at(*order.origin)
+                        if origin_tile.owner != faction_id:
+                            errors.append(f"{label}: origin must be owned by {faction_id}")
+                        if not self._adjacent(order.origin, order.target):
+                            errors.append(f"{label}: origin must be adjacent to target")
+                elif not self._adjacent_to_owned(world, faction_id, order.target):
                     errors.append(f"{label}: target must border owned territory")
                 if not _has_movable_population(world, faction_id):
-                    errors.append(f"{label}: faction has no idle population to occupy new territory")
+                    errors.append(f"{label}: faction has no movable civilian for settlement")
             if order.action in {"fortify", "abandon"} and tile.owner != faction_id:
                 errors.append(f"{label}: target must be owned by {faction_id}")
         return errors
@@ -436,16 +459,23 @@ class RuleEngine:
         faction_id: str,
         decision: LeaderDecision,
     ) -> list[str]:
-        idle_by_tile = {
-            (tile.x, tile.y): _idle_count(tile, faction_id)
+        jobs_by_tile = {
+            (tile.x, tile.y): {
+                profession: tile.professions_of(faction_id).get(profession, 0)
+                for profession in CIVILIAN_PROFESSION_PRIORITY
+            }
             for tile in world.faction_tiles(faction_id)
         }
         population_by_tile = {
             (tile.x, tile.y): tile.population_of(faction_id)
             for tile in world.faction_tiles(faction_id)
         }
-        owned = set(idle_by_tile)
-        total_idle = sum(idle_by_tile.values())
+        soldiers_by_tile = {
+            (tile.x, tile.y): tile.soldiers_of(faction_id)
+            for tile in world.faction_tiles(faction_id)
+        }
+        owned = set(jobs_by_tile)
+        total_civilians = sum(sum(jobs.values()) for jobs in jobs_by_tile.values())
         budget = _idle_budget_need(world, decision)
         errors: list[str] = []
 
@@ -461,7 +491,7 @@ class RuleEngine:
                 if tile is None:
                     continue
                 _consume_idle_budget(
-                    idle_by_tile,
+                    jobs_by_tile,
                     (tile.x, tile.y),
                     order.workers,
                     label,
@@ -474,7 +504,7 @@ class RuleEngine:
                 if tile.owner != faction_id:
                     continue
                 _consume_idle_budget(
-                    idle_by_tile,
+                    jobs_by_tile,
                     (tile.x, tile.y),
                     _trained_count(order.workers),
                     label,
@@ -493,10 +523,14 @@ class RuleEngine:
                     world,
                     order.target,
                     label,
-                    idle_by_tile,
-                    population_by_tile,
-                    owned,
-                    errors,
+                    action="settle",
+                    origin=None,
+                    profession=None,
+                    jobs_by_tile=jobs_by_tile,
+                    population_by_tile=population_by_tile,
+                    soldiers_by_tile=soldiers_by_tile,
+                    owned=owned,
+                    errors=errors,
                 )
 
         for index, order in sorted(
@@ -509,17 +543,21 @@ class RuleEngine:
                 world,
                 order.target,
                 f"territory_order {index}",
-                idle_by_tile,
-                population_by_tile,
-                owned,
-                errors,
+                action=order.action,
+                origin=order.origin if order.action == "settle" else None,
+                profession=order.profession if order.action == "settle" else None,
+                jobs_by_tile=jobs_by_tile,
+                population_by_tile=population_by_tile,
+                soldiers_by_tile=soldiers_by_tile,
+                owned=owned,
+                errors=errors,
             )
 
-        if errors and budget["total"] > total_idle:
+        if errors and budget["total"] > total_civilians:
             errors.append(
                 (
-                    f"idle budget exceeded: current idle={total_idle}, "
-                    f"claim/settle need={budget['settlement']} "
+                    f"civilian budget exceeded: current civilians={total_civilians}, "
+                    f"claim/settle migration need={budget['settlement']} "
                     f"({budget['settlement_count']} x {SETTLEMENT_IDLE_COST}), "
                     f"jobs/training need={budget['jobs_training']}, "
                     f"total needed={budget['total']}"
@@ -600,7 +638,14 @@ def _int(value: object, default: int) -> int:
 
 def _has_movable_population(world: WorldState, faction_id: str) -> bool:
     return any(
-        _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST
+        any(
+            tile.professions_of(faction_id).get(profession, 0) >= SETTLEMENT_IDLE_COST
+            for profession in CIVILIAN_PROFESSION_PRIORITY
+        )
+        and (
+            tile.population_of(faction_id) > SETTLEMENT_IDLE_COST
+            or tile.soldiers_of(faction_id) > 0
+        )
         for tile in world.faction_tiles(faction_id)
     )
 
@@ -728,7 +773,7 @@ def _order_owned_tile(
 
 
 def _consume_idle_budget(
-    idle_by_tile: dict[tuple[int, int], int],
+    jobs_by_tile: dict[tuple[int, int], dict[str, int]],
     key: tuple[int, int],
     amount: int,
     label: str,
@@ -736,8 +781,9 @@ def _consume_idle_budget(
 ) -> None:
     if amount <= 0:
         return
-    idle_by_tile[key] = idle_by_tile.get(key, 0) - amount
-    if idle_by_tile[key] < 0:
+    jobs = jobs_by_tile.setdefault(key, {job: 0 for job in CIVILIAN_PROFESSION_PRIORITY})
+    jobs["idle"] = jobs.get("idle", 0) - amount
+    if jobs["idle"] < 0:
         errors.append(f"{label}: idle population budget is overcommitted")
 
 
@@ -760,68 +806,122 @@ def _consume_settlement_budget(
     world: WorldState,
     target: tuple[int, int],
     label: str,
-    idle_by_tile: dict[tuple[int, int], int],
+    *,
+    action: str,
+    origin: tuple[int, int] | None,
+    profession: str | None,
+    jobs_by_tile: dict[tuple[int, int], dict[str, int]],
     population_by_tile: dict[tuple[int, int], int],
+    soldiers_by_tile: dict[tuple[int, int], int],
     owned: set[tuple[int, int]],
     errors: list[str],
 ) -> None:
     if not world.in_bounds(*target):
         return
     tile = world.tile_at(*target)
-    if tile.owner is not None or target in owned:
+    if action == "claim" and tile.owner is not None:
         return
     if not tile.is_passable():
         return
-    donor_key = _best_adjacent_idle_donor(
+    if tile.owner is not None and target not in owned:
+        return
+    if population_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST > tile.capacity():
+        errors.append(f"{label}: target has no population capacity for settlement")
+        return
+    donor_key = _best_adjacent_civilian_donor(
         target,
-        idle_by_tile,
+        jobs_by_tile,
         population_by_tile,
+        soldiers_by_tile,
         owned,
+        origin=origin,
+        profession=profession,
     )
     if donor_key is None:
         errors.append(
-            f"{label}: faction has no idle population to occupy new territory while leaving the source tile populated"
+            f"{label}: faction has no movable civilian to settle target while leaving the source tile held"
         )
         return
-    if (
-        idle_by_tile[donor_key] < SETTLEMENT_IDLE_COST
-        or population_by_tile.get(donor_key, 0) <= SETTLEMENT_IDLE_COST
-        or tile.capacity() < SETTLEMENT_IDLE_COST
-    ):
+    selected = _choose_budget_profession(jobs_by_tile, donor_key, profession)
+    if selected is None:
         errors.append(
-            f"{label}: faction has no idle population to occupy new territory while leaving the source tile populated"
+            f"{label}: faction has no movable civilian to settle target while leaving the source tile held"
         )
         return
-    idle_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
+    jobs_by_tile[donor_key][selected] = jobs_by_tile[donor_key].get(selected, 0) - SETTLEMENT_IDLE_COST
     population_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
-    idle_by_tile[target] = idle_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
+    if (
+        population_by_tile.get(donor_key, 0) <= 0
+        and soldiers_by_tile.get(donor_key, 0) <= 0
+    ):
+        errors.append(f"{label}: would leave source tile without civilians or soldiers")
+        return
+    target_jobs = jobs_by_tile.setdefault(
+        target,
+        {job: 0 for job in CIVILIAN_PROFESSION_PRIORITY},
+    )
+    target_jobs[selected] = target_jobs.get(selected, 0) + SETTLEMENT_IDLE_COST
     population_by_tile[target] = population_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
     owned.add(target)
 
 
-def _best_adjacent_idle_donor(
+def _best_adjacent_civilian_donor(
     target: tuple[int, int],
-    idle_by_tile: dict[tuple[int, int], int],
+    jobs_by_tile: dict[tuple[int, int], dict[str, int]],
     population_by_tile: dict[tuple[int, int], int],
+    soldiers_by_tile: dict[tuple[int, int], int],
     owned: set[tuple[int, int]],
+    *,
+    origin: tuple[int, int] | None,
+    profession: str | None,
 ) -> tuple[int, int] | None:
-    candidates = [
-        key
-        for key in owned
-        if abs(key[0] - target[0]) + abs(key[1] - target[1]) == 1
-        and idle_by_tile.get(key, 0) >= SETTLEMENT_IDLE_COST
-        and population_by_tile.get(key, 0) > SETTLEMENT_IDLE_COST
-    ]
+    if origin is not None:
+        keys = [origin] if origin in owned else []
+    else:
+        keys = list(owned)
+    candidates = []
+    for key in keys:
+        if abs(key[0] - target[0]) + abs(key[1] - target[1]) != 1:
+            continue
+        if _choose_budget_profession(jobs_by_tile, key, profession) is None:
+            continue
+        if (
+            population_by_tile.get(key, 0) - SETTLEMENT_IDLE_COST <= 0
+            and soldiers_by_tile.get(key, 0) <= 0
+        ):
+            continue
+        candidates.append(key)
     if not candidates:
         return None
-    return max(candidates, key=lambda key: idle_by_tile.get(key, 0))
+    return max(
+        candidates,
+        key=lambda key: (
+            jobs_by_tile.get(key, {}).get(
+                _choose_budget_profession(jobs_by_tile, key, profession) or "idle",
+                0,
+            ),
+            population_by_tile.get(key, 0),
+        ),
+    )
+
+
+def _choose_budget_profession(
+    jobs_by_tile: dict[tuple[int, int], dict[str, int]],
+    key: tuple[int, int],
+    profession: str | None,
+) -> str | None:
+    jobs = jobs_by_tile.get(key, {})
+    if profession:
+        if profession in CIVILIAN_PROFESSION_TYPES and jobs.get(profession, 0) >= SETTLEMENT_IDLE_COST:
+            return profession
+        return None
+    for candidate in CIVILIAN_PROFESSION_PRIORITY:
+        if jobs.get(candidate, 0) >= SETTLEMENT_IDLE_COST:
+            return candidate
+    return None
 
 
 def _trained_count(workers: int) -> int:
     if workers <= 0:
         return 0
     return max(1, workers // 5)
-
-
-def _idle_count(tile, faction_id: str) -> int:
-    return tile.professions_of(faction_id).get("idle", 0)

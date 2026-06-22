@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import Any, Protocol
 
 from simagentplg.logger import get_logger
 from simagentplg.game.god import GodSystem
@@ -66,20 +66,25 @@ class GameEngine:
             self._record_discoveries()
 
             if self.world.tick % self.strategy_interval == 0:
-                await self._run_strategic_turns()
+                strategy_event_start = len(self.world.events)
+                strategy_records = await self._run_strategic_turns()
                 if self.world.paused:
                     break
                 for faction_id in sorted(self.world.factions):
                     self.npc.execute_active_orders(self.world, faction_id)
                 self.world.enforce_population_ownership()
                 self._record_discoveries()
+                await self._record_and_compress_strategy_contexts(
+                    strategy_records,
+                    strategy_event_start,
+                )
 
             self.world.add_event("tick", f"Tick {self.world.tick} completed")
             if self.log_ticks:
                 self._log_tick(event_start)
         return self.world
 
-    async def _run_strategic_turns(self) -> None:
+    async def _run_strategic_turns(self) -> dict[str, dict[str, Any]]:
         faction_ids = sorted(
             faction_id
             for faction_id, faction in self.world.factions.items()
@@ -91,12 +96,16 @@ class GameEngine:
                 self.world.pause(
                     f"Missing LLM leader controller for faction {faction_id}"
                 )
-                return
+                return {}
 
         pending = set(faction_ids)
         feedback_by_faction: dict[str, str | None] = {
             faction_id: None for faction_id in faction_ids
         }
+        feedback_attempts: dict[str, list[str]] = {
+            faction_id: [] for faction_id in faction_ids
+        }
+        accepted_records: dict[str, dict[str, Any]] = {}
 
         for attempt in range(self.retry_limit + 1):
             results = await asyncio.gather(
@@ -115,20 +124,31 @@ class GameEngine:
                     self.world.pause(
                         f"Leader failed to decide: {result}"
                     )
-                    return
+                    return accepted_records
 
-                faction_id, decision = result
+                faction_id, decision, task = result
                 check = self.rules.apply_decision(
                     self.world,
                     faction_id,
                     decision,
                 )
                 if check.accepted:
+                    accepted_records[faction_id] = {
+                        "tick": self.world.tick,
+                        "task": task,
+                        "decision": decision.as_dict(),
+                        "strategy_summary": (
+                            decision.strategy_summary or decision.turn_intent
+                        ),
+                        "feedback_attempts": list(feedback_attempts[faction_id]),
+                        "accepted": True,
+                    }
                     pending.discard(faction_id)
                     continue
 
                 feedback = "; ".join(check.errors)
                 feedback_by_faction[faction_id] = feedback
+                feedback_attempts[faction_id].append(feedback)
                 self.world.add_event(
                     "rule_reject",
                     (
@@ -146,13 +166,14 @@ class GameEngine:
             self.world.pause(
                 f"Leader(s) {failed} exceeded invalid decision retry limit"
             )
-            return
+            return accepted_records
+        return accepted_records
 
     async def _ask_leader(
         self,
         faction_id: str,
         feedback: str | None,
-    ) -> tuple[str, LeaderDecision]:
+    ) -> tuple[str, LeaderDecision, str]:
         controller = self.leaders[faction_id]
         try:
             decision = await controller.decide(
@@ -163,7 +184,45 @@ class GameEngine:
             raise RuntimeError(
                 f"Leader {faction_id} failed to decide: {exc}"
             ) from exc
-        return faction_id, decision
+        return faction_id, decision, str(getattr(controller, "last_task", "") or "")
+
+    async def _record_and_compress_strategy_contexts(
+        self,
+        records: dict[str, dict[str, Any]],
+        event_start: int,
+    ) -> None:
+        recent_events = [event.as_dict() for event in self.world.events[event_start:]]
+        for faction_id, record in records.items():
+            faction = self.world.factions[faction_id]
+            relevant_events = [
+                event
+                for event in recent_events
+                if event.get("faction_id") in {None, faction_id}
+            ]
+            entry = dict(record)
+            entry["after_execution"] = faction.last_plan_snapshot.get(
+                "after_execution",
+            )
+            entry["events"] = relevant_events[-12:]
+            faction.leader_context_window.append(entry)
+            if len(faction.leader_context_window) > 3:
+                faction.leader_context_window = faction.leader_context_window[-3:]
+
+        for faction_id in sorted(records):
+            controller = self.leaders.get(faction_id)
+            compress = getattr(controller, "compress_memory_if_needed", None)
+            if compress is None:
+                continue
+            try:
+                await compress(self.world)
+            except Exception as exc:
+                faction = self.world.factions[faction_id]
+                faction.leader_context_window = faction.leader_context_window[-3:]
+                self.world.add_event(
+                    "memory",
+                    f"{faction_id} memory compression failed: {exc}",
+                    faction_id=faction_id,
+                )
 
     def _advance_weather(self) -> None:
         for tile in self.world.tiles:

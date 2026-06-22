@@ -218,6 +218,37 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_chat_json_requests_and_parses_json_object(self) -> None:
+        client = FakeClient([FakeMessage('{"ok": true, "count": 2}')])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="json",
+            enable_tools=False,
+            client=client,
+        )
+
+        payload = await agent.chat_json(
+            [{"role": "user", "content": "return json"}],
+        )
+
+        self.assertEqual(payload, {"ok": True, "count": 2})
+        self.assertEqual(
+            client.completions.calls[0]["response_format"],
+            {"type": "json_object"},
+        )
+
+    async def test_chat_json_rejects_invalid_json_content(self) -> None:
+        client = FakeClient([FakeMessage("not json")])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bad-json",
+            enable_tools=False,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+            await agent.chat_json([{"role": "user", "content": "return json"}])
+
     async def test_agent_id_is_normalized_and_read_only(self) -> None:
         agent = BaseAgent(
             TEST_CONFIG,

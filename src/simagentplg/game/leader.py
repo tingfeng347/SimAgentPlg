@@ -37,6 +37,7 @@ DIPLOMACY_PROPOSALS = (
 )
 PETITION_TYPES = ("resources", "weather", "protection", "territory")
 URGENCY_LEVELS = ("low", "medium", "high")
+CIVILIAN_PROFESSION_ACTIONS = ("idle", "farmer", "lumberjack", "miner", "builder")
 
 LEADER_SYSTEM_PROMPT = """
 You are the LLM leader of one civilization in an original god-sandbox
@@ -103,20 +104,25 @@ Basic world:
 - Food supports survival and future growth. Population growth creates idle
   people, not specialized workers.
 - Soldiers are the only people who fight. Raids can take resources; attacks
-  can occupy enemy land if the battle is won and idle people can move in.
+  directly occupy enemy land if the battle is won; surviving attackers move
+  into the captured tile as soldiers.
 - When food, housing, and basic resource needs are stable, shift surplus idle
   people toward training, border reinforcement, deterrence, raids, and conquest
   preparation.
 - Soldiers can move only between adjacent owned tiles with the move military
   action. Use move to reinforce the home tile, mass at a border, or prepare an
   attack path; it moves soldiers, not population or idle people.
+- Every military order with an origin must use a tile you already own that
+  currently has at least 1 soldier. Do not submit move, attack, raid, muster,
+  defend, or retreat orders from a tile with 0 soldiers.
 - Each civilization has a home tile. Losing your home tile eliminates your
   civilization: your population and soldiers become 0, your remaining resources
   transfer to the captor, and your leader stops taking turns.
 - The default starting home tile has 10 farmers, 5 idle people, 5 soldiers,
   and 2 houses. Initial resources are food=120, wood=80, and stone=40.
-- Owned territory must have population from that faction. New territory and
-  captured territory require idle people to occupy it.
+- Owned territory must have either population or soldiers from that faction.
+  Peaceful new territory requires a civilian to migrate in; captured enemy
+  territory is held first by surviving soldiers.
 - You only know factions discovered through your territory visibility. Unknown
   factions do not exist for diplomacy or war planning until discovered.
 
@@ -126,27 +132,39 @@ Restrict:
 - Only idle population can become farmers, lumberjacks, miners, or builders.
   Existing workers keep their current profession until future simulation rules
   change them.
-- Peaceful claim/settle consumes exactly 1 idle person per new territory. This
-  cost shares the same idle budget as farming, lumberjacking, mining, building,
-  training, and defending.
-- A claim/settle source tile must still have at least 1 civilian population
-  after sending 1 idle settler. Do not drain a 1-population frontier tile to
-  settle another tile. Soldiers do not keep ownership by
-  themselves.
-- With 5 idle people, claim 1 tile + farm 2 + build 2 is legal. Claim 2 tiles
-  + farm 2 + build 2 is illegal because it overuses idle people.
+- farm, gather_wood, mine_stone, build, train, and defend population orders
+  must target tiles you already own at the start of this strategic turn. Do
+  not assign jobs on a tile that will only become yours later in the same turn
+  through claim, settle, or attack.
+- If your Chinese plan says you will farm, gather wood, mine stone, build
+  houses, attack, raid, capture, expand, petition for weather, or petition for
+  resources, submit the matching order in that same category.
+- Peaceful claim/settle migrates exactly 1 civilian per order. Civilians are
+  idle, farmers, lumberjacks, miners, or builders; soldiers are not civilians.
+  The migrated civilian keeps the same profession on the target tile.
+- settle may include optional origin and profession fields. Use settle with an
+  owned target to move a civilian into your own adjacent territory, including
+  soldier-held captured land. claim is only for adjacent unowned territory.
+- A migration source tile must still have at least 1 civilian population or 1
+  soldier after sending a civilian. Do not abandon an unguarded 1-population
+  frontier tile.
+- With 5 idle people, claim 1 tile + farm 2 + build 2 is legal. A second
+  same-turn claim may migrate another civilian profession if an adjacent
+  source has the chosen profession, the target has capacity, and the source
+  keeps enough people or soldiers to remain held.
 - Leaders cannot ask the god for people and cannot turn existing workers back
   into idle people.
 - Idle people should usually be used deliberately for safe expansion,
   terrain-matched work, house building, training, or defense. Do not leave idle
   people unused for many turns without a concrete strategic reason.
-- Exception: if border war has happened or you plan to attack and occupy an
-  adjacent enemy tile, you may preserve at least 1 idle person on the attacking
-  origin tile. Captured land can only be occupied by idle people moving from
-  the battle origin tile into the battle target tile; idle people elsewhere in
-  the realm cannot occupy that captured tile.
+- War occupation: attacks that win directly occupy the enemy tile with
+  surviving soldiers. Afterward, use settle to migrate civilians into the
+  captured owned tile when you want to develop it.
 - Petitions may ask only for god powers: resources, weather, protection, or
   unowned territory. Never petition for population or vague miracles.
+- Resource petitions must use request {"resource":"food|wood|stone","amount":N}
+  with a positive amount. Weather/protection/territory petitions must include
+  exact visible x and y coordinates in request.
 - War, raids, and occupation must obey visibility, adjacency, soldier
   availability, and protection rules.
 - Protect your home tile. If a visible enemy home tile can be captured, it is a
@@ -180,6 +198,30 @@ Keep replies short, in-character, and strategically grounded in your faction's
 visible situation. Treat god messages as important pressure, but still protect
 your home tile, use idle people deliberately, and pursue victory.
 """.strip()
+
+LEADER_MEMORY_SYSTEM_PROMPT = """
+You compress a civilization leader's recent game context into durable memory.
+Return only a JSON object with exactly the known memory fields. Preserve useful
+long-term facts, promises, warnings, strategy, mistakes to avoid, and important
+successes. Drop obsolete coordinates, stale resource counts, and routine noise.
+All memory text must be concise Simplified Chinese. Do not include markdown.
+""".strip()
+
+LEADER_MEMORY_LIST_LIMITS = {
+    "god_directives": 5,
+    "god_promises": 5,
+    "leader_promises": 5,
+    "wars": 3,
+    "diplomacy_notes": 5,
+    "known_threats": 5,
+    "target_preferences": 5,
+    "recent_failures": 5,
+    "do_not_repeat": 8,
+    "recent_successes": 5,
+}
+
+LEADER_MEMORY_STRING_FIELDS = ("strategic_goal", "current_plan")
+LEADER_MEMORY_LIST_FIELDS = tuple(LEADER_MEMORY_LIST_LIMITS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,12 +260,16 @@ class ResourceOrder:
 class TerritoryOrder:
     action: str
     target: tuple[int, int]
+    origin: tuple[int, int] | None = None
+    profession: str | None = None
     priority: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
             "target": _target_to_dict(self.target),
+            "origin": _target_to_dict(self.origin),
+            "profession": self.profession,
             "priority": self.priority,
         }
 
@@ -450,6 +496,12 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                         "properties": {
                             "action": {"type": "string", "enum": list(TERRITORY_ACTIONS)},
                             "target": _target_schema(),
+                            "origin": _target_schema(),
+                            "profession": {
+                                "type": "string",
+                                "enum": list(CIVILIAN_PROFESSION_ACTIONS),
+                                "description": "Only for settle. Optional civilian profession to move: idle/farmer/lumberjack/miner/builder.",
+                            },
                             "priority": {"type": "integer", "minimum": 1},
                         },
                         "required": ["action", "target"],
@@ -500,7 +552,10 @@ SUBMIT_LEADER_TURN_TOOL: ToolSchema = {
                         "type": "object",
                         "properties": {
                             "type": {"type": "string", "enum": list(PETITION_TYPES)},
-                            "request": {"type": "object"},
+                            "request": {
+                                "type": "object",
+                                "description": "Petition payload. For resources use {\"resource\":\"food|wood|stone\",\"amount\":positive_integer}. For weather/protection/territory include visible x and y coordinates; weather also needs a valid weather.",
+                            },
                             "reason": {
                                 "type": "string",
                                 "description": "向上帝祈求的理由，必须使用简体中文。",
@@ -665,10 +720,13 @@ class LLMLeaderController:
         faction_id: str,
         agent: BaseAgent,
         chat_agent: BaseAgent | None = None,
+        memory_agent: BaseAgent | None = None,
     ) -> None:
         self.faction_id = faction_id
         self.agent = agent
         self.chat_agent = chat_agent
+        self.memory_agent = memory_agent
+        self.last_task: str | None = None
 
     @classmethod
     def create(
@@ -698,7 +756,19 @@ class LLMLeaderController:
             enable_tools=False,
             max_steps=1,
         )
-        return cls(faction_id=faction_id, agent=agent, chat_agent=chat_agent)
+        memory_agent = BaseAgent(
+            config=config,
+            agent_id=f"leader-{faction_id}-memory",
+            system_prompt=LEADER_MEMORY_SYSTEM_PROMPT,
+            enable_tools=False,
+            max_steps=1,
+        )
+        return cls(
+            faction_id=faction_id,
+            agent=agent,
+            chat_agent=chat_agent,
+            memory_agent=memory_agent,
+        )
 
     async def decide(
         self,
@@ -706,14 +776,39 @@ class LLMLeaderController:
         *,
         feedback: str | None = None,
     ) -> LeaderDecision:
+        self.agent.reset()
+        self.last_task = _build_leader_task(world, self.faction_id, feedback)
         result = await self.agent.runtime(
-            task=_build_leader_task(world, self.faction_id, feedback)
+            task=self.last_task,
         )
         payload = json.loads(result or "{}")
         decision_payload = payload.get("decision", payload)
         if not isinstance(decision_payload, dict):
             raise RuntimeError("leader did not submit a decision object")
         return LeaderDecision.from_mapping(decision_payload)
+
+    async def compress_memory_if_needed(self, world: WorldState) -> bool:
+        if self.memory_agent is None:
+            return False
+        faction = world.factions[self.faction_id]
+        if len(faction.leader_context_window) < 3:
+            return False
+        entries = faction.leader_context_window[:3]
+        prompt = _build_leader_memory_task(world, self.faction_id, entries)
+        self.memory_agent.reset()
+        self.memory_agent.messages.append({"role": "user", "content": prompt})
+        payload = await self.memory_agent.chat_json(self.memory_agent.messages)
+        faction.leader_memory = _merge_leader_memory(
+            faction.leader_memory,
+            payload,
+        )
+        faction.leader_context_window = faction.leader_context_window[3:]
+        world.add_event(
+            "memory",
+            f"{self.faction_id} compressed 3 strategic turns into leader memory",
+            faction_id=self.faction_id,
+        )
+        return True
 
     async def chat_with_god(self, world: WorldState) -> str:
         if self.chat_agent is None:
@@ -751,11 +846,13 @@ def _build_leader_task(
         }
         for tile in world.faction_tiles(faction_id)
     ]
-    idle_focus_tiles = _idle_focus_tiles(world, faction_id)
+    civilian_movement_tiles = _civilian_movement_tiles(world, faction_id)
     expansion_candidates = _expansion_candidates(world, faction_id)
     border_targets = _border_enemy_targets(world, faction_id)
     dangerous_weather = _dangerous_weather_tiles(world, faction_id)
     previous_execution = _previous_execution_snapshot(faction)
+    leader_memory = _format_leader_memory(faction.leader_memory)
+    recent_context = _format_leader_context_window(faction.leader_context_window)
     diplomacy_view = {
         other: faction.relation_to(other)
         for other in sorted(faction.known_factions)
@@ -777,20 +874,25 @@ def _build_leader_task(
         f"- diplomacy proposal: {', '.join(DIPLOMACY_PROPOSALS)}",
         f"- petition type: {', '.join(PETITION_TYPES)}",
         "Use only visible coordinates.",
-        "Use military action move to transfer soldiers only between adjacent owned tiles. It cannot move population or idle people.",
+        "Use military action move to transfer soldiers only between adjacent owned tiles. Use territory action settle with optional origin/profession to migrate one civilian between adjacent tiles.",
+        "Every military_order origin must be an owned tile with current soldiers > 0. Do not issue move, attack, raid, muster, defend, or retreat from a tile that has no soldiers.",
         "Protect your home tile: if it is captured by another faction, your civilization is eliminated and all remaining resources go to the captor.",
         "Do not refresh diplomacy that already matches the current relation.",
         "Alliance from neutral is only a first trust step; war is valid when border pressure, crowding, or resource competition make peace costly.",
         "Population growth is automatic when food and safety allow it. Do not petition for population or vague miracles.",
         "Petitions are only for exact god powers: resources, weather, protection, or an unowned visible territory tile.",
+        "Resource petition request format must be exactly like {\"resource\":\"food\",\"amount\":50}; resource must be food, wood, or stone, and amount must be positive. Weather/protection/territory petition requests need visible x/y coordinates.",
         "If idle people exist, normally use them for safe expansion, terrain-matched work, house building, training, or defense.",
         "When food, housing, and basic resource needs are stable, shift surplus idle people toward training, border reinforcement, deterrence, raids, and conquest preparation.",
-        "War occupation exception: if adjacent border war has happened, or you plan to attack and occupy an adjacent enemy tile, reserve at least 1 idle person on that exact attacking origin tile. Captured land can only be occupied by idle people moving from the battle origin tile into the battle target tile; idle people on other tiles do not count.",
+        "Peaceful migration: claim/settle moves 1 civilian. settle can include origin and profession. Movable civilian professions are idle, farmer, lumberjack, miner, and builder; migrated civilians keep their profession.",
+        "War occupation: if an attack wins, surviving soldiers directly occupy the enemy tile. You do not need idle civilians on the attack origin. After capture, use settle to move civilians into that owned tile for development.",
         "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack, raid, or capture enemy territory, include the matching military order. If you ask for weather, include a weather petition.",
         "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
         "Only idle people can become farmers, lumberjacks, miners, or builders. Do not assign more workers to a profession than the target tile has idle population.",
-        f"Each claim/settle territory order consumes exactly {SETTLEMENT_IDLE_COST} idle people from an adjacent owned tile. Count this cost together with profession and training orders before submitting.",
-        "A claim/settle source tile must keep at least 1 civilian after settlers leave. Do not use a 1-person new outpost as the source for another same-turn claim, and do not combine its last civilian with training.",
+        "Job and training population orders must target tiles you already own before this turn executes. Do not farm, gather_wood, mine_stone, build, train, or defend on a tile that will only be claimed, settled, or captured later in this same plan.",
+        "If your Chinese strategy_summary or turn_intent says you will farm, build houses, attack, raid, expand, or request weather/resources, include the matching concrete order; expansion wording needs claim/settle, resource requests need a valid resource petition, otherwise avoid that wording.",
+        f"Each claim/settle territory order migrates exactly {SETTLEMENT_IDLE_COST} adjacent non-soldier civilian. settle may specify origin and profession; claim auto-selects a movable civilian for unowned land.",
+        "A claim/settle source tile must keep at least 1 civilian or 1 soldier after migration. A soldier-held captured tile can receive civilians later with settle.",
         "There is no dismiss-worker or assign-back-to-idle order. Population growth is the normal source of new idle people.",
         "For houses, submit a build population order only. Do not submit a separate wood spend order; the build action spends wood automatically.",
         "Only discovered factions may be used in diplomacy or war planning.",
@@ -799,8 +901,8 @@ def _build_leader_task(
         f"Population: {world.total_population(faction_id)}",
         f"Soldiers: {world.total_soldiers(faction_id)}",
         f"Jobs: {world.total_jobs(faction_id)}",
-        f"Current idle budget: {world.total_jobs(faction_id).get('idle', 0)} idle people; each claim/settle costs {SETTLEMENT_IDLE_COST} idle people.",
-        f"Idle focus tiles: {idle_focus_tiles[:10]}",
+        f"Civilian migration overview: {world.total_population(faction_id)} total non-soldier civilians; each claim/settle migrates {SETTLEMENT_IDLE_COST} adjacent non-soldier civilian.",
+        f"Civilian movement focus tiles: {civilian_movement_tiles[:10]}",
         f"Houses: {world.total_houses(faction_id)}",
         f"Population capacity: {world.population_capacity(faction_id)}",
         f"Territory tiles: {len(world.faction_tiles(faction_id))}",
@@ -811,6 +913,8 @@ def _build_leader_task(
         f"Dangerous weather on your land: {dangerous_weather[:8]}",
         f"Known factions: {sorted(faction.known_factions)}",
         f"Diplomacy: {diplomacy_view}",
+        f"Leader memory: {leader_memory}",
+        f"Recent uncompressed strategic context: {recent_context}",
         f"Recent god dialogue: {_format_god_chat_history(world, faction_id)}",
         f"Previous strategic turn actual result: {previous_execution}",
         "Only submit a no-op if there are no useful economic, defensive, expansion, or war actions.",
@@ -824,6 +928,111 @@ def _build_leader_task(
             ]
         )
     return "\n".join(lines)
+
+
+def _format_leader_memory(memory: Mapping[str, Any]) -> dict[str, Any]:
+    formatted: dict[str, Any] = {}
+    for key in LEADER_MEMORY_STRING_FIELDS:
+        value = str(memory.get(key, "")).strip()
+        if value:
+            formatted[key] = value
+    for key in LEADER_MEMORY_LIST_FIELDS:
+        values = [
+            str(item).strip()
+            for item in _list(memory.get(key))
+            if str(item).strip()
+        ]
+        if values:
+            formatted[key] = values[-LEADER_MEMORY_LIST_LIMITS[key]:]
+    return formatted
+
+
+def _format_leader_context_window(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formatted = []
+    for entry in entries[-3:]:
+        formatted.append(
+            {
+                "tick": entry.get("tick"),
+                "accepted": entry.get("accepted"),
+                "strategy_summary": entry.get("strategy_summary"),
+                "feedback_attempts": entry.get("feedback_attempts", []),
+                "after_execution": entry.get("after_execution"),
+                "events": entry.get("events", [])[-8:],
+            }
+        )
+    return formatted
+
+
+def _build_leader_memory_task(
+    world: WorldState,
+    faction_id: str,
+    entries: list[dict[str, Any]],
+) -> str:
+    faction = world.factions[faction_id]
+    payload = {
+        "faction_id": faction_id,
+        "tick": world.tick,
+        "current_memory": _format_leader_memory(faction.leader_memory),
+        "recent_strategic_turns": entries,
+        "recent_god_dialogue": _format_god_chat_history(
+            world,
+            faction_id,
+            limit=12,
+        ),
+        "required_schema": {
+            "strategic_goal": "string",
+            "current_plan": "string",
+            **{key: "list[string]" for key in LEADER_MEMORY_LIST_FIELDS},
+        },
+        "example_output": {
+            "strategic_goal": "优先压制兽人并保护出生地",
+            "current_plan": "从东侧集结士兵，准备攻击兽人边境",
+            "god_directives": ["第15刻：上帝要求优先攻打兽人"],
+            "god_promises": ["第15刻：上帝承诺攻打兽人后赐予粮食"],
+            "leader_promises": [],
+            "wars": ["第20刻：对兽人保持战争目标，优先夺取其出生地"],
+            "diplomacy_notes": [],
+            "known_threats": [],
+            "target_preferences": ["优先占领相邻平原和兽人边境地块"],
+            "recent_failures": [],
+            "do_not_repeat": ["军事命令 origin 必须选择当前有己方士兵的地块"],
+            "recent_successes": ["第25刻：成功占领兽人边境地块"],
+        },
+        "limits": LEADER_MEMORY_LIST_LIMITS,
+    }
+    return (
+        "Compress the following game context into durable leader_memory JSON. "
+        "Return every schema field. Use empty string/list when no useful memory "
+        "exists. Keep only future-relevant facts.\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _merge_leader_memory(
+    current: Mapping[str, Any],
+    update: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = {
+        "strategic_goal": "",
+        "current_plan": "",
+        **{key: [] for key in LEADER_MEMORY_LIST_FIELDS},
+    }
+    for key in LEADER_MEMORY_STRING_FIELDS:
+        new_value = str(update.get(key, "")).strip()
+        old_value = str(current.get(key, "")).strip()
+        merged[key] = new_value or old_value
+    for key in LEADER_MEMORY_LIST_FIELDS:
+        values: list[str] = []
+        for source in (current.get(key), update.get(key)):
+            for item in _list(source):
+                text = str(item).strip()
+                if not text:
+                    continue
+                if text in values:
+                    values.remove(text)
+                values.append(text)
+        merged[key] = values[-LEADER_MEMORY_LIST_LIMITS[key]:]
+    return merged
 
 
 def _build_leader_chat_task(world: WorldState, faction_id: str) -> str:
@@ -921,17 +1130,21 @@ def _expansion_candidates(
     return [candidates[key] for key in sorted(candidates)]
 
 
-def _idle_focus_tiles(
+def _civilian_movement_tiles(
     world: WorldState,
     faction_id: str,
 ) -> list[dict[str, Any]]:
     tiles = []
     for tile in world.faction_tiles(faction_id):
         population = tile.population_of(faction_id)
-        idle = tile.professions_of(faction_id).get("idle", 0)
-        if idle <= 0:
+        movable_jobs = _movable_civilian_jobs(tile, faction_id)
+        movable_total = sum(movable_jobs.values())
+        if movable_total <= 0:
             continue
-        safe_idle = min(idle, max(0, population - 1))
+        safe_migrations = min(
+            movable_total,
+            population if tile.soldiers_of(faction_id) > 0 else max(0, population - 1),
+        )
         tiles.append(
             {
                 "x": tile.x,
@@ -939,16 +1152,17 @@ def _idle_focus_tiles(
                 "terrain": tile.terrain,
                 "weather": tile.weather,
                 "population": population,
-                "idle": idle,
+                "movable_civilians": movable_total,
+                "movable_jobs": movable_jobs,
                 "soldiers": tile.soldiers_of(faction_id),
                 "jobs": tile.professions_of(faction_id),
                 "houses": tile.houses,
                 "capacity": tile.capacity(),
-                "safe_settlement_groups": safe_idle // SETTLEMENT_IDLE_COST,
+                "safe_civilian_migrations": safe_migrations // SETTLEMENT_IDLE_COST,
                 "recommended_idle_uses": _recommended_idle_uses(tile.terrain),
             }
         )
-    return sorted(tiles, key=lambda item: (-item["idle"], item["x"], item["y"]))
+    return sorted(tiles, key=lambda item: (-item["movable_civilians"], item["x"], item["y"]))
 
 
 def _recommended_idle_uses(terrain: str) -> list[str]:
@@ -959,6 +1173,14 @@ def _recommended_idle_uses(terrain: str) -> list[str]:
     if terrain == "hill":
         return ["mine_stone", "build", "train"]
     return ["build", "train"]
+
+
+def _movable_civilian_jobs(tile, faction_id: str) -> dict[str, int]:
+    jobs = tile.professions_of(faction_id)
+    return {
+        profession: jobs.get(profession, 0)
+        for profession in CIVILIAN_PROFESSION_ACTIONS
+    }
 
 
 def _settlement_sources(
@@ -972,15 +1194,20 @@ def _settlement_sources(
         if source.owner != faction_id:
             continue
         population = source.population_of(faction_id)
-        idle = source.professions_of(faction_id).get("idle", 0)
-        safe_idle = min(idle, max(0, population - 1))
+        movable_jobs = _movable_civilian_jobs(source, faction_id)
+        movable_total = sum(movable_jobs.values())
+        safe_migrations = min(
+            movable_total,
+            population if source.soldiers_of(faction_id) > 0 else max(0, population - 1),
+        )
         sources.append(
             {
                 "x": source.x,
                 "y": source.y,
                 "population": population,
-                "idle": idle,
-                "safe_settlement_groups": safe_idle // SETTLEMENT_IDLE_COST,
+                "soldiers": source.soldiers_of(faction_id),
+                "movable_jobs": movable_jobs,
+                "safe_civilian_migrations": safe_migrations // SETTLEMENT_IDLE_COST,
             }
         )
     return sorted(sources, key=lambda item: (item["x"], item["y"]))
@@ -1010,12 +1237,8 @@ def _border_enemy_targets(
                 "relation": relation_map.get(target.owner, "neutral"),
                 "origin_soldiers": soldiers,
                 "origin_population": origin.population_of(faction_id),
-                "origin_idle": origin.professions_of(faction_id).get("idle", 0),
-                "origin_can_supply_occupation": (
-                    origin.professions_of(faction_id).get("idle", 0) >= SETTLEMENT_IDLE_COST
-                    and origin.population_of(faction_id) > SETTLEMENT_IDLE_COST
-                    and target.capacity() >= SETTLEMENT_IDLE_COST
-                ),
+                "origin_movable_jobs": _movable_civilian_jobs(origin, faction_id),
+                "winning_attackers_can_occupy": True,
                 "target_is_enemy_home": (
                     world.factions[target.owner].home_tile == (target.x, target.y)
                 ),
@@ -1085,8 +1308,8 @@ def _faction_doctrine(faction_id: str) -> str:
             "Aggressive conquerors. Priority order: 1) protect the home tile "
             "enough to avoid elimination; 2) build soldier advantage and "
             "pressure adjacent rivals; 3) attack or raid when visible border "
-            "targets are weak; 4) preserve 1 idle settler on the attack origin "
-            "before planned occupation; 5) use remaining idle for food, "
+            "targets are weak; 4) use surviving soldiers to occupy won battles "
+            "and then settle civilians into captured land for development; 5) use remaining idle for food, "
             "training, and terrain-matched resource work instead of leaving it "
             "unused. Resource surplus should quickly become soldiers, border "
             "pressure, raids, and attacks. Diplomacy is temporary and tactical; "
@@ -1098,8 +1321,8 @@ def _faction_doctrine(faction_id: str) -> str:
             "tile and forest heartland; 2) expand into safe forests and strong "
             "defensive terrain when idle people exist; 3) use alliances, peace, "
             "and non-aggression to buy time and isolate threats; 4) after "
-            "border war, train or move soldiers and preserve 1 idle settler on "
-            "the attack origin for occupation; 5) punish nearby threats and "
+            "border war, train or move soldiers, then settle civilians into "
+            "captured secure land; 5) punish nearby threats and "
             "capture enemy home tiles when doing so secures long-term survival. "
             "Resource surplus should become defensive depth, mobile soldiers, "
             f"and counterattack readiness. {shared}"
@@ -1111,8 +1334,8 @@ def _faction_doctrine(faction_id: str) -> str:
             "idle people and legal candidates exist; 3) match jobs to terrain "
             "to build a stronger economy; 4) use diplomacy to buy development "
             "time, but switch to deterrence, raids, or war when boxed in or "
-            "militarily ahead; 5) prepare soldiers and 1 idle settler on the "
-            "attack origin before occupying enemy territory or enemy home "
+            "militarily ahead; 5) occupy enemy territory with soldiers, then "
+            "settle civilians into captured enemy territory or enemy home "
             "tiles. After economic stability, convert surplus into soldiers "
             f"and opportunistic wars. {shared}"
         )
@@ -1188,6 +1411,12 @@ def _parse_territory_order(payload: Any) -> TerritoryOrder:
     return TerritoryOrder(
         action=str(item.get("action", "")).strip(),
         target=_parse_target(item.get("target", {})),
+        origin=_optional_target(item.get("origin")),
+        profession=(
+            str(item.get("profession", "")).strip()
+            if item.get("profession") is not None
+            else None
+        ),
         priority=_int(item.get("priority"), 1),
     )
 

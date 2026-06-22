@@ -200,6 +200,23 @@ class GodChatMessage:
         }
 
 
+def default_leader_memory() -> dict[str, Any]:
+    return {
+        "strategic_goal": "",
+        "current_plan": "",
+        "god_directives": [],
+        "god_promises": [],
+        "leader_promises": [],
+        "wars": [],
+        "diplomacy_notes": [],
+        "known_threats": [],
+        "target_preferences": [],
+        "recent_failures": [],
+        "do_not_repeat": [],
+        "recent_successes": [],
+    }
+
+
 @dataclass(slots=True)
 class Faction:
     faction_id: str
@@ -210,6 +227,8 @@ class Faction:
     active_orders: dict[str, Any] = field(default_factory=dict)
     known_factions: set[str] = field(default_factory=set)
     last_plan_snapshot: dict[str, Any] = field(default_factory=dict)
+    leader_memory: dict[str, Any] = field(default_factory=default_leader_memory)
+    leader_context_window: list[dict[str, Any]] = field(default_factory=list)
     home_tile: tuple[int, int] | None = None
     eliminated: bool = False
 
@@ -378,7 +397,11 @@ class WorldState:
                 if tile.population_of(faction_id) <= 0:
                     tile.population.pop(faction_id, None)
                     tile.professions.pop(faction_id, None)
-            if tile.owner is not None and tile.population_of(tile.owner) <= 0:
+            if (
+                tile.owner is not None
+                and tile.population_of(tile.owner) <= 0
+                and tile.soldiers_of(tile.owner) <= 0
+            ):
                 previous = tile.owner
                 tile.owner = None
                 tile.houses = 0

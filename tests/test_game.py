@@ -23,6 +23,7 @@ from simagentplg.game.leader import (
     LEADER_CHAT_SYSTEM_PROMPT,
     LEADER_SYSTEM_PROMPT,
     SUBMIT_LEADER_TURN_TOOL,
+    _build_leader_memory_task,
     _build_leader_task,
     _faction_doctrine,
 )
@@ -68,8 +69,10 @@ class FakeMessage:
 class FakeCompletions:
     def __init__(self, responses: list[FakeMessage]) -> None:
         self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
         return SimpleNamespace(
             choices=[SimpleNamespace(message=self.responses.pop(0))]
         )
@@ -77,7 +80,8 @@ class FakeCompletions:
 
 class FakeClient:
     def __init__(self, responses: list[FakeMessage]) -> None:
-        self.chat = SimpleNamespace(completions=FakeCompletions(responses))
+        self.completions = FakeCompletions(responses)
+        self.chat = SimpleNamespace(completions=self.completions)
 
 
 class ScriptedLeader:
@@ -119,6 +123,31 @@ class DelayedLeader:
         return hold()
 
 
+class CompressingLeader:
+    def __init__(self, faction_id: str) -> None:
+        self.faction_id = faction_id
+        self.last_task: str | None = None
+        self.compressions = 0
+
+    async def decide(
+        self,
+        world,
+        *,
+        feedback: str | None = None,
+    ) -> LeaderDecision:
+        self.last_task = f"task for {self.faction_id} at {world.tick}"
+        return hold()
+
+    async def compress_memory_if_needed(self, world) -> bool:
+        faction = world.factions[self.faction_id]
+        if len(faction.leader_context_window) < 3:
+            return False
+        self.compressions += 1
+        faction.leader_memory["current_plan"] = f"compressed at {world.tick}"
+        faction.leader_context_window = faction.leader_context_window[3:]
+        return True
+
+
 def hold() -> LeaderDecision:
     return LeaderDecision(turn_intent="守住当前领地")
 
@@ -156,6 +185,9 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first.home_owner(faction_id), faction_id)
             home = first.factions[faction_id].home_tile
             self.assertEqual(first.home_of_tile(*home), faction_id)
+            self.assertIn("strategic_goal", first.factions[faction_id].leader_memory)
+            self.assertIn("do_not_repeat", first.factions[faction_id].leader_memory)
+            self.assertEqual(first.factions[faction_id].leader_context_window, [])
         self.assertIn("Tick 0", render_map(first))
         self.assertIn("Human", render_status(first))
 
@@ -405,11 +437,140 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(targets[1].population_of("human"), 1)
         self.assertEqual(len(world.faction_tiles("human")), 3)
 
+    def test_settle_moves_specified_profession_to_unowned_tile(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = None
+        target.population.clear()
+        target.professions.clear()
+        target.soldiers.clear()
+
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "派农夫迁入新平原",
+                "territory_orders": [
+                    {
+                        "action": "settle",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": target.x, "y": target.y},
+                        "profession": "farmer",
+                    }
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(origin.professions_of("human")["farmer"], 9)
+        self.assertEqual(target.professions_of("human")["farmer"], 1)
+        self.assertEqual(target.population_of("human"), 1)
+
+    def test_settle_moves_civilian_into_owned_tile(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "human"
+        target.population.clear()
+        target.professions.clear()
+        target.soldiers["human"] = 3
+
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "把农夫迁入士兵守住的新领地",
+                "territory_orders": [
+                    {
+                        "action": "settle",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": target.x, "y": target.y},
+                        "profession": "farmer",
+                    }
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(target.soldiers_of("human"), 3)
+        self.assertEqual(target.professions_of("human")["farmer"], 1)
+
+    def test_claim_does_not_move_into_owned_tile(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = "human"
+        target.set_population("human", 1)
+
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "错误使用claim迁入已有领地",
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target.x, "y": target.y}}
+                ],
+            }
+        )
+
+        check = rules.validate_decision(world, "human", decision)
+
+        self.assertFalse(check.accepted)
+        self.assertTrue(any("claim target must be unowned" in error for error in check.errors))
+
+    def test_settle_auto_selects_next_movable_civilian_profession(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = world.neighbors(origin.x, origin.y)[0]
+        target.terrain = "plain"
+        target.owner = None
+        target.population.clear()
+        target.professions.clear()
+        target.soldiers.clear()
+        origin.professions["human"] = {
+            "farmer": 1,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 1,
+            "idle": 0,
+        }
+        origin.set_population("human", 2)
+
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "自动选择可迁平民扩张",
+                "territory_orders": [
+                    {"action": "settle", "target": {"x": target.x, "y": target.y}}
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(target.professions_of("human")["builder"], 1)
+
     def test_settlement_does_not_drain_source_tile_population(self) -> None:
         world = create_default_world(seed=30)
         rules = RuleEngine()
         origin = world.faction_tiles("human")[0]
         target = _adjacent_empty_tile(world, "human")
+        origin.soldiers["human"] = 0
         origin.set_population("human", 2)
         origin.professions["human"] = {
             "farmer": 0,
@@ -438,7 +599,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(check.accepted)
         self.assertTrue(
-            any("source tile populated" in error for error in check.errors),
+            any("no movable civilian" in error for error in check.errors),
             check.errors,
         )
 
@@ -456,6 +617,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             "builder": 0,
             "idle": 1,
         }
+        origin.soldiers["human"] = 0
         world.factions["human"].active_orders = {
             "territory_orders": [
                 {"action": "claim", "target": {"x": target[0], "y": target[1]}}
@@ -467,6 +629,41 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(origin.owner, "human")
         self.assertIsNone(target_tile.owner)
         self.assertTrue(any("failed to settle" in event.message for event in world.events))
+
+    def test_settlement_can_move_last_civilian_from_soldier_held_tile(self) -> None:
+        world = create_default_world(seed=30)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        target = _adjacent_empty_tile(world, "human")
+        target_tile = world.tile_at(*target)
+        origin.set_population("human", 1)
+        origin.professions["human"] = {
+            "farmer": 0,
+            "lumberjack": 0,
+            "miner": 0,
+            "builder": 0,
+            "idle": 1,
+        }
+        origin.soldiers["human"] = 2
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "士兵守住原地，平民迁出",
+                "territory_orders": [
+                    {"action": "claim", "target": {"x": target[0], "y": target[1]}}
+                ],
+            }
+        )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+
+        self.assertEqual(origin.owner, "human")
+        self.assertEqual(origin.population_of("human"), 0)
+        self.assertEqual(origin.soldiers_of("human"), 2)
+        self.assertEqual(target_tile.owner, "human")
+        self.assertEqual(target_tile.population_of("human"), 1)
 
     def test_idle_budget_rejects_jobs_and_settlement_overcommit(self) -> None:
         world = create_default_world(seed=30)
@@ -493,7 +690,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(check.accepted)
         self.assertTrue(any("idle population" in error for error in check.errors))
-        self.assertTrue(any("current idle=5" in error for error in check.errors))
+        self.assertTrue(any("assigns 10 workers" in error for error in check.errors))
 
     def test_idle_budget_rejects_common_turn_five_overcommit(self) -> None:
         world = create_default_world(seed=30)
@@ -536,8 +733,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         check = rules.validate_decision(world, "human", decision)
 
         self.assertFalse(check.accepted)
-        self.assertTrue(any("claim/settle need=2" in error for error in check.errors))
-        self.assertTrue(any("jobs/training need=10" in error for error in check.errors))
+        self.assertTrue(any("idle population budget is overcommitted" in error for error in check.errors))
 
     def test_peaceful_occupation_text_with_claim_is_not_military_capture(self) -> None:
         world = create_default_world(seed=30)
@@ -672,7 +868,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         npc.execute_active_orders(world, "human")
 
         self.assertEqual(target.owner, "human")
-        self.assertGreater(target.population_of("human"), 0)
+        self.assertEqual(target.population_of("human"), 0)
+        self.assertGreater(target.soldiers_of("human"), 0)
         self.assertEqual(world.factions["human"].relation_to("elf"), "war")
         self.assertTrue(any(event.kind == "battle" for event in world.events))
 
@@ -871,7 +1068,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(world.factions["human"].resources.wood, before_human["wood"] + expected_loot["wood"])
         self.assertEqual(world.factions["human"].resources.stone, before_human["stone"] + expected_loot["stone"])
 
-    def test_attack_without_movable_population_only_raids(self) -> None:
+    def test_attack_without_movable_population_captures_with_soldiers(self) -> None:
         world = create_default_world(seed=38)
         rules = RuleEngine()
         npc = NPCExecutor()
@@ -907,10 +1104,68 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(check.accepted, check.errors)
         npc.execute_active_orders(world, "human")
 
-        self.assertEqual(target.owner, "elf")
-        self.assertTrue(
-            any("could not occupy" in event.message for event in world.events)
+        self.assertEqual(target.owner, "human")
+        self.assertEqual(target.population_of("human"), 0)
+        self.assertGreater(target.soldiers_of("human"), 0)
+        self.assertTrue(any("captured" in event.message for event in world.events))
+
+    def test_soldier_only_tile_keeps_owner_until_soldiers_leave(self) -> None:
+        world = create_default_world(seed=38)
+        rules = RuleEngine()
+        npc = NPCExecutor()
+        origin = world.faction_tiles("human")[0]
+        captured = world.neighbors(origin.x, origin.y)[0]
+        captured.terrain = "plain"
+        captured.owner = "elf"
+        captured.set_population("elf", 10)
+        captured.soldiers = {"elf": 1}
+        origin.soldiers["human"] = 30
+        world.factions["human"].known_factions.add("elf")
+        world.factions["elf"].known_factions.add("human")
+        decision = LeaderDecision.from_mapping(
+            {
+                "turn_intent": "占领精灵边境",
+                "diplomacy_orders": [
+                    {"target_faction": "elf", "proposal": "war"}
+                ],
+                "military_orders": [
+                    {
+                        "action": "attack",
+                        "origin": {"x": origin.x, "y": origin.y},
+                        "target": {"x": captured.x, "y": captured.y},
+                        "force_ratio": 0.8,
+                    }
+                ],
+            }
         )
+
+        check = rules.apply_decision(world, "human", decision)
+        self.assertTrue(check.accepted, check.errors)
+        npc.execute_active_orders(world, "human")
+        self.assertEqual(captured.owner, "human")
+        self.assertEqual(captured.population_of("human"), 0)
+
+        move_target = next(
+            tile
+            for tile in world.neighbors(captured.x, captured.y)
+            if tile.owner == "human" and (tile.x, tile.y) != (captured.x, captured.y)
+        )
+        captured.soldiers["human"] = 4
+        world.factions["human"].active_orders = {
+            "military_orders": [
+                {
+                    "action": "move",
+                    "origin": {"x": captured.x, "y": captured.y},
+                    "target": {"x": move_target.x, "y": move_target.y},
+                    "force_ratio": 1,
+                }
+            ]
+        }
+
+        npc.execute_active_orders(world, "human")
+
+        self.assertIsNone(captured.owner)
+        self.assertEqual(captured.soldiers_of("human"), 0)
 
     def test_raid_loots_without_changing_owner(self) -> None:
         world = create_default_world(seed=39)
@@ -1219,14 +1474,33 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("There is no dismiss-worker or assign-back-to-idle order", task)
         self.assertNotIn("assign them back to idle", LEADER_SYSTEM_PROMPT)
 
-    def test_leader_task_emphasizes_victory_idle_use_and_occupation_reserve(self) -> None:
+    def test_leader_task_emphasizes_victory_civilian_migration_and_soldier_occupation(self) -> None:
         world = create_default_world(seed=49)
+        world.factions["human"].leader_memory["strategic_goal"] = "优先压制兽人"
+        world.factions["human"].leader_memory["do_not_repeat"] = [
+            "军事命令 origin 必须有士兵"
+        ]
+        world.factions["human"].leader_context_window.append(
+            {
+                "tick": 45,
+                "accepted": True,
+                "strategy_summary": "训练士兵",
+                "feedback_attempts": [],
+                "after_execution": {"soldiers": 8},
+                "events": [{"kind": "battle", "message": "演示事件"}],
+            }
+        )
 
         task = _build_leader_task(world, "human", None)
+        schema = SUBMIT_LEADER_TURN_TOOL["function"]["parameters"]["properties"]
+        territory_schema = schema["territory_orders"]["items"]["properties"]
+        petition_schema = schema["petitions"]["items"]["properties"]
 
         self.assertIn("final objective", LEADER_SYSTEM_PROMPT)
         self.assertIn("defeat the other races", LEADER_SYSTEM_PROMPT)
         self.assertIn("Soldiers can move only between adjacent owned tiles", LEADER_SYSTEM_PROMPT)
+        self.assertIn("currently has at least 1 soldier", LEADER_SYSTEM_PROMPT)
+        self.assertIn("from a tile with 0 soldiers", LEADER_SYSTEM_PROMPT)
         self.assertIn("Losing your home tile eliminates your", LEADER_SYSTEM_PROMPT)
         self.assertIn("Protect your home tile", LEADER_SYSTEM_PROMPT)
         self.assertIn("10 farmers, 5 idle people, 5 soldiers", LEADER_SYSTEM_PROMPT)
@@ -1236,19 +1510,44 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Idle people should usually be used deliberately", LEADER_SYSTEM_PROMPT)
         self.assertIn("When food, housing, and basic resource needs are stable", LEADER_SYSTEM_PROMPT)
         self.assertIn("border reinforcement, deterrence, raids", LEADER_SYSTEM_PROMPT)
-        self.assertIn("preserve at least 1 idle person on the attacking", LEADER_SYSTEM_PROMPT)
-        self.assertIn("battle origin tile into the battle target tile", LEADER_SYSTEM_PROMPT)
+        self.assertIn("must target tiles you already own", LEADER_SYSTEM_PROMPT)
+        self.assertIn("will only become yours later in the same turn", LEADER_SYSTEM_PROMPT)
+        self.assertIn("submit the matching order", LEADER_SYSTEM_PROMPT)
+        self.assertIn("surviving attackers move", LEADER_SYSTEM_PROMPT)
+        self.assertIn("migrated civilian keeps the same profession", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Resource petitions must use request", LEADER_SYSTEM_PROMPT)
+        self.assertIn('"resource":"food|wood|stone"', LEADER_SYSTEM_PROMPT)
+        self.assertIn("positive amount", LEADER_SYSTEM_PROMPT)
+        self.assertIn("War occupation: attacks that win directly occupy", LEADER_SYSTEM_PROMPT)
+        self.assertNotIn("preserve at least 1 idle person on the attacking", LEADER_SYSTEM_PROMPT)
+        self.assertIn("origin", territory_schema)
+        self.assertIn("profession", territory_schema)
+        self.assertEqual(
+            territory_schema["profession"]["enum"],
+            ["idle", "farmer", "lumberjack", "miner", "builder"],
+        )
+        self.assertIn("positive_integer", petition_schema["request"]["description"])
         self.assertIn("Long-term objective", task)
         self.assertIn("defeat rival civilizations", task)
         self.assertIn("shift surplus idle people toward training", task)
         self.assertIn("Home tile status:", task)
         self.assertIn("move", task)
-        self.assertIn("Idle focus tiles:", task)
+        self.assertIn("Civilian movement focus tiles:", task)
         self.assertIn("recommended_idle_uses", task)
-        self.assertIn("safe_settlement_groups", task)
+        self.assertIn("safe_civilian_migrations", task)
         self.assertIn("settlement_sources", task)
-        self.assertIn("reserve at least 1 idle person on that exact attacking origin tile", task)
-        self.assertIn("idle people on other tiles do not count", task)
+        self.assertIn("Leader memory", task)
+        self.assertIn("优先压制兽人", task)
+        self.assertIn("Recent uncompressed strategic context", task)
+        self.assertIn("训练士兵", task)
+        self.assertIn("settle can include origin and profession", task)
+        self.assertIn("surviving soldiers directly occupy", task)
+        self.assertIn("already own before this turn executes", task)
+        self.assertIn("include the matching concrete order", task)
+        self.assertIn("current soldiers > 0", task)
+        self.assertIn('"resource":"food","amount":50', task)
+        self.assertIn("expansion wording needs claim/settle", task)
+        self.assertNotIn("reserve at least 1 idle person on that exact attacking origin tile", task)
 
     def test_leader_task_includes_only_own_recent_god_dialogue(self) -> None:
         world = create_default_world(seed=50)
@@ -1301,7 +1600,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("protect the home tile", doctrine)
             self.assertIn("decisive attack", doctrine)
 
-    def test_leader_task_marks_border_origin_idle_for_occupation(self) -> None:
+    def test_leader_task_marks_border_soldier_occupation(self) -> None:
         world = create_default_world(seed=52)
         origin = world.faction_tiles("human")[0]
         target = world.neighbors(origin.x, origin.y)[0]
@@ -1322,8 +1621,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         task = _build_leader_task(world, "human", None)
 
-        self.assertIn("'origin_idle': 5", task)
-        self.assertIn("'origin_can_supply_occupation': True", task)
+        self.assertIn("'origin_movable_jobs': {'idle': 5", task)
+        self.assertIn("'winning_attackers_can_occupy': True", task)
         self.assertIn("'target_is_enemy_home': False", task)
 
     def test_leader_task_includes_previous_execution_snapshot(self) -> None:
@@ -1383,10 +1682,15 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         controller = LLMLeaderController(faction_id="human", agent=agent)
+        agent.messages.append({"role": "user", "content": "stale turn"})
 
         decision = await controller.decide(world)
 
         self.assertEqual(decision.turn_intent, "hold")
+        self.assertFalse(
+            any(message.get("content") == "stale turn" for message in agent.messages)
+        )
+        self.assertIn("You lead faction", controller.last_task or "")
         self.assertEqual(
             [tool["function"]["name"] for tool in agent.tools],
             [
@@ -1394,6 +1698,117 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                 "submit_leader_turn",
             ],
         )
+
+    async def test_llm_leader_controller_compresses_memory_json(self) -> None:
+        world = create_default_world(seed=4)
+        faction = world.factions["human"]
+        faction.leader_memory["do_not_repeat"] = ["旧规则"]
+        faction.leader_context_window = [
+            {"tick": 5, "task": "task-5", "accepted": True},
+            {"tick": 10, "task": "task-10", "accepted": True},
+            {"tick": 15, "task": "task-15", "accepted": True},
+        ]
+        strategic_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human",
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+        memory_client = FakeClient(
+            [
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "strategic_goal": "压制兽人",
+                            "current_plan": "集结边境",
+                            "god_directives": ["第5刻：攻打兽人"],
+                            "god_promises": [],
+                            "leader_promises": [],
+                            "wars": [],
+                            "diplomacy_notes": [],
+                            "known_threats": [],
+                            "target_preferences": [],
+                            "recent_failures": [],
+                            "do_not_repeat": ["旧规则", "军事命令 origin 必须有兵"],
+                            "recent_successes": ["第15刻：完成整军"],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+        memory_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human-memory",
+            enable_tools=False,
+            client=memory_client,
+        )
+        controller = LLMLeaderController(
+            faction_id="human",
+            agent=strategic_agent,
+            memory_agent=memory_agent,
+        )
+
+        compressed = await controller.compress_memory_if_needed(world)
+
+        self.assertTrue(compressed)
+        self.assertEqual(faction.leader_context_window, [])
+        self.assertEqual(faction.leader_memory["strategic_goal"], "压制兽人")
+        self.assertEqual(
+            faction.leader_memory["do_not_repeat"],
+            ["旧规则", "军事命令 origin 必须有兵"],
+        )
+        self.assertEqual(
+            memory_client.completions.calls[0]["response_format"],
+            {"type": "json_object"},
+        )
+
+    def test_leader_memory_task_includes_example_output(self) -> None:
+        world = create_default_world(seed=4)
+        entries = [
+            {"tick": 5, "task": "task-5", "accepted": True},
+            {"tick": 10, "task": "task-10", "accepted": True},
+            {"tick": 15, "task": "task-15", "accepted": True},
+        ]
+
+        task = _build_leader_memory_task(world, "human", entries)
+
+        self.assertIn("example_output", task)
+        self.assertIn('"strategic_goal"', task)
+        self.assertIn('"god_promises"', task)
+        self.assertIn('"do_not_repeat"', task)
+        self.assertIn("军事命令 origin 必须选择当前有己方士兵的地块", task)
+
+    async def test_llm_leader_memory_compression_failure_keeps_window(self) -> None:
+        world = create_default_world(seed=4)
+        faction = world.factions["human"]
+        faction.leader_context_window = [
+            {"tick": 5, "task": "task-5", "accepted": True},
+            {"tick": 10, "task": "task-10", "accepted": True},
+            {"tick": 15, "task": "task-15", "accepted": True},
+        ]
+        strategic_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human",
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+        memory_agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="leader-human-memory",
+            enable_tools=False,
+            client=FakeClient([FakeMessage(content="not json")]),
+        )
+        controller = LLMLeaderController(
+            faction_id="human",
+            agent=strategic_agent,
+            memory_agent=memory_agent,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+            await controller.compress_memory_if_needed(world)
+
+        self.assertEqual(len(faction.leader_context_window), 3)
 
     async def test_llm_leader_controller_answers_god_chat_without_tools(self) -> None:
         world = create_default_world(seed=4)
@@ -1575,7 +1990,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         await engine.tick()
 
         self.assertFalse(world.paused)
-        self.assertIn("current idle=5", human.feedback[1] or "")
+        self.assertIn("idle population budget is overcommitted", human.feedback[1] or "")
         self.assertEqual(targets[0].owner, "human")
 
     async def test_engine_default_allows_ten_decision_attempts(self) -> None:
@@ -1644,6 +2059,29 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(world.paused)
         for leader in leaders.values():
             self.assertEqual(leader.calls, 1)
+
+    async def test_engine_compresses_leader_context_after_three_strategy_turns(self) -> None:
+        world = create_default_world(seed=8)
+        leaders = {
+            faction_id: CompressingLeader(faction_id)
+            for faction_id in world.factions
+        }
+        engine = GameEngine(
+            world,
+            strategy_interval=5,
+            leaders=leaders,
+        )
+
+        await engine.tick(15)
+
+        self.assertFalse(world.paused)
+        for faction_id, leader in leaders.items():
+            self.assertEqual(leader.compressions, 1)
+            self.assertEqual(world.factions[faction_id].leader_context_window, [])
+            self.assertEqual(
+                world.factions[faction_id].leader_memory["current_plan"],
+                "compressed at 15",
+            )
 
     async def test_engine_pauses_after_repeated_illegal_llm_decisions(self) -> None:
         world = create_default_world(seed=6)

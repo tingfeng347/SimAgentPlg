@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from simagentplg.game.migration import (
+    find_civilian_donor,
+    move_civilian,
+)
 from simagentplg.game.world import (
     PROFESSION_TYPES,
     RESOURCE_TYPES,
@@ -143,7 +147,16 @@ class NPCExecutor:
             if target is None:
                 continue
             if action in {"claim", "settle"}:
-                self._settle_tile(world, faction_id, target)
+                origin = _target_tuple(order.get("origin"))
+                profession = order.get("profession")
+                self._settle_tile(
+                    world,
+                    faction_id,
+                    target,
+                    origin=origin if action == "settle" else None,
+                    profession=str(profession).strip() if profession else None,
+                    allow_owned_target=action == "settle",
+                )
             elif action == "fortify":
                 self._train_soldiers(world, faction_id, target, workers=10)
             elif action == "abandon":
@@ -234,31 +247,49 @@ class NPCExecutor:
         world: WorldState,
         faction_id: str,
         target: tuple[int, int],
+        *,
+        origin: tuple[int, int] | None = None,
+        profession: str | None = None,
+        allow_owned_target: bool = True,
     ) -> None:
         target_tile = world.tile_at(*target)
-        if target_tile.owner is not None:
-            return
-        donor = _largest_idle_tile(world, faction_id, adjacent_to=target)
-        moved = 0
-        if (
-            donor is not None
-            and donor.population_of(faction_id) > SETTLEMENT_IDLE_COST
-            and target_tile.capacity() >= SETTLEMENT_IDLE_COST
+        if target_tile.owner is not None and (
+            target_tile.owner != faction_id or not allow_owned_target
         ):
-            moved = SETTLEMENT_IDLE_COST
-            _remove_idle_people(donor, faction_id, moved)
-            target_tile.set_population(faction_id, moved)
+            return
+        donor = find_civilian_donor(
+            world,
+            faction_id,
+            target=target,
+            origin=origin,
+            profession=profession,
+        )
+        moved = 0
+        moved_profession = None
+        if donor is not None:
+            moved, moved_profession = move_civilian(
+                donor,
+                target_tile,
+                faction_id,
+                profession=profession,
+            )
         if moved <= 0:
             world.add_event(
                 "territory",
-                f"{faction_id} failed to settle tile {target} because no idle people were available",
+                f"{faction_id} failed to settle tile {target} because no movable civilians were available",
                 faction_id=faction_id,
             )
             return
-        target_tile.owner = faction_id
+        previous_owner = target_tile.owner
+        if target_tile.owner is None:
+            target_tile.owner = faction_id
         world.add_event(
             "territory",
-            f"{faction_id} settled tile {target} with {moved} people",
+            (
+                f"{faction_id} settled tile {target} from ({donor.x}, {donor.y}) "
+                f"with {moved} {moved_profession or 'civilian'}"
+                f"{' and claimed it' if previous_owner is None else ''}"
+            ),
             faction_id=faction_id,
         )
 
@@ -483,22 +514,6 @@ class NPCExecutor:
             )
             return
 
-        migrants = SETTLEMENT_IDLE_COST
-        if (
-            _idle_count(origin_tile, faction_id) < migrants
-            or origin_tile.population_of(faction_id) <= migrants
-            or target_tile.capacity() < migrants
-        ):
-            origin_tile.soldiers[faction_id] = origin_tile.soldiers_of(faction_id) + survivors
-            _damage_defender_population(target_tile, defender_id, severe=False)
-            world.add_event(
-                "battle",
-                f"{faction_id} won at {target} but could not occupy without idle people and took {_format_loot(loot)}",
-                faction_id=faction_id,
-            )
-            return
-
-        _remove_idle_people(origin_tile, faction_id, migrants)
         for other_id in list(target_tile.population):
             if other_id != faction_id:
                 target_tile.set_population(other_id, 0)
@@ -506,14 +521,10 @@ class NPCExecutor:
             if other_id != faction_id:
                 target_tile.soldiers.pop(other_id, None)
         target_tile.owner = faction_id
-        target_tile.set_population(
-            faction_id,
-            target_tile.population_of(faction_id) + migrants,
-        )
         target_tile.soldiers[faction_id] = target_tile.soldiers_of(faction_id) + survivors
         world.add_event(
             "battle",
-            f"{faction_id} captured {target} from {defender_id} with {migrants} settlers and took {_format_loot(loot)}",
+            f"{faction_id} captured {target} from {defender_id} with {survivors} soldiers and took {_format_loot(loot)}",
             faction_id=faction_id,
         )
         world.eliminate_faction_if_home_captured(defender_id, faction_id)
@@ -582,25 +593,6 @@ def _largest_population_tile(world: WorldState, faction_id: str):
     if not owned:
         return None
     return max(owned, key=lambda tile: tile.population_of(faction_id))
-
-
-def _largest_idle_tile(
-    world: WorldState,
-    faction_id: str,
-    *,
-    adjacent_to: tuple[int, int] | None = None,
-):
-    candidates = []
-    for tile in world.faction_tiles(faction_id):
-        if adjacent_to is not None and abs(tile.x - adjacent_to[0]) + abs(tile.y - adjacent_to[1]) != 1:
-            continue
-        if tile.population_of(faction_id) <= SETTLEMENT_IDLE_COST:
-            continue
-        if _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST:
-            candidates.append(tile)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda tile: _idle_count(tile, faction_id))
 
 
 def _idle_count(tile, faction_id: str) -> int:

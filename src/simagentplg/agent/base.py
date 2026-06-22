@@ -248,20 +248,49 @@ class BaseAgent:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | None = None,
     ) -> ChatCompletionMessage:
         """Call the configured model and return its first message."""
 
         try:
+            kwargs: dict[str, Any] = {
+                "model": self.config.model,
+                "messages": cast(Any, messages),
+                "temperature": self.config.temperature,
+                "tools": cast(Any, tools),
+                "extra_body": {"thinking": {"type": "enabled"}},
+            }
+            if response_format is not None:
+                kwargs["response_format"] = response_format
             response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=cast(Any, messages),
-                temperature=self.config.temperature,
-                tools=cast(Any, tools),
-                extra_body={"thinking": {"type": "enabled"}}
+                **kwargs,
             )
         except Exception as exc:
             raise RuntimeError(f"chat completion failed: {exc}") from exc
         return cast(ChatCompletionMessage, response.choices[0].message)
+
+    async def chat_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Call the configured model and parse a JSON object response."""
+
+        message = await self.chat_text(
+            messages,
+            tools=tools,
+            response_format={"type": "json_object"},
+        )
+        if not message.content:
+            raise RuntimeError("chat json completion returned empty content")
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("chat json completion returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("chat json completion must return a JSON object")
+        return payload
 
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""

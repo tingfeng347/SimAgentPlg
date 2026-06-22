@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from simagentplg.game.migration import find_civilian_donor, move_civilian
 from simagentplg.game.world import (
     RESOURCE_TYPES,
-    SETTLEMENT_IDLE_COST,
     WEATHER_TYPES,
     WorldState,
 )
@@ -75,11 +75,13 @@ class GodSystem:
             )
             if donor is None:
                 raise ValueError(
-                    f"faction {faction_id!r} has no idle population for territory claim"
+                    f"faction {faction_id!r} has no movable civilian for territory claim"
                 )
-            _remove_idle_people(donor, faction_id, SETTLEMENT_IDLE_COST)
-            tile.set_population(faction_id, SETTLEMENT_IDLE_COST)
-            moved = SETTLEMENT_IDLE_COST
+            moved, _profession = move_civilian(donor, tile, faction_id)
+            if moved <= 0:
+                raise ValueError(
+                    f"faction {faction_id!r} has no movable civilian for territory claim"
+                )
         for other_id in list(tile.population):
             if other_id != faction_id:
                 tile.set_population(other_id, 0)
@@ -208,28 +210,8 @@ def _donor_tile(
         for tile in world.faction_tiles(faction_id)
         if (tile.x, tile.y) != exclude
         and abs(tile.x - target[0]) + abs(tile.y - target[1]) == 1
-        and _idle_count(tile, faction_id) >= SETTLEMENT_IDLE_COST
+        and find_civilian_donor(world, faction_id, target=target, origin=(tile.x, tile.y)) is not None
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda tile: _idle_count(tile, faction_id))
-
-
-def _idle_count(tile, faction_id: str) -> int:
-    return tile.professions_of(faction_id).get("idle", 0)
-
-
-def _remove_idle_people(tile, faction_id: str, amount: int) -> int:
-    tile.ensure_professions(faction_id)
-    jobs = tile.professions.get(faction_id)
-    if jobs is None:
-        return 0
-    moved = min(amount, jobs.get("idle", 0), tile.population_of(faction_id))
-    if moved <= 0:
-        return 0
-    jobs["idle"] = jobs.get("idle", 0) - moved
-    tile.population[faction_id] = tile.population_of(faction_id) - moved
-    if tile.population[faction_id] <= 0:
-        tile.population.pop(faction_id, None)
-    tile.ensure_professions(faction_id)
-    return moved
+    return max(candidates, key=lambda tile: tile.population_of(faction_id))

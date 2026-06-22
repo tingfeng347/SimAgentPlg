@@ -89,6 +89,8 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("population_capacity", human)
         self.assertIn("known_factions", human)
         self.assertIn("last_plan_snapshot", human)
+        self.assertIn("leader_memory", human)
+        self.assertIn("leader_context_window_count", human)
         self.assertIn("home_tile", human)
         self.assertIn("eliminated", human)
         self.assertEqual(payload["god_chats"], [])

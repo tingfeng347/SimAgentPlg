@@ -5,7 +5,11 @@ from typing import Any, Protocol
 
 from simagentplg.logger import get_logger
 from simagentplg.game.god import GodSystem
-from simagentplg.game.leader import LeaderDecision
+from simagentplg.game.leader import (
+    LEADER_MEMORY_CONTEXT_TURNS,
+    LeaderDecision,
+    record_leader_memory_failure,
+)
 from simagentplg.game.npc import NPCExecutor
 from simagentplg.game.rules import RuleEngine
 from simagentplg.game.world import WorldState, create_default_world
@@ -149,6 +153,11 @@ class GameEngine:
                 feedback = "; ".join(check.errors)
                 feedback_by_faction[faction_id] = feedback
                 feedback_attempts[faction_id].append(feedback)
+                record_leader_memory_failure(
+                    self.world.factions[faction_id].leader_memory,
+                    feedback,
+                    tick=self.world.tick,
+                )
                 self.world.add_event(
                     "rule_reject",
                     (
@@ -205,8 +214,10 @@ class GameEngine:
             )
             entry["events"] = relevant_events[-12:]
             faction.leader_context_window.append(entry)
-            if len(faction.leader_context_window) > 3:
-                faction.leader_context_window = faction.leader_context_window[-3:]
+            if len(faction.leader_context_window) > LEADER_MEMORY_CONTEXT_TURNS:
+                faction.leader_context_window = faction.leader_context_window[
+                    -LEADER_MEMORY_CONTEXT_TURNS:
+                ]
 
         for faction_id in sorted(records):
             controller = self.leaders.get(faction_id)
@@ -217,7 +228,9 @@ class GameEngine:
                 await compress(self.world)
             except Exception as exc:
                 faction = self.world.factions[faction_id]
-                faction.leader_context_window = faction.leader_context_window[-3:]
+                faction.leader_context_window = faction.leader_context_window[
+                    -LEADER_MEMORY_CONTEXT_TURNS:
+                ]
                 self.world.add_event(
                     "memory",
                     f"{faction_id} memory compression failed: {exc}",

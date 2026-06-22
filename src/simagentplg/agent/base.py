@@ -258,7 +258,7 @@ class BaseAgent:
                 "messages": cast(Any, messages),
                 "temperature": self.config.temperature,
                 "tools": cast(Any, tools),
-                "extra_body": {"thinking": {"type": "enabled"}},
+                "extra_body": {"thinking": {"type": "disabled"}},
             }
             if response_format is not None:
                 kwargs["response_format"] = response_format

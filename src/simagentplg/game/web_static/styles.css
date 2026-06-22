@@ -233,6 +233,46 @@ h2 {
   line-height: 1.45;
 }
 
+.leader-memory {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  border: 1px solid #33404a;
+  background: #171d23;
+  border-radius: 6px;
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.memory-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.memory-count {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.memory-line {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.memory-label {
+  color: #aeb8c2;
+}
+
+.memory-empty {
+  color: var(--muted);
+}
+
 .petition-actions {
   display: flex;
   gap: 8px;

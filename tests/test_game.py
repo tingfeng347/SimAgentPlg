@@ -21,6 +21,7 @@ from simagentplg.game import (
 )
 from simagentplg.game.leader import (
     LEADER_CHAT_SYSTEM_PROMPT,
+    LEADER_MEMORY_CONTEXT_TURNS,
     LEADER_SYSTEM_PROMPT,
     SUBMIT_LEADER_TURN_TOOL,
     _build_leader_memory_task,
@@ -140,11 +141,20 @@ class CompressingLeader:
 
     async def compress_memory_if_needed(self, world) -> bool:
         faction = world.factions[self.faction_id]
-        if len(faction.leader_context_window) < 3:
+        if len(faction.leader_context_window) < LEADER_MEMORY_CONTEXT_TURNS:
             return False
         self.compressions += 1
-        faction.leader_memory["current_plan"] = f"compressed at {world.tick}"
-        faction.leader_context_window = faction.leader_context_window[3:]
+        faction.leader_memory["history_ledger"].append(
+            {
+                "tick": world.tick,
+                "kind": "compression",
+                "note": f"compressed at {world.tick}",
+                "status": "historical",
+            }
+        )
+        faction.leader_context_window = faction.leader_context_window[
+            LEADER_MEMORY_CONTEXT_TURNS:
+        ]
         return True
 
 
@@ -185,8 +195,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first.home_owner(faction_id), faction_id)
             home = first.factions[faction_id].home_tile
             self.assertEqual(first.home_of_tile(*home), faction_id)
-            self.assertIn("strategic_goal", first.factions[faction_id].leader_memory)
-            self.assertIn("do_not_repeat", first.factions[faction_id].leader_memory)
+            self.assertIn("history_ledger", first.factions[faction_id].leader_memory)
+            self.assertIn(
+                "behavior_preferences",
+                first.factions[faction_id].leader_memory,
+            )
+            self.assertIn("rule_lessons", first.factions[faction_id].leader_memory)
             self.assertEqual(first.factions[faction_id].leader_context_window, [])
         self.assertIn("Tick 0", render_map(first))
         self.assertIn("Human", render_status(first))
@@ -1476,9 +1490,22 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
     def test_leader_task_emphasizes_victory_civilian_migration_and_soldier_occupation(self) -> None:
         world = create_default_world(seed=49)
-        world.factions["human"].leader_memory["strategic_goal"] = "优先压制兽人"
-        world.factions["human"].leader_memory["do_not_repeat"] = [
-            "军事命令 origin 必须有士兵"
+        world.factions["human"].leader_memory["history_ledger"] = [
+            {
+                "tick": 35,
+                "kind": "war_history",
+                "note": "曾决定优先压制兽人。",
+                "status": "historical",
+            }
+        ]
+        world.factions["human"].leader_memory["rule_lessons"] = [
+            {
+                "first_tick": 30,
+                "last_tick": 30,
+                "count": 1,
+                "pattern": "军事命令 origin 必须有士兵",
+                "lesson": "军事命令必须从当前有己方士兵的地块发起。",
+            }
         ]
         world.factions["human"].leader_context_window.append(
             {
@@ -1498,6 +1525,9 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("final objective", LEADER_SYSTEM_PROMPT)
         self.assertIn("defeat the other races", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Current battle conditions", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Long-term memory is only a compressed reference", LEADER_SYSTEM_PROMPT)
+        self.assertIn("never let it override current resources", LEADER_SYSTEM_PROMPT)
         self.assertIn("Soldiers can move only between adjacent owned tiles", LEADER_SYSTEM_PROMPT)
         self.assertIn("currently has at least 1 soldier", LEADER_SYSTEM_PROMPT)
         self.assertIn("from a tile with 0 soldiers", LEADER_SYSTEM_PROMPT)
@@ -1507,6 +1537,17 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2 houses", LEADER_SYSTEM_PROMPT)
         self.assertIn("food=120, wood=80, and stone=40", LEADER_SYSTEM_PROMPT)
         self.assertIn('"workers":2', LEADER_SYSTEM_PROMPT)
+        self.assertIn("Correct submit_leader_turn JSON examples", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Economic development on owned land", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Peaceful expansion into adjacent unowned land", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Civilian migration into owned land", LEADER_SYSTEM_PROMPT)
+        self.assertIn("War from a soldier-held origin", LEADER_SYSTEM_PROMPT)
+        self.assertIn("Resource petition", LEADER_SYSTEM_PROMPT)
+        self.assertIn('"action":"settle"', LEADER_SYSTEM_PROMPT)
+        self.assertIn('"profession":"farmer"', LEADER_SYSTEM_PROMPT)
+        self.assertIn('"action":"attack"', LEADER_SYSTEM_PROMPT)
+        self.assertIn('"type":"resources"', LEADER_SYSTEM_PROMPT)
+        self.assertIn('"amount":80', LEADER_SYSTEM_PROMPT)
         self.assertIn("Idle people should usually be used deliberately", LEADER_SYSTEM_PROMPT)
         self.assertIn("When food, housing, and basic resource needs are stable", LEADER_SYSTEM_PROMPT)
         self.assertIn("border reinforcement, deterrence, raids", LEADER_SYSTEM_PROMPT)
@@ -1515,6 +1556,10 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("submit the matching order", LEADER_SYSTEM_PROMPT)
         self.assertIn("surviving attackers move", LEADER_SYSTEM_PROMPT)
         self.assertIn("migrated civilian keeps the same profession", LEADER_SYSTEM_PROMPT)
+        self.assertIn("source tile must be directly adjacent", LEADER_SYSTEM_PROMPT)
+        self.assertIn("distant same-faction tiles cannot supply migrants", LEADER_SYSTEM_PROMPT)
+        self.assertIn("count movable civilians by", LEADER_SYSTEM_PROMPT)
+        self.assertIn("source with 1 civilian and 0 soldiers cannot send anyone", LEADER_SYSTEM_PROMPT)
         self.assertIn("Resource petitions must use request", LEADER_SYSTEM_PROMPT)
         self.assertIn('"resource":"food|wood|stone"', LEADER_SYSTEM_PROMPT)
         self.assertIn("positive amount", LEADER_SYSTEM_PROMPT)
@@ -1529,6 +1574,9 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("positive_integer", petition_schema["request"]["description"])
         self.assertIn("Long-term objective", task)
         self.assertIn("defeat rival civilizations", task)
+        self.assertIn("Decision priority: current battle conditions", task)
+        self.assertIn("Long-term memory is only compressed history", task)
+        self.assertIn("current resources, owned tiles, visible enemies", task)
         self.assertIn("shift surplus idle people toward training", task)
         self.assertIn("Home tile status:", task)
         self.assertIn("move", task)
@@ -1537,10 +1585,15 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("safe_civilian_migrations", task)
         self.assertIn("settlement_sources", task)
         self.assertIn("Leader memory", task)
-        self.assertIn("优先压制兽人", task)
+        self.assertIn("曾决定优先压制兽人", task)
+        self.assertIn("军事命令必须从当前有己方士兵", task)
         self.assertIn("Recent uncompressed strategic context", task)
         self.assertIn("训练士兵", task)
         self.assertIn("settle can include origin and profession", task)
+        self.assertIn("source tile must be directly adjacent", task)
+        self.assertIn("safe_civilian_migrations", task)
+        self.assertIn("movable_jobs", task)
+        self.assertIn("1 civilian and 0 soldiers cannot send a migrant", task)
         self.assertIn("surviving soldiers directly occupy", task)
         self.assertIn("already own before this turn executes", task)
         self.assertIn("include the matching concrete order", task)
@@ -1702,11 +1755,29 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
     async def test_llm_leader_controller_compresses_memory_json(self) -> None:
         world = create_default_world(seed=4)
         faction = world.factions["human"]
-        faction.leader_memory["do_not_repeat"] = ["旧规则"]
+        faction.leader_memory["history_ledger"] = [
+            {
+                "tick": 5,
+                "kind": "god_directive",
+                "note": "上帝要求攻打兽人。",
+                "status": "active",
+            }
+        ]
+        faction.leader_memory["rule_lessons"] = [
+            {
+                "first_tick": 10,
+                "last_tick": 10,
+                "count": 1,
+                "pattern": "军事命令 origin 必须有兵",
+                "lesson": "军事命令必须从有士兵的地块发起。",
+            }
+        ]
         faction.leader_context_window = [
             {"tick": 5, "task": "task-5", "accepted": True},
             {"tick": 10, "task": "task-10", "accepted": True},
             {"tick": 15, "task": "task-15", "accepted": True},
+            {"tick": 20, "task": "task-20", "accepted": True},
+            {"tick": 25, "task": "task-25", "accepted": True},
         ]
         strategic_agent = BaseAgent(
             TEST_CONFIG,
@@ -1719,18 +1790,43 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
                 FakeMessage(
                     content=json.dumps(
                         {
-                            "strategic_goal": "压制兽人",
-                            "current_plan": "集结边境",
-                            "god_directives": ["第5刻：攻打兽人"],
-                            "god_promises": [],
-                            "leader_promises": [],
-                            "wars": [],
-                            "diplomacy_notes": [],
-                            "known_threats": [],
-                            "target_preferences": [],
-                            "recent_failures": [],
-                            "do_not_repeat": ["旧规则", "军事命令 origin 必须有兵"],
-                            "recent_successes": ["第15刻：完成整军"],
+                            "history_ledger": [
+                                {
+                                    "tick": 5,
+                                    "kind": "god_directive",
+                                    "note": "上帝要求攻打兽人。",
+                                    "status": "active",
+                                },
+                                {
+                                    "tick": 25,
+                                    "kind": "success",
+                                    "note": "完成整军。",
+                                    "status": "historical",
+                                },
+                            ],
+                            "behavior_preferences": [
+                                {
+                                    "tick": 20,
+                                    "preference": "优先压制兽人边境。",
+                                    "reason": "兽人扩张威胁出生地。",
+                                }
+                            ],
+                            "rule_lessons": [
+                                {
+                                    "first_tick": 10,
+                                    "last_tick": 20,
+                                    "count": 2,
+                                    "pattern": "军事命令 origin 必须有兵",
+                                    "lesson": "军事命令必须从有士兵的地块发起。",
+                                },
+                                {
+                                    "first_tick": 25,
+                                    "last_tick": 25,
+                                    "count": 1,
+                                    "pattern": "资源祈求缺少有效 resource",
+                                    "lesson": "资源祈求必须包含 food、wood 或 stone。",
+                                },
+                            ],
                         },
                         ensure_ascii=False,
                     )
@@ -1753,10 +1849,31 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(compressed)
         self.assertEqual(faction.leader_context_window, [])
-        self.assertEqual(faction.leader_memory["strategic_goal"], "压制兽人")
+        self.assertNotIn("strategic_goal", faction.leader_memory)
+        self.assertNotIn("current_plan", faction.leader_memory)
+        self.assertEqual(len(faction.leader_memory["history_ledger"]), 2)
         self.assertEqual(
-            faction.leader_memory["do_not_repeat"],
-            ["旧规则", "军事命令 origin 必须有兵"],
+            faction.leader_memory["behavior_preferences"][0]["preference"],
+            "优先压制兽人边境。",
+        )
+        self.assertEqual(
+            faction.leader_memory["rule_lessons"],
+            [
+                {
+                    "first_tick": 10,
+                    "last_tick": 20,
+                    "count": 2,
+                    "pattern": "军事命令 origin 必须有兵",
+                    "lesson": "军事命令必须从有士兵的地块发起。",
+                },
+                {
+                    "first_tick": 25,
+                    "last_tick": 25,
+                    "count": 1,
+                    "pattern": "资源祈求缺少有效 resource",
+                    "lesson": "资源祈求必须包含 food、wood 或 stone。",
+                },
+            ],
         )
         self.assertEqual(
             memory_client.completions.calls[0]["response_format"],
@@ -1769,15 +1886,19 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             {"tick": 5, "task": "task-5", "accepted": True},
             {"tick": 10, "task": "task-10", "accepted": True},
             {"tick": 15, "task": "task-15", "accepted": True},
+            {"tick": 20, "task": "task-20", "accepted": True},
+            {"tick": 25, "task": "task-25", "accepted": True},
         ]
 
         task = _build_leader_memory_task(world, "human", entries)
 
         self.assertIn("example_output", task)
-        self.assertIn('"strategic_goal"', task)
-        self.assertIn('"god_promises"', task)
-        self.assertIn('"do_not_repeat"', task)
-        self.assertIn("军事命令 origin 必须选择当前有己方士兵的地块", task)
+        self.assertIn('"history_ledger"', task)
+        self.assertIn('"behavior_preferences"', task)
+        self.assertIn('"rule_lessons"', task)
+        self.assertIn("all unique rule/plan failure patterns, no count limit", task)
+        self.assertNotIn('"current_plan"', task)
+        self.assertIn("攻击、移动、突袭必须从当前有士兵的己方地块发起", task)
 
     async def test_llm_leader_memory_compression_failure_keeps_window(self) -> None:
         world = create_default_world(seed=4)
@@ -1786,6 +1907,8 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             {"tick": 5, "task": "task-5", "accepted": True},
             {"tick": 10, "task": "task-10", "accepted": True},
             {"tick": 15, "task": "task-15", "accepted": True},
+            {"tick": 20, "task": "task-20", "accepted": True},
+            {"tick": 25, "task": "task-25", "accepted": True},
         ]
         strategic_agent = BaseAgent(
             TEST_CONFIG,
@@ -1808,7 +1931,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
             await controller.compress_memory_if_needed(world)
 
-        self.assertEqual(len(faction.leader_context_window), 3)
+        self.assertEqual(len(faction.leader_context_window), LEADER_MEMORY_CONTEXT_TURNS)
 
     async def test_llm_leader_controller_answers_god_chat_without_tools(self) -> None:
         world = create_default_world(seed=4)
@@ -2060,7 +2183,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         for leader in leaders.values():
             self.assertEqual(leader.calls, 1)
 
-    async def test_engine_compresses_leader_context_after_three_strategy_turns(self) -> None:
+    async def test_engine_compresses_leader_context_after_five_strategy_turns(self) -> None:
         world = create_default_world(seed=8)
         leaders = {
             faction_id: CompressingLeader(faction_id)
@@ -2072,15 +2195,22 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
             leaders=leaders,
         )
 
-        await engine.tick(15)
+        await engine.tick(25)
 
         self.assertFalse(world.paused)
         for faction_id, leader in leaders.items():
             self.assertEqual(leader.compressions, 1)
             self.assertEqual(world.factions[faction_id].leader_context_window, [])
             self.assertEqual(
-                world.factions[faction_id].leader_memory["current_plan"],
-                "compressed at 15",
+                world.factions[faction_id].leader_memory["history_ledger"],
+                [
+                    {
+                        "tick": 25,
+                        "kind": "compression",
+                        "note": "compressed at 25",
+                        "status": "historical",
+                    }
+                ],
             )
 
     async def test_engine_pauses_after_repeated_illegal_llm_decisions(self) -> None:
@@ -2108,6 +2238,18 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(world.paused)
         self.assertIn("exceeded invalid decision", world.pause_reason or "")
+        self.assertEqual(
+            world.factions["human"].leader_memory["rule_lessons"],
+            [
+                {
+                    "first_tick": 1,
+                    "last_tick": 1,
+                    "count": 2,
+                    "pattern": "resource_order 1: not enough food",
+                    "lesson": "resource_order 1: not enough food",
+                }
+            ],
+        )
 
 
 def _adjacent_empty_tile(world, faction_id: str) -> tuple[int, int]:

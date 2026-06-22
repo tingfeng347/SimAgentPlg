@@ -77,13 +77,38 @@ Tool usage:
   population_orders, resource_orders, territory_orders, military_orders,
   diplomacy_orders, petitions, public_decree, and strategy_summary. Leave an
   order list empty if you do not need that category.
-- submit_leader_turn example:
-  {"turn_intent":"增加粮食、修建房屋并扩张边境","population_orders":[{"task":"farm",
+- Correct submit_leader_turn JSON examples:
+  Economic development on owned land:
+  {"turn_intent":"增加粮食并修建房屋","population_orders":[{"task":"farm",
   "target":{"x":3,"y":4},"workers":2},{"task":"build",
-  "target":{"x":3,"y":4},"workers":2}],"territory_orders":[{"action":"claim",
-  "target":{"x":4,"y":4}}],"military_orders":[],"diplomacy_orders":[],
-  "petitions":[],"public_decree":"今年优先开垦边境农田。",
-  "strategy_summary":"用2名闲置人口耕作、2名建房，并用1名闲置人口迁入相邻空地。"}
+  "target":{"x":3,"y":4},"workers":2}],"resource_orders":[],
+  "territory_orders":[],"military_orders":[],"diplomacy_orders":[],
+  "petitions":[],"public_decree":"今年优先开垦农田并扩建住房。",
+  "strategy_summary":"在已拥有的(3,4)安排2人耕作、2人建房。"}
+  Peaceful expansion into adjacent unowned land:
+  {"turn_intent":"向东侧平原扩张","territory_orders":[{"action":"claim",
+  "target":{"x":4,"y":4},"priority":1}],"population_orders":[],
+  "resource_orders":[],"military_orders":[],"diplomacy_orders":[],
+  "petitions":[],"strategy_summary":"从相邻己方地块迁入1名可迁平民，占领(4,4)。"}
+  Civilian migration into owned land with explicit source and profession:
+  {"turn_intent":"开发士兵守住的新领地","territory_orders":[{"action":"settle",
+  "origin":{"x":3,"y":4},"target":{"x":4,"y":4},"profession":"farmer",
+  "priority":1}],"population_orders":[],"resource_orders":[],
+  "military_orders":[],"diplomacy_orders":[],"petitions":[],
+  "strategy_summary":"从相邻的(3,4)迁1名农夫到己方(4,4)，职业保持农夫。"}
+  War from a soldier-held origin:
+  {"turn_intent":"进攻相邻兽人边境","military_orders":[{"action":"attack",
+  "origin":{"x":3,"y":4},"target":{"x":3,"y":3},"force_ratio":0.8,
+  "priority":1}],"diplomacy_orders":[{"target_faction":"orc",
+  "proposal":"war","message":"边境冲突已无法避免。"}],
+  "population_orders":[],"resource_orders":[],"territory_orders":[],
+  "petitions":[],"strategy_summary":"从有士兵的(3,4)攻击相邻兽人地块(3,3)。"}
+  Resource petition:
+  {"turn_intent":"请求应急粮食维持扩张","petitions":[{"type":"resources",
+  "request":{"resource":"food","amount":80},"reason":"粮食不足会影响扩张与守军。",
+  "urgency":"high"}],"population_orders":[],"resource_orders":[],
+  "territory_orders":[],"military_orders":[],"diplomacy_orders":[],
+  "strategy_summary":"向上帝请求80食物，避免扩张期粮食短缺。"}
 
 Basic world:
 - You compete for land, food, safety, and long-term survival. Peace is a
@@ -91,6 +116,11 @@ Basic world:
 - Your final objective is to gain more territory, suppress rival civilizations,
   and eventually defeat the other races. Alliances, trade, and peace are tools
   for expansion, survival, and future victory, not the final goal.
+- Current battle conditions and the current task summary are authoritative.
+  Long-term memory is only a compressed reference from earlier strategic turns;
+  use it for continuity, but never let it override current resources, owned
+  tiles, visible enemies, legal move candidates, recent rule feedback, or
+  current battlefield facts.
 - The world is a tile map. Terrain, weather, population, soldiers, houses,
   resources, and ownership affect what your civilization can do.
 - Farmers increase food. Plains are naturally better for food. Rain usually
@@ -145,9 +175,16 @@ Restrict:
 - settle may include optional origin and profession fields. Use settle with an
   owned target to move a civilian into your own adjacent territory, including
   soldier-held captured land. claim is only for adjacent unowned territory.
+- For every claim/settle, the civilian source tile must be directly adjacent
+  to the target tile. If you specify settle.origin, that origin must be adjacent
+  to settle.target; distant same-faction tiles cannot supply migrants.
 - A migration source tile must still have at least 1 civilian population or 1
   soldier after sending a civilian. Do not abandon an unguarded 1-population
   frontier tile.
+- Before submitting multiple claim/settle orders, count movable civilians by
+  source tile. A source with 1 civilian and 0 soldiers cannot send anyone; a
+  source with soldiers can send its last civilian; a source must also have the
+  requested profession if profession is specified.
 - With 5 idle people, claim 1 tile + farm 2 + build 2 is legal. A second
   same-turn claim may migrate another civilian profession if an adjacent
   source has the chosen profession, the target has capacity, and the source
@@ -201,27 +238,26 @@ your home tile, use idle people deliberately, and pursue victory.
 
 LEADER_MEMORY_SYSTEM_PROMPT = """
 You compress a civilization leader's recent game context into durable memory.
-Return only a JSON object with exactly the known memory fields. Preserve useful
-long-term facts, promises, warnings, strategy, mistakes to avoid, and important
-successes. Drop obsolete coordinates, stale resource counts, and routine noise.
-All memory text must be concise Simplified Chinese. Do not include markdown.
+Return only a JSON object with exactly the known memory fields. This memory is
+a historical ledger, behavior preferences, and rule lessons, not current battle
+state. Preserve useful promises, directives, commitments, historical outcomes,
+stable preferences, and mistakes to avoid. Every memory item must include tick
+or first_tick/last_tick. Do not store current resources, current population,
+current soldiers, current legal targets, or current battlefield facts. Drop
+obsolete coordinates unless they are explicitly historical. All memory text
+must be concise Simplified Chinese. Do not include markdown.
 """.strip()
 
+LEADER_MEMORY_CONTEXT_TURNS = 5
 LEADER_MEMORY_LIST_LIMITS = {
-    "god_directives": 5,
-    "god_promises": 5,
-    "leader_promises": 5,
-    "wars": 3,
-    "diplomacy_notes": 5,
-    "known_threats": 5,
-    "target_preferences": 5,
-    "recent_failures": 5,
-    "do_not_repeat": 8,
-    "recent_successes": 5,
+    "history_ledger": 12,
+    "behavior_preferences": 8,
 }
-
-LEADER_MEMORY_STRING_FIELDS = ("strategic_goal", "current_plan")
-LEADER_MEMORY_LIST_FIELDS = tuple(LEADER_MEMORY_LIST_LIMITS)
+LEADER_MEMORY_LIST_FIELDS = (
+    "history_ledger",
+    "behavior_preferences",
+    "rule_lessons",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,9 +827,9 @@ class LLMLeaderController:
         if self.memory_agent is None:
             return False
         faction = world.factions[self.faction_id]
-        if len(faction.leader_context_window) < 3:
+        if len(faction.leader_context_window) < LEADER_MEMORY_CONTEXT_TURNS:
             return False
-        entries = faction.leader_context_window[:3]
+        entries = faction.leader_context_window[:LEADER_MEMORY_CONTEXT_TURNS]
         prompt = _build_leader_memory_task(world, self.faction_id, entries)
         self.memory_agent.reset()
         self.memory_agent.messages.append({"role": "user", "content": prompt})
@@ -802,10 +838,15 @@ class LLMLeaderController:
             faction.leader_memory,
             payload,
         )
-        faction.leader_context_window = faction.leader_context_window[3:]
+        faction.leader_context_window = faction.leader_context_window[
+            LEADER_MEMORY_CONTEXT_TURNS:
+        ]
         world.add_event(
             "memory",
-            f"{self.faction_id} compressed 3 strategic turns into leader memory",
+            (
+                f"{self.faction_id} compressed {LEADER_MEMORY_CONTEXT_TURNS} "
+                "strategic turns into leader memory"
+            ),
             faction_id=self.faction_id,
         )
         return True
@@ -863,6 +904,7 @@ def _build_leader_task(
         f"Faction doctrine: {_faction_doctrine(faction_id)}",
         "Use inspect if needed, then call submit_leader_turn.",
         "Long-term objective: gain more territory, build decisive strength, and defeat rival civilizations.",
+        "Decision priority: current battle conditions and this task summary are authoritative. Long-term memory is only compressed history from earlier strategic turns; use it as reference, but current resources, owned tiles, visible enemies, legal candidates, rule feedback, and recent events override memory.",
         "Important language rule: write every player-facing sentence in Simplified Chinese / 简体中文。",
         "必须使用简体中文的字段：turn_intent, strategy_summary, public_decree, petition.reason, diplomacy message, resource purpose。",
         "Keep only enum/action/resource/faction IDs in English so the rule engine can parse them.",
@@ -885,6 +927,8 @@ def _build_leader_task(
         "If idle people exist, normally use them for safe expansion, terrain-matched work, house building, training, or defense.",
         "When food, housing, and basic resource needs are stable, shift surplus idle people toward training, border reinforcement, deterrence, raids, and conquest preparation.",
         "Peaceful migration: claim/settle moves 1 civilian. settle can include origin and profession. Movable civilian professions are idle, farmer, lumberjack, miner, and builder; migrated civilians keep their profession.",
+        "For claim/settle, the source tile must be directly adjacent to the target. If settle specifies origin, origin and target must be neighbors; do not use distant owned tiles as migrant sources.",
+        "Before submitting several claim/settle orders, check each source's movable_jobs and safe_civilian_migrations. A source with 1 civilian and 0 soldiers cannot send a migrant; a source with soldiers may send its last civilian.",
         "War occupation: if an attack wins, surviving soldiers directly occupy the enemy tile. You do not need idle civilians on the attack origin. After capture, use settle to move civilians into that owned tile for development.",
         "Your public plan must match your submitted actions. If you say you will build houses, include a build population order. If you say you will attack, raid, or capture enemy territory, include the matching military order. If you ask for weather, include a weather petition.",
         "For population_orders.workers, use the number of people newly assigned this turn, not the final desired job total.",
@@ -932,24 +976,17 @@ def _build_leader_task(
 
 def _format_leader_memory(memory: Mapping[str, Any]) -> dict[str, Any]:
     formatted: dict[str, Any] = {}
-    for key in LEADER_MEMORY_STRING_FIELDS:
-        value = str(memory.get(key, "")).strip()
-        if value:
-            formatted[key] = value
     for key in LEADER_MEMORY_LIST_FIELDS:
-        values = [
-            str(item).strip()
-            for item in _list(memory.get(key))
-            if str(item).strip()
-        ]
+        values = [_normalize_memory_item(key, item) for item in _list(memory.get(key))]
+        values = [value for value in values if value]
         if values:
-            formatted[key] = values[-LEADER_MEMORY_LIST_LIMITS[key]:]
+            formatted[key] = _limit_leader_memory_items(key, values)
     return formatted
 
 
 def _format_leader_context_window(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     formatted = []
-    for entry in entries[-3:]:
+    for entry in entries[-LEADER_MEMORY_CONTEXT_TURNS:]:
         formatted.append(
             {
                 "tick": entry.get("tick"),
@@ -980,30 +1017,60 @@ def _build_leader_memory_task(
             limit=12,
         ),
         "required_schema": {
-            "strategic_goal": "string",
-            "current_plan": "string",
-            **{key: "list[string]" for key in LEADER_MEMORY_LIST_FIELDS},
+            "history_ledger": (
+                "list[object] with tick:int, kind:string, note:string, "
+                "status:string"
+            ),
+            "behavior_preferences": (
+                "list[object] with tick:int, preference:string, reason:string"
+            ),
+            "rule_lessons": (
+                "list[object] with first_tick:int, last_tick:int, count:int, "
+                "pattern:string, lesson:string"
+            ),
         },
         "example_output": {
-            "strategic_goal": "优先压制兽人并保护出生地",
-            "current_plan": "从东侧集结士兵，准备攻击兽人边境",
-            "god_directives": ["第15刻：上帝要求优先攻打兽人"],
-            "god_promises": ["第15刻：上帝承诺攻打兽人后赐予粮食"],
-            "leader_promises": [],
-            "wars": ["第20刻：对兽人保持战争目标，优先夺取其出生地"],
-            "diplomacy_notes": [],
-            "known_threats": [],
-            "target_preferences": ["优先占领相邻平原和兽人边境地块"],
-            "recent_failures": [],
-            "do_not_repeat": ["军事命令 origin 必须选择当前有己方士兵的地块"],
-            "recent_successes": ["第25刻：成功占领兽人边境地块"],
+            "history_ledger": [
+                {
+                    "tick": 15,
+                    "kind": "god_directive",
+                    "note": "上帝要求优先攻打兽人。",
+                    "status": "active",
+                },
+                {
+                    "tick": 25,
+                    "kind": "success",
+                    "note": "成功占领兽人边境地块。",
+                    "status": "historical",
+                },
+            ],
+            "behavior_preferences": [
+                {
+                    "tick": 20,
+                    "preference": "优先扩张相邻平原和敌方边境。",
+                    "reason": "平原利于粮食生产，边境扩张能压制对手。",
+                }
+            ],
+            "rule_lessons": [
+                {
+                    "first_tick": 10,
+                    "last_tick": 20,
+                    "count": 2,
+                    "pattern": "军事命令 origin 没有己方士兵。",
+                    "lesson": "攻击、移动、突袭必须从当前有士兵的己方地块发起。",
+                }
+            ],
         },
-        "limits": LEADER_MEMORY_LIST_LIMITS,
+        "limits": {
+            **LEADER_MEMORY_LIST_LIMITS,
+            "rule_lessons": "all unique rule/plan failure patterns, no count limit",
+        },
     }
     return (
         "Compress the following game context into durable leader_memory JSON. "
         "Return every schema field. Use empty string/list when no useful memory "
-        "exists. Keep only future-relevant facts.\n"
+        "exists. Keep only future-relevant historical facts, preferences, and "
+        "lessons. Do not store current battle state as memory.\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -1012,27 +1079,172 @@ def _merge_leader_memory(
     current: Mapping[str, Any],
     update: Mapping[str, Any],
 ) -> dict[str, Any]:
-    merged = {
-        "strategic_goal": "",
-        "current_plan": "",
-        **{key: [] for key in LEADER_MEMORY_LIST_FIELDS},
-    }
-    for key in LEADER_MEMORY_STRING_FIELDS:
-        new_value = str(update.get(key, "")).strip()
-        old_value = str(current.get(key, "")).strip()
-        merged[key] = new_value or old_value
+    merged = {key: [] for key in LEADER_MEMORY_LIST_FIELDS}
     for key in LEADER_MEMORY_LIST_FIELDS:
-        values: list[str] = []
+        values: list[dict[str, Any]] = []
         for source in (current.get(key), update.get(key)):
             for item in _list(source):
-                text = str(item).strip()
-                if not text:
+                normalized = _normalize_memory_item(key, item)
+                if not normalized:
                     continue
-                if text in values:
-                    values.remove(text)
-                values.append(text)
-        merged[key] = values[-LEADER_MEMORY_LIST_LIMITS[key]:]
+                duplicate_index = _memory_duplicate_index(key, values, normalized)
+                if duplicate_index >= 0:
+                    values[duplicate_index] = _merge_memory_item(
+                        key,
+                        values[duplicate_index],
+                        normalized,
+                    )
+                else:
+                    values.append(normalized)
+        merged[key] = _limit_leader_memory_items(key, values)
     return merged
+
+
+def record_leader_memory_failure(
+    memory: dict[str, Any],
+    failure: str,
+    *,
+    tick: int,
+) -> None:
+    text = str(failure).strip()
+    if not text:
+        return
+    merged = _merge_leader_memory(memory, {})
+    lessons = merged["rule_lessons"]
+    for lesson in lessons:
+        if lesson.get("pattern") != text:
+            continue
+        lesson["last_tick"] = max(_int(lesson.get("last_tick"), tick), tick)
+        lesson["count"] = max(1, _int(lesson.get("count"), 1)) + 1
+        memory.clear()
+        memory.update(merged)
+        return
+    lessons.append(
+        {
+            "first_tick": tick,
+            "last_tick": tick,
+            "count": 1,
+            "pattern": text,
+            "lesson": text,
+        }
+    )
+    memory.clear()
+    memory.update(merged)
+
+
+def _limit_leader_memory_items(
+    key: str,
+    values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if key == "rule_lessons":
+        return values
+    return values[-LEADER_MEMORY_LIST_LIMITS[key]:]
+
+
+def _normalize_memory_item(key: str, item: Any) -> dict[str, Any]:
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            return {}
+        if key == "rule_lessons":
+            return {
+                "first_tick": 0,
+                "last_tick": 0,
+                "count": 1,
+                "pattern": text,
+                "lesson": text,
+            }
+        if key == "behavior_preferences":
+            return {"tick": 0, "preference": text, "reason": ""}
+        return {"tick": 0, "kind": "history", "note": text, "status": "historical"}
+
+    if not isinstance(item, Mapping):
+        return {}
+
+    if key == "rule_lessons":
+        pattern = str(item.get("pattern", "")).strip()
+        lesson = str(item.get("lesson", "")).strip() or pattern
+        if not pattern and not lesson:
+            return {}
+        first_tick = _int(item.get("first_tick"), _int(item.get("tick"), 0))
+        last_tick = _int(item.get("last_tick"), first_tick)
+        return {
+            "first_tick": max(0, first_tick),
+            "last_tick": max(0, last_tick),
+            "count": max(1, _int(item.get("count"), 1)),
+            "pattern": pattern or lesson,
+            "lesson": lesson,
+        }
+
+    if key == "behavior_preferences":
+        preference = str(item.get("preference", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if not preference:
+            return {}
+        return {
+            "tick": max(0, _int(item.get("tick"), 0)),
+            "preference": preference,
+            "reason": reason,
+        }
+
+    note = str(item.get("note", "")).strip()
+    if not note:
+        return {}
+    return {
+        "tick": max(0, _int(item.get("tick"), 0)),
+        "kind": str(item.get("kind", "history")).strip() or "history",
+        "note": note,
+        "status": str(item.get("status", "historical")).strip() or "historical",
+    }
+
+
+def _memory_duplicate_index(
+    key: str,
+    values: list[dict[str, Any]],
+    item: dict[str, Any],
+) -> int:
+    if key == "rule_lessons":
+        target = item.get("pattern")
+        for index, value in enumerate(values):
+            if value.get("pattern") == target:
+                return index
+        return -1
+    if key == "behavior_preferences":
+        target = item.get("preference")
+        for index, value in enumerate(values):
+            if value.get("preference") == target:
+                return index
+        return -1
+    target = (item.get("kind"), item.get("note"))
+    for index, value in enumerate(values):
+        if (value.get("kind"), value.get("note")) == target:
+            return index
+    return -1
+
+
+def _merge_memory_item(
+    key: str,
+    old: dict[str, Any],
+    new: dict[str, Any],
+) -> dict[str, Any]:
+    if key == "rule_lessons":
+        return {
+            "first_tick": min(
+                _int(old.get("first_tick"), 0),
+                _int(new.get("first_tick"), 0),
+            ),
+            "last_tick": max(
+                _int(old.get("last_tick"), 0),
+                _int(new.get("last_tick"), 0),
+            ),
+            "count": max(
+                max(1, _int(old.get("count"), 1)),
+                max(1, _int(new.get("count"), 1)),
+            ),
+            "pattern": str(new.get("pattern") or old.get("pattern") or ""),
+            "lesson": str(new.get("lesson") or old.get("lesson") or ""),
+        }
+    return new
 
 
 def _build_leader_chat_task(world: WorldState, faction_id: str) -> str:

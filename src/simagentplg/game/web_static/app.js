@@ -24,6 +24,7 @@ let requestBusy = false;
 let tileSize = 24;
 let offsetX = 0;
 let offsetY = 0;
+const MEMORY_CONTEXT_TURNS = 5;
 
 const terrainColors = {
   plain: "#4d6849",
@@ -402,6 +403,7 @@ function renderFactions() {
       <div class="metric-line">已发现 ${formatKnownFactions(faction.known_factions)}</div>
       <div class="metric-line">外交 ${formatDiplomacy(faction.diplomacy)}</div>
       <div class="metric-line">上次计划 ${formatLastPlan(faction.last_plan_snapshot)}</div>
+      ${formatLeaderMemory(faction.leader_memory, faction.leader_context_window_count)}
     `;
     factionsEl.appendChild(row);
   });
@@ -563,6 +565,63 @@ function formatLastPlan(snapshot = {}) {
     `执行后资源：食物 ${afterResources.food ?? 0} 木材 ${afterResources.wood ?? 0} 石料 ${afterResources.stone ?? 0}`,
     `执行后职业：${formatJobs(after.jobs || {})}`,
   ].join(" ｜ ");
+}
+
+function formatLeaderMemory(memory = {}, contextWindowCount = 0) {
+  const labels = {
+    history_ledger: "历史账本",
+    behavior_preferences: "行为偏好",
+    rule_lessons: "错误教训",
+  };
+  const lines = Object.entries(labels)
+    .map(([key, label]) => {
+      const value = memory && memory[key];
+      if (Array.isArray(value)) {
+        const filtered = value.filter(Boolean);
+        const items = key === "rule_lessons" ? filtered : filtered.slice(-3);
+        if (!items.length) return "";
+        return `
+          <div class="memory-line">
+            <span class="memory-label">${label}</span>
+            <span>${items.map((item) => escapeHtml(formatMemoryItem(key, item))).join("；")}</span>
+          </div>
+        `;
+      }
+      return "";
+    })
+    .filter(Boolean);
+  const count = Number(contextWindowCount || 0);
+  const body = lines.length
+    ? lines.join("")
+    : `<div class="memory-empty">暂无长期记忆</div>`;
+  return `
+    <div class="leader-memory">
+      <div class="memory-title">
+        <span>长期记忆</span>
+        <span class="memory-count">未压缩 ${count}/${MEMORY_CONTEXT_TURNS}</span>
+      </div>
+      ${body}
+    </div>
+  `;
+}
+
+function formatMemoryItem(key, item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  if (key === "rule_lessons") {
+    const first = item.first_tick ?? item.tick ?? "?";
+    const last = item.last_tick ?? first;
+    const count = item.count ?? 1;
+    const lesson = item.lesson || item.pattern || "";
+    return `第${first}-${last}刻 x${count}：${lesson}`;
+  }
+  if (key === "behavior_preferences") {
+    const reason = item.reason ? `（${item.reason}）` : "";
+    return `第${item.tick ?? "?"}刻：${item.preference || ""}${reason}`;
+  }
+  const kind = item.kind ? `${item.kind}｜` : "";
+  const status = item.status ? `（${item.status}）` : "";
+  return `第${item.tick ?? "?"}刻：${kind}${item.note || ""}${status}`;
 }
 
 function formatEvent(event) {

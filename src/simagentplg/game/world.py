@@ -202,18 +202,9 @@ class GodChatMessage:
 
 def default_leader_memory() -> dict[str, Any]:
     return {
-        "strategic_goal": "",
-        "current_plan": "",
-        "god_directives": [],
-        "god_promises": [],
-        "leader_promises": [],
-        "wars": [],
-        "diplomacy_notes": [],
-        "known_threats": [],
-        "target_preferences": [],
-        "recent_failures": [],
-        "do_not_repeat": [],
-        "recent_successes": [],
+        "history_ledger": [],
+        "behavior_preferences": [],
+        "rule_lessons": [],
     }
 
 

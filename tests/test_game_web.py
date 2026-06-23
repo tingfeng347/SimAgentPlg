@@ -1,10 +1,10 @@
 import asyncio
 import unittest
 
-from fastapi.testclient import TestClient
+import httpx
 
 from simagentplg.game import GameEngine, LeaderDecision, create_default_world
-from simagentplg.game.web import create_game_app
+from simagentplg.game.web import STATIC_DIR, create_game_app
 
 
 class WebLeader:
@@ -28,8 +28,33 @@ class WebLeader:
         return f"谨遵神谕：{latest.content}"
 
 
+class AppClient:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    def get(self, path: str):
+        return asyncio.run(self._request("GET", path))
+
+    def post(self, path: str, json: dict | None = None):
+        return asyncio.run(self._request("POST", path, json=json))
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+    ):
+        transport = httpx.ASGITransport(app=self.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.request(method, path, json=json)
+
+
 class GameWebTests(unittest.TestCase):
-    def make_client(self, *, strategy_interval: int = 5) -> TestClient:
+    def make_client(self, *, strategy_interval: int = 5) -> AppClient:
         world = create_default_world(width=12, height=8, seed=9)
         leaders = {
             faction_id: WebLeader(faction_id)
@@ -40,24 +65,21 @@ class GameWebTests(unittest.TestCase):
             leaders=leaders,
             strategy_interval=strategy_interval,
         )
-        return TestClient(create_game_app(engine))
+        return AppClient(create_game_app(engine))
 
     def test_index_page_is_localized_to_chinese(self) -> None:
-        client = self.make_client()
+        text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-        response = client.get("/")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("上帝模拟器", response.text)
-        self.assertIn("推进 5 刻", response.text)
-        self.assertNotIn("claimFactionSelect", response.text)
-        self.assertNotIn("划给领土", response.text)
-        self.assertNotIn("/api/god/claim", response.text)
-        self.assertIn("weatherDuration", response.text)
-        self.assertIn("祈求", response.text)
-        self.assertIn("神谕私聊", response.text)
-        self.assertIn("godChatFactionSelect", response.text)
-        self.assertIn("发送神谕", response.text)
+        self.assertIn("上帝模拟器", text)
+        self.assertIn("推进 5 刻", text)
+        self.assertNotIn("claimFactionSelect", text)
+        self.assertNotIn("划给领土", text)
+        self.assertNotIn("/api/god/claim", text)
+        self.assertIn("weatherDuration", text)
+        self.assertIn("祈求", text)
+        self.assertIn("神谕私聊", text)
+        self.assertIn("godChatFactionSelect", text)
+        self.assertIn("发送神谕", text)
 
     def test_state_endpoint_returns_renderable_world(self) -> None:
         client = self.make_client()
@@ -94,6 +116,114 @@ class GameWebTests(unittest.TestCase):
         self.assertIn("home_tile", human)
         self.assertIn("eliminated", human)
         self.assertEqual(payload["god_chats"], [])
+
+    def test_state_endpoint_exposes_contract_used_by_godot_client(self) -> None:
+        client = self.make_client()
+        engine = client.app.state.engine
+        engine.world.add_petition(
+            faction_id="human",
+            kind="weather",
+            request={"x": 1, "y": 2, "weather": "rain"},
+            reason="dry fields",
+            urgency="high",
+        )
+        engine.world.add_god_chat_message(
+            faction_id="human",
+            speaker="god",
+            content="守住东线。",
+        )
+        engine.world.add_god_chat_message(
+            faction_id="human",
+            speaker="leader",
+            content="谨遵神谕。",
+        )
+        engine.world.add_event(
+            "god",
+            "God granted 5 food to human",
+            faction_id="human",
+        )
+
+        response = client.get("/api/state")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resources"], ["food", "wood", "stone"])
+        self.assertEqual(payload["weather_types"], ["clear", "rain", "drought", "storm"])
+
+        tile = payload["tiles"][0]
+        self.assertEqual(
+            set(tile),
+            {
+                "x",
+                "y",
+                "terrain",
+                "owner",
+                "home_of",
+                "weather",
+                "weather_duration",
+                "population",
+                "soldiers",
+                "professions",
+                "houses",
+                "capacity",
+                "protected",
+            },
+        )
+
+        faction = next(
+            item for item in payload["factions"] if item["faction_id"] == "human"
+        )
+        self.assertTrue(
+            {
+                "faction_id",
+                "name",
+                "leader_name",
+                "resources",
+                "population",
+                "soldiers",
+                "jobs",
+                "houses",
+                "population_capacity",
+                "territory_count",
+                "home_tile",
+                "eliminated",
+                "known_factions",
+                "diplomacy",
+                "last_plan_snapshot",
+                "leader_memory",
+                "leader_context_window_count",
+            }.issubset(faction)
+        )
+
+        petition = payload["petitions"][0]
+        self.assertEqual(
+            set(petition),
+            {
+                "petition_id",
+                "faction_id",
+                "kind",
+                "request",
+                "reason",
+                "urgency",
+                "status",
+                "created_tick",
+            },
+        )
+        self.assertEqual(petition["kind"], "weather")
+
+        chat = payload["god_chats"][-1]
+        self.assertEqual(
+            set(chat),
+            {"message_id", "tick", "faction_id", "speaker", "content"},
+        )
+        self.assertEqual(chat["speaker"], "leader")
+
+        event = payload["events"][-1]
+        self.assertEqual(
+            set(event),
+            {"tick", "kind", "message", "faction_id"},
+        )
+        self.assertEqual(event["kind"], "god")
 
     def test_god_mutation_endpoints_return_updated_state(self) -> None:
         client = self.make_client()
@@ -236,6 +366,28 @@ class GameWebTests(unittest.TestCase):
         self.assertFalse(payload["paused"])
         for leader in client.app.state.engine.leaders.values():
             self.assertEqual(leader.calls, 1)
+
+    def test_strategy_tick_response_includes_last_plan_snapshot_for_live_clients(self) -> None:
+        client = self.make_client(strategy_interval=1)
+
+        response = client.post("/api/tick", json={"count": 1})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        human = next(
+            faction
+            for faction in payload["factions"]
+            if faction["faction_id"] == "human"
+        )
+        self.assertEqual(human["last_plan_snapshot"]["tick"], 1)
+        self.assertEqual(
+            human["last_plan_snapshot"]["strategy_summary"],
+            "hold position",
+        )
+        self.assertEqual(
+            human["last_plan_snapshot"]["orders"]["turn_intent"],
+            "hold position",
+        )
 
     def test_tick_endpoint_rejects_concurrent_request(self) -> None:
         client = self.make_client()

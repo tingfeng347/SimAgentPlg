@@ -204,6 +204,14 @@ Handler startup builds one routing table. Duplicate tool names are rejected
 instead of silently overriding another handler. A custom tool may also return
 `StepOutcome(data=..., should_exit=True)` to terminate the task.
 
+## Godot Client
+
+This repository now includes a desktop-first Godot client scaffold for the
+god-sandbox game prototype at [`clients/godot/README.md`](clients/godot/README.md).
+
+The Godot client talks directly to the existing FastAPI endpoints and keeps the
+Python backend as the only authoritative rules engine.
+
 ## Agent Manager
 
 Each agent owns its identity, so registration does not repeat the ID:

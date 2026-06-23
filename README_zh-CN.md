@@ -199,6 +199,13 @@ agent = BaseAgent(
 Handler 启动时会创建统一的工具路由表。重复工具名会立即报错，不会静默覆盖。
 自定义工具也可以返回 `StepOutcome(data=..., should_exit=True)` 主动终止任务。
 
+## Godot 客户端
+
+仓库现在包含一个桌面优先的 Godot 客户端骨架，用于上帝沙盒游戏原型，说明见
+[`clients/godot/README.md`](clients/godot/README.md)。
+
+这个客户端直接请求现有 FastAPI 接口，Python 后端仍然是唯一的权威规则引擎。
+
 ## Agent Manager
 
 每个 Agent 自己持有身份，因此注册时不需要再次传入 ID：

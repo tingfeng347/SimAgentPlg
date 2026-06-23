@@ -400,7 +400,7 @@ func _sync_map_view_size() -> void:
 		_sandbox_view.set_drawing_size(_map_stage.size)
 	if _fx_layer != null:
 		_fx_layer.position = Vector2.ZERO
-		_fx_layer.set_iso_metrics(_map_view.origin, _map_view.tile_width, _map_view.tile_height, _map_view.row_step, _map_stage.size, _map_view.visual_subdivisions)
+		_fx_layer.set_iso_metrics(_map_view.origin, _map_view.tile_width, _map_view.tile_height, _map_view.row_step, _map_stage.size)
 
 
 func _on_backend_connect_pressed(_text: String = "") -> void:

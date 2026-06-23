@@ -230,6 +230,8 @@ class RuleEngine:
                 continue
             tile = world.tile_at(*order.target)
             if order.action in {"claim", "settle"}:
+                if order.amount <= 0:
+                    errors.append(f"{label}: amount must be positive for settlement")
                 if not tile.is_passable():
                     errors.append(f"{label}: target terrain is not passable")
                 if order.action == "claim" and tile.owner is not None:
@@ -255,7 +257,7 @@ class RuleEngine:
                             errors.append(f"{label}: origin must be adjacent to target")
                 elif not self._adjacent_to_owned(world, faction_id, order.target):
                     errors.append(f"{label}: target must border owned territory")
-                if not _has_movable_population(world, faction_id):
+                if not _has_movable_population(world, faction_id, order.amount):
                     errors.append(f"{label}: faction has no movable civilian for settlement")
             if order.action in {"fortify", "abandon"} and tile.owner != faction_id:
                 errors.append(f"{label}: target must be owned by {faction_id}")
@@ -526,6 +528,7 @@ class RuleEngine:
                     action="settle",
                     origin=None,
                     profession=None,
+                    amount=SETTLEMENT_IDLE_COST,
                     jobs_by_tile=jobs_by_tile,
                     population_by_tile=population_by_tile,
                     soldiers_by_tile=soldiers_by_tile,
@@ -546,6 +549,7 @@ class RuleEngine:
                 action=order.action,
                 origin=order.origin if order.action == "settle" else None,
                 profession=order.profession if order.action == "settle" else None,
+                amount=order.amount,
                 jobs_by_tile=jobs_by_tile,
                 population_by_tile=population_by_tile,
                 soldiers_by_tile=soldiers_by_tile,
@@ -558,7 +562,7 @@ class RuleEngine:
                 (
                     f"civilian budget exceeded: current civilians={total_civilians}, "
                     f"claim/settle migration need={budget['settlement']} "
-                    f"({budget['settlement_count']} x {SETTLEMENT_IDLE_COST}), "
+                    f"({budget['settlement_count']} orders), "
                     f"jobs/training need={budget['jobs_training']}, "
                     f"total needed={budget['total']}"
                 )
@@ -636,14 +640,14 @@ def _int(value: object, default: int) -> int:
         return default
 
 
-def _has_movable_population(world: WorldState, faction_id: str) -> bool:
+def _has_movable_population(world: WorldState, faction_id: str, amount: int) -> bool:
     return any(
         any(
-            tile.professions_of(faction_id).get(profession, 0) >= SETTLEMENT_IDLE_COST
+            tile.professions_of(faction_id).get(profession, 0) >= amount
             for profession in CIVILIAN_PROFESSION_PRIORITY
         )
         and (
-            tile.population_of(faction_id) > SETTLEMENT_IDLE_COST
+            tile.population_of(faction_id) > amount
             or tile.soldiers_of(faction_id) > 0
         )
         for tile in world.faction_tiles(faction_id)
@@ -718,6 +722,7 @@ def _idle_budget_need(
 ) -> dict[str, int]:
     jobs_training = 0
     settlement_count = 0
+    settlement = 0
     for order in decision.population_orders:
         if order.workers <= 0:
             continue
@@ -728,10 +733,11 @@ def _idle_budget_need(
         elif order.task == "settle" and order.target is not None:
             if _counts_as_new_territory(world, order.target):
                 settlement_count += 1
+                settlement += SETTLEMENT_IDLE_COST
     for order in decision.territory_orders:
-        if order.action in {"claim", "settle"} and _counts_as_new_territory(world, order.target):
+        if order.action in {"claim", "settle"}:
             settlement_count += 1
-    settlement = settlement_count * SETTLEMENT_IDLE_COST
+            settlement += max(order.amount, 0)
     return {
         "jobs_training": jobs_training,
         "settlement_count": settlement_count,
@@ -810,6 +816,7 @@ def _consume_settlement_budget(
     action: str,
     origin: tuple[int, int] | None,
     profession: str | None,
+    amount: int,
     jobs_by_tile: dict[tuple[int, int], dict[str, int]],
     population_by_tile: dict[tuple[int, int], int],
     soldiers_by_tile: dict[tuple[int, int], int],
@@ -818,6 +825,8 @@ def _consume_settlement_budget(
 ) -> None:
     if not world.in_bounds(*target):
         return
+    if amount <= 0:
+        return
     tile = world.tile_at(*target)
     if action == "claim" and tile.owner is not None:
         return
@@ -825,7 +834,7 @@ def _consume_settlement_budget(
         return
     if tile.owner is not None and target not in owned:
         return
-    if population_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST > tile.capacity():
+    if population_by_tile.get(target, 0) + amount > tile.capacity():
         errors.append(f"{label}: target has no population capacity for settlement")
         return
     donor_key = _best_adjacent_civilian_donor(
@@ -836,20 +845,21 @@ def _consume_settlement_budget(
         owned,
         origin=origin,
         profession=profession,
+        amount=amount,
     )
     if donor_key is None:
         errors.append(
             f"{label}: faction has no movable civilian to settle target while leaving the source tile held"
         )
         return
-    selected = _choose_budget_profession(jobs_by_tile, donor_key, profession)
+    selected = _choose_budget_profession(jobs_by_tile, donor_key, profession, amount)
     if selected is None:
         errors.append(
             f"{label}: faction has no movable civilian to settle target while leaving the source tile held"
         )
         return
-    jobs_by_tile[donor_key][selected] = jobs_by_tile[donor_key].get(selected, 0) - SETTLEMENT_IDLE_COST
-    population_by_tile[donor_key] -= SETTLEMENT_IDLE_COST
+    jobs_by_tile[donor_key][selected] = jobs_by_tile[donor_key].get(selected, 0) - amount
+    population_by_tile[donor_key] -= amount
     if (
         population_by_tile.get(donor_key, 0) <= 0
         and soldiers_by_tile.get(donor_key, 0) <= 0
@@ -860,8 +870,8 @@ def _consume_settlement_budget(
         target,
         {job: 0 for job in CIVILIAN_PROFESSION_PRIORITY},
     )
-    target_jobs[selected] = target_jobs.get(selected, 0) + SETTLEMENT_IDLE_COST
-    population_by_tile[target] = population_by_tile.get(target, 0) + SETTLEMENT_IDLE_COST
+    target_jobs[selected] = target_jobs.get(selected, 0) + amount
+    population_by_tile[target] = population_by_tile.get(target, 0) + amount
     owned.add(target)
 
 
@@ -874,6 +884,7 @@ def _best_adjacent_civilian_donor(
     *,
     origin: tuple[int, int] | None,
     profession: str | None,
+    amount: int,
 ) -> tuple[int, int] | None:
     if origin is not None:
         keys = [origin] if origin in owned else []
@@ -883,10 +894,10 @@ def _best_adjacent_civilian_donor(
     for key in keys:
         if abs(key[0] - target[0]) + abs(key[1] - target[1]) != 1:
             continue
-        if _choose_budget_profession(jobs_by_tile, key, profession) is None:
+        if _choose_budget_profession(jobs_by_tile, key, profession, amount) is None:
             continue
         if (
-            population_by_tile.get(key, 0) - SETTLEMENT_IDLE_COST <= 0
+            population_by_tile.get(key, 0) - amount <= 0
             and soldiers_by_tile.get(key, 0) <= 0
         ):
             continue
@@ -897,7 +908,7 @@ def _best_adjacent_civilian_donor(
         candidates,
         key=lambda key: (
             jobs_by_tile.get(key, {}).get(
-                _choose_budget_profession(jobs_by_tile, key, profession) or "idle",
+                _choose_budget_profession(jobs_by_tile, key, profession, amount) or "idle",
                 0,
             ),
             population_by_tile.get(key, 0),
@@ -909,14 +920,15 @@ def _choose_budget_profession(
     jobs_by_tile: dict[tuple[int, int], dict[str, int]],
     key: tuple[int, int],
     profession: str | None,
+    amount: int,
 ) -> str | None:
     jobs = jobs_by_tile.get(key, {})
     if profession:
-        if profession in CIVILIAN_PROFESSION_TYPES and jobs.get(profession, 0) >= SETTLEMENT_IDLE_COST:
+        if profession in CIVILIAN_PROFESSION_TYPES and jobs.get(profession, 0) >= amount:
             return profession
         return None
     for candidate in CIVILIAN_PROFESSION_PRIORITY:
-        if jobs.get(candidate, 0) >= SETTLEMENT_IDLE_COST:
+        if jobs.get(candidate, 0) >= amount:
             return candidate
     return None
 

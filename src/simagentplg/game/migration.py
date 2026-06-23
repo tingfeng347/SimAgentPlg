@@ -22,14 +22,17 @@ def choose_civilian_profession(
     tile,
     faction_id: str,
     preferred: str | None = None,
+    amount: int = SETTLEMENT_IDLE_COST,
 ) -> str | None:
+    if amount <= 0:
+        return None
     jobs = movable_civilian_jobs(tile, faction_id)
     if preferred:
-        if preferred in CIVILIAN_PROFESSION_TYPES and jobs.get(preferred, 0) > 0:
+        if preferred in CIVILIAN_PROFESSION_TYPES and jobs.get(preferred, 0) >= amount:
             return preferred
         return None
     for profession in CIVILIAN_PROFESSION_PRIORITY:
-        if jobs.get(profession, 0) > 0:
+        if jobs.get(profession, 0) >= amount:
             return profession
     return None
 
@@ -52,6 +55,7 @@ def find_civilian_donor(
     target: tuple[int, int],
     origin: tuple[int, int] | None = None,
     profession: str | None = None,
+    amount: int = SETTLEMENT_IDLE_COST,
 ):
     if origin is not None:
         if not world.in_bounds(*origin):
@@ -60,8 +64,8 @@ def find_civilian_donor(
         if (
             tile.owner == faction_id
             and abs(tile.x - target[0]) + abs(tile.y - target[1]) == 1
-            and choose_civilian_profession(tile, faction_id, profession) is not None
-            and can_move_civilian_from(tile, faction_id)
+            and choose_civilian_profession(tile, faction_id, profession, amount) is not None
+            and can_move_civilian_from(tile, faction_id, amount)
         ):
             return tile
         return None
@@ -70,9 +74,9 @@ def find_civilian_donor(
     for tile in world.faction_tiles(faction_id):
         if abs(tile.x - target[0]) + abs(tile.y - target[1]) != 1:
             continue
-        if choose_civilian_profession(tile, faction_id, profession) is None:
+        if choose_civilian_profession(tile, faction_id, profession, amount) is None:
             continue
-        if not can_move_civilian_from(tile, faction_id):
+        if not can_move_civilian_from(tile, faction_id, amount):
             continue
         candidates.append(tile)
     if not candidates:
@@ -81,7 +85,7 @@ def find_civilian_donor(
         candidates,
         key=lambda tile: (
             movable_civilian_jobs(tile, faction_id).get(
-                choose_civilian_profession(tile, faction_id, profession) or "idle",
+                choose_civilian_profession(tile, faction_id, profession, amount) or "idle",
                 0,
             ),
             tile.population_of(faction_id),
@@ -103,7 +107,7 @@ def move_civilian(
         return 0, None
     if not can_receive_civilian(target_tile, faction_id, amount):
         return 0, None
-    selected = choose_civilian_profession(origin_tile, faction_id, profession)
+    selected = choose_civilian_profession(origin_tile, faction_id, profession, amount)
     if selected is None:
         return 0, None
 

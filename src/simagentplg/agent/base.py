@@ -257,8 +257,7 @@ class BaseAgent:
                 "model": self.config.model,
                 "messages": cast(Any, messages),
                 "temperature": self.config.temperature,
-                "tools": cast(Any, tools),
-                "extra_body": {"thinking": {"type": "disabled"}},
+                "tools": cast(Any, tools)
             }
             if response_format is not None:
                 kwargs["response_format"] = response_format
@@ -427,13 +426,30 @@ class BaseAgent:
         tool_name: str,
         raw_arguments: str,
     ) -> StepOutcome:
+        self.logger.info(
+            "调用工具 %s 参数=%s",
+            tool_name,
+            self._summarize_for_log(raw_arguments),
+        )
         try:
             arguments = json.loads(raw_arguments)
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
-            return await self.dispatch(tool_name, arguments)
+            outcome = await self.dispatch(tool_name, arguments)
+            self.logger.info(
+                "工具 %s 完成 exit=%s 结果=%s",
+                tool_name,
+                outcome.should_exit,
+                self._summarize_for_log(outcome.data),
+            )
+            return outcome
         except Exception as exc:
-            self.logger.warning("工具 %s 执行失败: %s", tool_name, exc)
+            self.logger.warning(
+                "工具 %s 执行失败: %s 参数=%s",
+                tool_name,
+                exc,
+                self._summarize_for_log(raw_arguments),
+            )
             return StepOutcome(
                 {
                     "status": "error",
@@ -447,3 +463,13 @@ class BaseAgent:
         if isinstance(data, str):
             return data
         return json.dumps(data, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _summarize_for_log(data: Any, *, limit: int = 600) -> str:
+        if isinstance(data, str):
+            text = data
+        else:
+            text = json.dumps(data, ensure_ascii=False, default=str)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}...<truncated {len(text) - limit} chars>"

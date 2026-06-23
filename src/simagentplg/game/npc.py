@@ -58,8 +58,7 @@ class NPCExecutor:
                     faction_id=faction_id,
                 )
             self._consume_food(world, faction_id)
-            if world.tick % 5 == 0:
-                self._grow_population(world, faction_id)
+            self._grow_population(world, faction_id)
         world.enforce_population_ownership()
 
     def execute_active_orders(self, world: WorldState, faction_id: str) -> None:
@@ -149,12 +148,14 @@ class NPCExecutor:
             if action in {"claim", "settle"}:
                 origin = _target_tuple(order.get("origin"))
                 profession = order.get("profession")
+                amount = int(order.get("amount", SETTLEMENT_IDLE_COST))
                 self._settle_tile(
                     world,
                     faction_id,
                     target,
                     origin=origin if action == "settle" else None,
                     profession=str(profession).strip() if profession else None,
+                    amount=amount,
                     allow_owned_target=action == "settle",
                 )
             elif action == "fortify":
@@ -250,6 +251,7 @@ class NPCExecutor:
         *,
         origin: tuple[int, int] | None = None,
         profession: str | None = None,
+        amount: int = SETTLEMENT_IDLE_COST,
         allow_owned_target: bool = True,
     ) -> None:
         target_tile = world.tile_at(*target)
@@ -263,6 +265,7 @@ class NPCExecutor:
             target=target,
             origin=origin,
             profession=profession,
+            amount=amount,
         )
         moved = 0
         moved_profession = None
@@ -272,6 +275,7 @@ class NPCExecutor:
                 target_tile,
                 faction_id,
                 profession=profession,
+                amount=amount,
             )
         if moved <= 0:
             world.add_event(
@@ -379,11 +383,8 @@ class NPCExecutor:
             capacity = tile.capacity()
             if population >= capacity:
                 continue
-            base_growth = max(1, population // 40)
-            if tile.weather == "rain":
-                base_growth += 1
             food_budget = max(0, (faction.resources.food - food_spent - 20) // 2)
-            growth = min(base_growth, capacity - population, food_budget)
+            growth = min(1, capacity - population, food_budget)
             if growth <= 0:
                 continue
             tile.change_population(faction_id, growth)
@@ -488,10 +489,11 @@ class NPCExecutor:
 
         if attack_power <= defense_power:
             target_tile.soldiers[defender_id] = max(0, defenders - attackers // 3)
-            world.add_event(
-                "battle",
+            _add_battle_event_for_both(
+                world,
+                faction_id,
+                defender_id,
                 f"{faction_id} attacked {defender_id} at {target} and failed",
-                faction_id=faction_id,
             )
             return
 
@@ -507,10 +509,11 @@ class NPCExecutor:
         if not capture:
             origin_tile.soldiers[faction_id] = origin_tile.soldiers_of(faction_id) + survivors
             _damage_defender_population(target_tile, defender_id, severe=False)
-            world.add_event(
-                "battle",
+            _add_battle_event_for_both(
+                world,
+                faction_id,
+                defender_id,
                 f"{faction_id} raided {target} from {defender_id} and took {_format_loot(loot)}",
-                faction_id=faction_id,
             )
             return
 
@@ -522,12 +525,23 @@ class NPCExecutor:
                 target_tile.soldiers.pop(other_id, None)
         target_tile.owner = faction_id
         target_tile.soldiers[faction_id] = target_tile.soldiers_of(faction_id) + survivors
-        world.add_event(
-            "battle",
+        _add_battle_event_for_both(
+            world,
+            faction_id,
+            defender_id,
             f"{faction_id} captured {target} from {defender_id} with {survivors} soldiers and took {_format_loot(loot)}",
-            faction_id=faction_id,
         )
         world.eliminate_faction_if_home_captured(defender_id, faction_id)
+
+
+def _add_battle_event_for_both(
+    world: WorldState,
+    attacker_id: str,
+    defender_id: str,
+    message: str,
+) -> None:
+    world.add_event("battle", message, faction_id=attacker_id)
+    world.add_event("battle", message, faction_id=defender_id)
 
 
 def _weather_multiplier(weather: str) -> float:

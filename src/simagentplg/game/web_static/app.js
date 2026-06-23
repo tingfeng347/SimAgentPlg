@@ -17,14 +17,27 @@ const godChatMessages = document.getElementById("godChatMessages");
 const godChatInput = document.getElementById("godChatInput");
 const godChatButton = document.getElementById("godChatButton");
 const eventsEl = document.getElementById("events");
+const strategyWait = document.getElementById("strategyWait");
+const strategyWaitTitle = document.getElementById("strategyWaitTitle");
+const strategyWaitStage = document.getElementById("strategyWaitStage");
+const strategyWaitElapsed = document.getElementById("strategyWaitElapsed");
+const strategyProgressBar = document.getElementById("strategyProgressBar");
+const leaderWaitList = document.getElementById("leaderWaitList");
 
 let state = null;
 let selectedTile = null;
 let requestBusy = false;
+let busyTimer = null;
+let liveStateTimer = null;
+let busyStartedAt = 0;
+let busyInitialTick = 0;
+let busyStep = 0;
+let busyOptions = null;
 let tileSize = 24;
 let offsetX = 0;
 let offsetY = 0;
-const MEMORY_CONTEXT_TURNS = 5;
+const axisGutter = 30;
+const MEMORY_CONTEXT_TURNS = 1;
 
 const terrainColors = {
   plain: "#4d6849",
@@ -141,6 +154,31 @@ const proposalNames = {
   war: "开战",
 };
 
+const strategyStages = [
+  "三位首领正在读取当前地图、人口与资源。",
+  "首领们正在核对相邻地块、兵力来源与迁民预算。",
+  "规则引擎准备校验计划；若有问题，首领会快速修正。",
+  "正在整理各族法令、祈求与战略摘要。",
+];
+
+const leaderWaitCopy = {
+  human: [
+    "核对粮食、住房与可扩张平原",
+    "评估外交窗口与边境威慑",
+    "整理本回合建设优先级",
+  ],
+  elf: [
+    "观察森林心脏地带与安全边界",
+    "权衡防守、同盟与反击机会",
+    "检查可迁民地块与危险天气",
+  ],
+  orc: [
+    "清点边境士兵与突袭路径",
+    "寻找可压制的相邻目标",
+    "确认进攻来源是否有士兵",
+  ],
+};
+
 async function main() {
   wireControls();
   await refreshState();
@@ -170,7 +208,11 @@ async function refreshState() {
 }
 
 async function tick(count) {
-  await mutate("/api/tick", { count }, "首领正在思考...");
+  await mutate("/api/tick", { count }, {
+    busyLabel: count > 1 ? `首领正在推演 ${count} 刻...` : "首领正在思考...",
+    waitKind: "strategy",
+    title: count > 1 ? `推进 ${count} 刻` : "推进 1 刻",
+  });
 }
 
 async function giveResource() {
@@ -206,16 +248,21 @@ async function sendGodChat() {
       faction_id: godChatFactionSelect.value,
       message,
     },
-    "首领正在回应...",
+    {
+      busyLabel: "首领正在回应...",
+      waitKind: "chat",
+      title: "神谕送达中",
+    },
   );
   godChatInput.value = "";
 }
 
-async function mutate(path, body, busyLabel = "处理中...") {
+async function mutate(path, body, options = "处理中...") {
   if (requestBusy) return;
+  const busyConfig = normalizeBusyOptions(options);
   requestBusy = true;
   setButtonsDisabled(true);
-  worldMeta.textContent = `${busyLabel} 第 ${state ? state.tick : 0} 刻`;
+  startBusyState(busyConfig);
   try {
     const response = await fetch(path, {
       method: "POST",
@@ -233,6 +280,7 @@ async function mutate(path, body, busyLabel = "处理中...") {
   } finally {
     requestBusy = false;
     setButtonsDisabled(false);
+    stopBusyState();
   }
 }
 
@@ -240,6 +288,123 @@ function setButtonsDisabled(disabled) {
   document.querySelectorAll("button").forEach((button) => {
     button.disabled = disabled;
   });
+}
+
+function normalizeBusyOptions(options) {
+  if (typeof options === "string") {
+    return { busyLabel: options, waitKind: "simple", title: options };
+  }
+  return {
+    busyLabel: options.busyLabel || "处理中...",
+    waitKind: options.waitKind || "simple",
+    title: options.title || options.busyLabel || "处理中",
+  };
+}
+
+function startBusyState(options) {
+  busyOptions = options;
+  busyStartedAt = Date.now();
+  busyInitialTick = state ? state.tick : 0;
+  busyStep = 0;
+  document.body.classList.add("is-busy");
+  worldMeta.textContent = `${options.busyLabel} 第 ${state ? state.tick : 0} 刻`;
+  updateBusyPanel();
+  if (busyTimer) window.clearInterval(busyTimer);
+  busyTimer = window.setInterval(() => {
+    busyStep += 1;
+    updateBusyPanel();
+  }, 1200);
+  if (busyOptions.waitKind === "strategy") {
+    startLiveStatePolling();
+  }
+}
+
+function stopBusyState() {
+  document.body.classList.remove("is-busy");
+  if (busyTimer) {
+    window.clearInterval(busyTimer);
+    busyTimer = null;
+  }
+  if (liveStateTimer) {
+    window.clearInterval(liveStateTimer);
+    liveStateTimer = null;
+  }
+  busyOptions = null;
+  busyStep = 0;
+  busyInitialTick = 0;
+  if (strategyWait) strategyWait.hidden = true;
+}
+
+function startLiveStatePolling() {
+  if (liveStateTimer) window.clearInterval(liveStateTimer);
+  liveStateTimer = window.setInterval(async () => {
+    try {
+      const response = await fetch("/api/state");
+      if (!response.ok) return;
+      state = await response.json();
+      hydrateControls();
+      render();
+      updateBusyPanel();
+    } catch (_error) {
+      // The final /api/tick response will refresh the state; transient polling
+      // errors should not interrupt the player's waiting flow.
+    }
+  }, 1000);
+}
+
+function updateBusyPanel() {
+  if (!strategyWait || !busyOptions) return;
+  const elapsed = Math.max(0, Math.floor((Date.now() - busyStartedAt) / 1000));
+  strategyWait.hidden = false;
+  strategyWaitTitle.textContent = busyOptions.title || "处理中";
+  strategyWaitElapsed.textContent = `${elapsed}s`;
+
+  if (busyOptions.waitKind === "strategy") {
+    strategyWaitStage.textContent = strategyStages[busyStep % strategyStages.length];
+    renderLeaderWaitList();
+  } else if (busyOptions.waitKind === "chat") {
+    strategyWaitStage.textContent = "神谕已经送达，首领正在用私聊回复。";
+    renderLeaderWaitList(godChatFactionSelect.value);
+  } else {
+    strategyWaitStage.textContent = "世界正在处理上帝指令。";
+    leaderWaitList.innerHTML = "";
+  }
+
+  const progress = Math.min(92, 18 + elapsed * 5 + (busyStep % 4) * 6);
+  strategyProgressBar.style.width = `${progress}%`;
+}
+
+function renderLeaderWaitList(focusFaction = null) {
+  const factions = state?.factions?.length
+    ? state.factions.map((faction) => faction.faction_id)
+    : ["human", "elf", "orc"];
+  const visibleFactions = focusFaction ? factions.filter((id) => id === focusFaction) : factions;
+  leaderWaitList.innerHTML = visibleFactions.map((factionId, index) => {
+    const faction = (state?.factions || []).find((item) => item.faction_id === factionId);
+    const plan = faction?.last_plan_snapshot || {};
+    const acceptedThisRun = Number(plan.tick || 0) > busyInitialTick;
+    const phrases = leaderWaitCopy[factionId] || ["整理本回合战略"];
+    const phrase = acceptedThisRun
+      ? (plan.strategy_summary || "计划已通过校验")
+      : phrases[(busyStep + index) % phrases.length];
+    const status = acceptedThisRun
+      ? "已通过"
+      : busyStep < index
+      ? "等待"
+      : busyStep % 4 === 3
+        ? "校验"
+        : "思考";
+    return `
+      <div class="leader-wait-card ${factionId} ${acceptedThisRun ? "accepted" : ""}">
+        <span class="leader-pulse"></span>
+        <div>
+          <strong>${displayFaction(factionId)}</strong>
+          <span>${phrase}</span>
+        </div>
+        <em>${status}</em>
+      </div>
+    `;
+  }).join("");
 }
 
 function hydrateControls() {
@@ -291,17 +456,18 @@ function drawMap() {
   canvas.height = Math.max(1, Math.floor(rect.height * scale));
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
-  const availableWidth = rect.width - 24;
-  const availableHeight = rect.height - 24;
+  const availableWidth = rect.width - axisGutter - 18;
+  const availableHeight = rect.height - axisGutter - 18;
   tileSize = Math.floor(
     Math.max(8, Math.min(availableWidth / state.width, availableHeight / state.height)),
   );
-  offsetX = Math.floor((rect.width - tileSize * state.width) / 2);
-  offsetY = Math.floor((rect.height - tileSize * state.height) / 2);
+  offsetX = axisGutter + Math.floor((rect.width - axisGutter - tileSize * state.width) / 2);
+  offsetY = axisGutter + Math.floor((rect.height - axisGutter - tileSize * state.height) / 2);
 
   ctx.clearRect(0, 0, rect.width, rect.height);
   ctx.fillStyle = "#0e1114";
   ctx.fillRect(0, 0, rect.width, rect.height);
+  drawCoordinateAxes();
 
   for (const tile of state.tiles) {
     const x = offsetX + tile.x * tileSize;
@@ -359,6 +525,59 @@ function drawMap() {
     ctx.lineWidth = 1;
     ctx.strokeRect(x, y, tileSize, tileSize);
   }
+}
+
+function drawCoordinateAxes() {
+  const mapWidth = tileSize * state.width;
+  const mapHeight = tileSize * state.height;
+  const left = offsetX;
+  const top = offsetY;
+  const right = left + mapWidth;
+  const bottom = top + mapHeight;
+  ctx.save();
+  ctx.strokeStyle = "rgba(238, 242, 244, 0.55)";
+  ctx.fillStyle = "rgba(238, 242, 244, 0.78)";
+  ctx.lineWidth = 1;
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.beginPath();
+  ctx.moveTo(left, top - 11);
+  ctx.lineTo(right, top - 11);
+  ctx.lineTo(right - 5, top - 15);
+  ctx.moveTo(right, top - 11);
+  ctx.lineTo(right - 5, top - 7);
+  ctx.moveTo(left - 11, top);
+  ctx.lineTo(left - 11, bottom);
+  ctx.lineTo(left - 15, bottom - 5);
+  ctx.moveTo(left - 11, bottom);
+  ctx.lineTo(left - 7, bottom - 5);
+  ctx.stroke();
+
+  ctx.textAlign = "left";
+  ctx.fillText("x →", Math.min(right - 22, left + 4), top - 23);
+  ctx.save();
+  ctx.translate(left - 24, Math.min(bottom - 22, top + 28));
+  ctx.rotate(Math.PI / 2);
+  ctx.fillText("y ↓", 0, 0);
+  ctx.restore();
+
+  const xStep = state.width > 20 ? 5 : 2;
+  const yStep = state.height > 20 ? 5 : 2;
+  ctx.textAlign = "center";
+  for (let x = 0; x < state.width; x += xStep) {
+    const px = left + x * tileSize + tileSize / 2;
+    ctx.fillText(String(x), px, top - 11);
+  }
+  ctx.fillText(String(state.width - 1), right - tileSize / 2, top - 11);
+  ctx.textAlign = "right";
+  for (let y = 0; y < state.height; y += yStep) {
+    const py = top + y * tileSize + tileSize / 2;
+    ctx.fillText(String(y), left - 15, py);
+  }
+  ctx.fillText(String(state.height - 1), left - 15, bottom - tileSize / 2);
+  ctx.restore();
 }
 
 function drawHomeStar(x, y, size) {
@@ -512,7 +731,8 @@ function tileDetails(tile) {
     .map(([faction, entries]) => `${displayFaction(faction)} ${formatJobs(entries)}`)
     .join("<br>") || "无";
   return `
-    <strong>(${tile.x}, ${tile.y})</strong><br>
+    <strong>(x=${tile.x}, y=${tile.y})</strong><br>
+    坐标：x 横向向右，y 纵向向下<br>
     地形：${displayTerrain(tile.terrain)}<br>
     出生地：${tile.home_of ? displayFaction(tile.home_of) : "无"}<br>
     天气：${displayWeather(tile.weather)}${tile.weather_duration ? `（剩余 ${tile.weather_duration} 刻）` : ""}<br>
@@ -569,16 +789,15 @@ function formatLastPlan(snapshot = {}) {
 
 function formatLeaderMemory(memory = {}, contextWindowCount = 0) {
   const labels = {
-    history_ledger: "历史账本",
-    behavior_preferences: "行为偏好",
-    rule_lessons: "错误教训",
+    god_dialogue: "神谕叙事",
+    rule_errors: "最近规则错误",
   };
   const lines = Object.entries(labels)
     .map(([key, label]) => {
       const value = memory && memory[key];
       if (Array.isArray(value)) {
         const filtered = value.filter(Boolean);
-        const items = key === "rule_lessons" ? filtered : filtered.slice(-3);
+        const items = key === "rule_errors" ? filtered.slice(-3) : filtered.slice(-6);
         if (!items.length) return "";
         return `
           <div class="memory-line">
@@ -598,7 +817,7 @@ function formatLeaderMemory(memory = {}, contextWindowCount = 0) {
     <div class="leader-memory">
       <div class="memory-title">
         <span>长期记忆</span>
-        <span class="memory-count">未压缩 ${count}/${MEMORY_CONTEXT_TURNS}</span>
+        <span class="memory-count">最近战略回合 ${count}/${MEMORY_CONTEXT_TURNS}</span>
       </div>
       ${body}
     </div>
@@ -608,16 +827,16 @@ function formatLeaderMemory(memory = {}, contextWindowCount = 0) {
 function formatMemoryItem(key, item) {
   if (typeof item === "string") return item;
   if (!item || typeof item !== "object") return "";
-  if (key === "rule_lessons") {
-    const first = item.first_tick ?? item.tick ?? "?";
-    const last = item.last_tick ?? first;
-    const count = item.count ?? 1;
-    const lesson = item.lesson || item.pattern || "";
-    return `第${first}-${last}刻 x${count}：${lesson}`;
+  if (key === "rule_errors") {
+    const categories = Array.isArray(item.categories) && item.categories.length
+      ? ` [${item.categories.join(", ")}]`
+      : "";
+    const count = Number(item.count || 0) > 1 ? ` x${item.count}` : "";
+    return `第${item.tick ?? "?"}刻${count}：${item.error || ""}${categories}`;
   }
-  if (key === "behavior_preferences") {
-    const reason = item.reason ? `（${item.reason}）` : "";
-    return `第${item.tick ?? "?"}刻：${item.preference || ""}${reason}`;
+  if (key === "god_dialogue") {
+    const speaker = item.speaker === "god" ? "神" : "首领";
+    return `第${item.tick ?? "?"}刻 ${speaker}：${item.content || ""}`;
   }
   const kind = item.kind ? `${item.kind}｜` : "";
   const status = item.status ? `（${item.status}）` : "";

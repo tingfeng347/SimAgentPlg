@@ -451,6 +451,52 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_tool_calls_are_logged(self) -> None:
+        client = FakeClient(
+            [
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(
+                                "echo",
+                                '{"text": "hello"}',
+                            ),
+                        )
+                    ]
+                ),
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-2",
+                            function=FakeFunction(
+                                "done",
+                                '{"summary": "logged"}',
+                            ),
+                        )
+                    ]
+                ),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="log-tools",
+            handlers=[EchoHandler(), DoneHandler()],
+            enable_tools=True,
+            client=client,
+        )
+
+        with self.assertLogs("log-tools", level="INFO") as captured:
+            result = await agent.runtime(task="use echo then finish")
+
+        self.assertEqual(json.loads(result or "")["summary"], "logged")
+        logs = "\n".join(captured.output)
+        self.assertIn("调用工具 echo", logs)
+        self.assertIn('参数={"text": "hello"}', logs)
+        self.assertIn("工具 echo 完成 exit=False", logs)
+        self.assertIn("调用工具 done", logs)
+        self.assertIn("工具 done 完成 exit=True", logs)
+
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()
         client = FakeClient(

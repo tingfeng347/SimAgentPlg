@@ -21,6 +21,21 @@
         </header>
 
         <div id="pauseBanner" class="pause-banner" hidden></div>
+        <section id="strategyWait" class="strategy-wait" aria-live="polite" hidden>
+          <div class="strategy-wait-header">
+            <div>
+              <div class="strategy-wait-kicker">战略时刻</div>
+              <h2 id="strategyWaitTitle">首领正在思考</h2>
+            </div>
+            <div id="strategyWaitElapsed" class="strategy-wait-elapsed">0s</div>
+          </div>
+          <div class="strategy-progress" aria-hidden="true">
+            <div id="strategyProgressBar"></div>
+          </div>
+          <p id="strategyWaitStage" class="strategy-wait-stage">三位首领正在评估局势。</p>
+          <div id="leaderWaitList" class="leader-wait-list"></div>
+          <div class="strategy-wait-hint">等待期间仍可查看地图、事件与各族档案；完成后会自动刷新。</div>
+        </section>
         <canvas id="worldCanvas" width="960" height="640"></canvas>
         <div id="tileTip" class="tile-tip" hidden></div>
 
@@ -43,11 +58,11 @@
 
           <div class="tool-group">
             <label>
-              X
+              X 横向
               <input id="coordX" type="number" min="0" value="0" />
             </label>
             <label>
-              Y
+              Y 纵向
               <input id="coordY" type="number" min="0" value="0" />
             </label>
             <label>

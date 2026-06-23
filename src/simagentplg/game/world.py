@@ -9,7 +9,7 @@ WEATHER_TYPES = ("clear", "rain", "drought", "storm")
 TERRAIN_TYPES = ("plain", "forest", "hill", "water", "mountain")
 DEFAULT_FACTIONS = ("human", "elf", "orc")
 PROFESSION_TYPES = ("farmer", "lumberjack", "miner", "builder", "idle")
-SETTLEMENT_IDLE_COST = 1
+SETTLEMENT_IDLE_COST = 2
 MAX_START_DISTANCE = 8
 MIN_START_DISTANCE = 4
 BASE_TILE_CAPACITY = {
@@ -202,9 +202,8 @@ class GodChatMessage:
 
 def default_leader_memory() -> dict[str, Any]:
     return {
-        "history_ledger": [],
-        "behavior_preferences": [],
-        "rule_lessons": [],
+        "god_dialogue": [],
+        "rule_errors": [],
     }
 
 
@@ -434,6 +433,23 @@ class WorldState:
         )
         self._next_chat_message_id += 1
         self.god_chats.append(message)
+        if faction_id in self.factions:
+            memory = self.factions[faction_id].leader_memory
+            rule_errors = _as_list(memory.get("rule_errors"))[-3:]
+            memory.clear()
+            memory.update(
+                {
+                    "god_dialogue": [
+                        {
+                            "tick": item.tick,
+                            "speaker": item.speaker,
+                            "content": item.content,
+                        }
+                        for item in self.recent_god_chat(faction_id, limit=12)
+                    ],
+                    "rule_errors": rule_errors,
+                }
+            )
         self.add_event(
             "god_chat",
             f"{speaker} privately messaged {faction_id}: {content}",
@@ -666,3 +682,7 @@ def _merge_petition_request(
 def _max_urgency(first: str, second: str) -> str:
     ranks = {"low": 0, "medium": 1, "high": 2}
     return first if ranks.get(first, 1) >= ranks.get(second, 1) else second
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []

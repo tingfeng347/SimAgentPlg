@@ -6,9 +6,10 @@ from typing import Any, Protocol
 from simagentplg.logger import get_logger
 from simagentplg.game.god import GodSystem
 from simagentplg.game.leader import (
-    LEADER_MEMORY_CONTEXT_TURNS,
+    LEADER_RECENT_CONTEXT_TURNS,
     LeaderDecision,
-    record_leader_memory_failure,
+    record_leader_rule_error,
+    sync_leader_narrative_memory,
 )
 from simagentplg.game.npc import NPCExecutor
 from simagentplg.game.rules import RuleEngine
@@ -35,7 +36,7 @@ class GameEngine:
         *,
         leaders: dict[str, LeaderControllerProtocol] | None = None,
         strategy_interval: int = 5,
-        retry_limit: int = 9,
+        retry_limit: int = 4,
         rules: RuleEngine | None = None,
         npc: NPCExecutor | None = None,
         log_ticks: bool = False,
@@ -110,73 +111,86 @@ class GameEngine:
             faction_id: [] for faction_id in faction_ids
         }
         accepted_records: dict[str, dict[str, Any]] = {}
+        tasks: dict[asyncio.Task[tuple[str, LeaderDecision, str]], tuple[str, int]] = {
+            asyncio.create_task(self._ask_leader(faction_id, None)): (faction_id, 0)
+            for faction_id in sorted(pending)
+        }
 
-        for attempt in range(self.retry_limit + 1):
-            results = await asyncio.gather(
-                *(
-                    self._ask_leader(
-                        faction_id,
-                        feedback_by_faction[faction_id],
-                    )
-                    for faction_id in sorted(pending)
-                ),
-                return_exceptions=True,
+        while tasks and pending:
+            done, _ = await asyncio.wait(
+                set(tasks),
+                return_when=asyncio.FIRST_COMPLETED,
             )
-
-            for result in results:
-                if isinstance(result, Exception):
-                    self.world.pause(
-                        f"Leader failed to decide: {result}"
-                    )
+            for task in done:
+                faction_id, attempt = tasks.pop(task)
+                try:
+                    result_faction_id, decision, task_prompt = task.result()
+                except Exception as exc:
+                    await self._cancel_leader_tasks(tasks)
+                    self.world.pause(f"Leader failed to decide: {exc}")
                     return accepted_records
 
-                faction_id, decision, task = result
                 check = self.rules.apply_decision(
                     self.world,
-                    faction_id,
+                    result_faction_id,
                     decision,
                 )
                 if check.accepted:
-                    accepted_records[faction_id] = {
+                    accepted_records[result_faction_id] = {
                         "tick": self.world.tick,
-                        "task": task,
+                        "task": task_prompt,
                         "decision": decision.as_dict(),
                         "strategy_summary": (
                             decision.strategy_summary or decision.turn_intent
                         ),
-                        "feedback_attempts": list(feedback_attempts[faction_id]),
+                        "feedback_attempts": list(feedback_attempts[result_faction_id]),
                         "accepted": True,
                     }
-                    pending.discard(faction_id)
+                    pending.discard(result_faction_id)
                     continue
 
                 feedback = "; ".join(check.errors)
-                feedback_by_faction[faction_id] = feedback
-                feedback_attempts[faction_id].append(feedback)
-                record_leader_memory_failure(
-                    self.world.factions[faction_id].leader_memory,
+                feedback_by_faction[result_faction_id] = feedback
+                feedback_attempts[result_faction_id].append(feedback)
+                record_leader_rule_error(
+                    self.world.factions[result_faction_id].leader_memory,
                     feedback,
                     tick=self.world.tick,
                 )
                 self.world.add_event(
                     "rule_reject",
                     (
-                        f"{faction_id} submitted illegal plan on attempt "
+                        f"{result_faction_id} submitted illegal plan on attempt "
                         f"{attempt + 1}: {feedback}"
                     ),
-                    faction_id=faction_id,
+                    faction_id=result_faction_id,
                 )
+                if attempt >= self.retry_limit:
+                    await self._cancel_leader_tasks(tasks)
+                    self.world.pause(
+                        "Leader(s) "
+                        f"{result_faction_id} exceeded invalid decision retry limit"
+                    )
+                    return accepted_records
 
-            if not pending:
-                break
-
-        if pending:
-            failed = ", ".join(sorted(pending))
-            self.world.pause(
-                f"Leader(s) {failed} exceeded invalid decision retry limit"
-            )
-            return accepted_records
+                next_task = asyncio.create_task(
+                    self._ask_leader(
+                        result_faction_id,
+                        feedback_by_faction[result_faction_id],
+                    )
+                )
+                tasks[next_task] = (result_faction_id, attempt + 1)
         return accepted_records
+
+    async def _cancel_leader_tasks(
+        self,
+        tasks: dict[asyncio.Task[tuple[str, LeaderDecision, str]], tuple[str, int]],
+    ) -> None:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        tasks.clear()
 
     async def _ask_leader(
         self,
@@ -214,28 +228,11 @@ class GameEngine:
             )
             entry["events"] = relevant_events[-12:]
             faction.leader_context_window.append(entry)
-            if len(faction.leader_context_window) > LEADER_MEMORY_CONTEXT_TURNS:
+            if len(faction.leader_context_window) > LEADER_RECENT_CONTEXT_TURNS:
                 faction.leader_context_window = faction.leader_context_window[
-                    -LEADER_MEMORY_CONTEXT_TURNS:
+                    -LEADER_RECENT_CONTEXT_TURNS:
                 ]
-
-        for faction_id in sorted(records):
-            controller = self.leaders.get(faction_id)
-            compress = getattr(controller, "compress_memory_if_needed", None)
-            if compress is None:
-                continue
-            try:
-                await compress(self.world)
-            except Exception as exc:
-                faction = self.world.factions[faction_id]
-                faction.leader_context_window = faction.leader_context_window[
-                    -LEADER_MEMORY_CONTEXT_TURNS:
-                ]
-                self.world.add_event(
-                    "memory",
-                    f"{faction_id} memory compression failed: {exc}",
-                    faction_id=faction_id,
-                )
+            sync_leader_narrative_memory(self.world, faction_id)
 
     def _advance_weather(self) -> None:
         for tile in self.world.tiles:

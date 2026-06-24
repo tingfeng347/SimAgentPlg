@@ -8,6 +8,7 @@ from simagentplg import (
     BaseAgent,
     BashHandler,
     FinishHandler,
+    GitDiffHandler,
     ModelConfig,
     WorkflowStep,
 )
@@ -31,7 +32,7 @@ async def main() -> None:
                 "You execute the provided plan with tools. When the work is "
                 "complete, call run_finish with a concise summary."
             ),
-            handlers=[BashHandler(), FinishHandler()],
+            handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
             enable_tools=True,
         ),
     )

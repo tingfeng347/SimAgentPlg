@@ -6,6 +6,8 @@ from simagentplg import (
     AgentManager,
     AgentWorkflow,
     BaseAgent,
+    BashHandler,
+    FinishHandler,
     ModelConfig,
     WorkflowStep,
 )
@@ -19,7 +21,6 @@ async def main() -> None:
             config=config,
             agent_id="planner",
             system_prompt="You create concise, actionable implementation plans.",
-            enable_tools=True,
         ),
     )
     manager.register(
@@ -30,6 +31,7 @@ async def main() -> None:
                 "You execute the provided plan with tools. When the work is "
                 "complete, call run_finish with a concise summary."
             ),
+            handlers=[BashHandler(), FinishHandler()],
             enable_tools=True,
         ),
     )
@@ -38,7 +40,6 @@ async def main() -> None:
             config=config,
             agent_id="reviewer",
             system_prompt="You review completed work for correctness and risk.",
-            enable_tools=True,
         ),
     )
 

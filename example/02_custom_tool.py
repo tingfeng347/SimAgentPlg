@@ -45,7 +45,8 @@ class MathHandler(MethodToolHandler):
                 {"status": "error", "error": "left and right must be numbers"}
             )
         return StepOutcome(
-            {"status": "success", "value": left + right}
+            {"status": "success", "value": left + right},
+            should_exit=True,
         )
 
 
@@ -54,6 +55,7 @@ async def main() -> None:
         config=ModelConfig.from_env(),
         agent_id="calculator",
         handlers=[MathHandler()],
+        enable_tools=True,
     )
 
     try:

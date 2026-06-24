@@ -15,11 +15,11 @@ from simagentplg.plugins.skill.skill_manager import SkillManager
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
 
-logger = get_logger("BASEAGENT")
+
 
 TOOL_COMPLETION_PROMPT = """
-工具模式下，只有调用 run_finish 才表示任务完成。
-完成所有操作后，必须单独调用 run_finish，并在 summary 中总结结果。
+工具模式下，只有调用一个会结束任务的工具才表示任务完成。
+完成所有操作后，必须单独调用当前任务指定的完成工具。
 不要用普通文本结束任务，也不要在完成后继续调用其他工具。
 """.strip()
 
@@ -32,7 +32,7 @@ REACT_LOOP_PROMPT = """
 - 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
 - 工具执行结果会返回给你，请根据结果继续思考下一步。
 - 不要重复相同的无效操作。
-- 完成所有操作后，必须调用 run_finish 提交总结并结束任务。
+- 完成所有操作后，必须调用当前任务指定的完成工具来结束任务。
 """.strip()
 
 DEFAULT_MAX_STEPS = 20
@@ -128,33 +128,7 @@ class BaseAgent:
             base_url=self.config.base_url,
             timeout=self.config.timeout,
         )
-
         self.handlers = list(handlers or ())
-        if enable_tools:
-            from simagentplg.handlers.bash import BashHandler
-            from simagentplg.handlers.finish import FinishHandler
-
-            bash_handler = next(
-                (
-                    handler
-                    for handler in self.handlers
-                    if isinstance(handler, BashHandler)
-                ),
-                None,
-            )
-            if bash_handler is None:
-                bash_handler = BashHandler()
-                self.handlers.insert(0, bash_handler)
-
-            if not any(
-                isinstance(handler, FinishHandler)
-                for handler in self.handlers
-            ):
-                self.handlers.insert(
-                    self.handlers.index(bash_handler) + 1,
-                    FinishHandler(cwd=bash_handler.cwd),
-                )
-
         self.messages: list[dict[str, Any]] = []
         self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
@@ -162,6 +136,7 @@ class BaseAgent:
         self._last_skill_name: str | None = None
         self._last_tool_signature: tuple[str, str] | None = None
         self._repeated_tool_calls = 0
+        self.logger = get_logger(f"{self.agent_id}")
         self.reset()
 
     @property
@@ -216,7 +191,7 @@ class BaseAgent:
                 try:
                     await handler.shutdown()
                 except Exception as shutdown_error:
-                    logger.warning(
+                    self.logger.warning(
                         "Handler %s 回滚关闭失败: %s",
                         type(handler).__name__,
                         shutdown_error,
@@ -273,19 +248,48 @@ class BaseAgent:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | None = None,
     ) -> ChatCompletionMessage:
         """Call the configured model and return its first message."""
 
         try:
+            kwargs: dict[str, Any] = {
+                "model": self.config.model,
+                "messages": cast(Any, messages),
+                "temperature": self.config.temperature,
+                "tools": cast(Any, tools)
+            }
+            if response_format is not None:
+                kwargs["response_format"] = response_format
             response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=cast(Any, messages),
-                temperature=self.config.temperature,
-                tools=cast(Any, tools),
+                **kwargs,
             )
         except Exception as exc:
             raise RuntimeError(f"chat completion failed: {exc}") from exc
         return cast(ChatCompletionMessage, response.choices[0].message)
+
+    async def chat_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Call the configured model and parse a JSON object response."""
+
+        message = await self.chat_text(
+            messages,
+            tools=tools,
+            response_format={"type": "json_object"},
+        )
+        if not message.content:
+            raise RuntimeError("chat json completion returned empty content")
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("chat json completion returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("chat json completion must return a JSON object")
+        return payload
 
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
@@ -300,12 +304,12 @@ class BaseAgent:
         self.messages.append({"role": "user", "content": task})
 
         for turn in range(self.max_steps):
-            logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
+            self.logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
             await self._inject_skill_messages()
 
             message = await self.chat_text(
                 self.messages,
-                tools=self.tools if self.enable_tools else None,
+                tools=(self.tools or None) if self.enable_tools else None,
             )
             self.messages.append(message.model_dump())
 
@@ -422,13 +426,30 @@ class BaseAgent:
         tool_name: str,
         raw_arguments: str,
     ) -> StepOutcome:
+        self.logger.info(
+            "调用工具 %s 参数=%s",
+            tool_name,
+            self._summarize_for_log(raw_arguments),
+        )
         try:
             arguments = json.loads(raw_arguments)
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
-            return await self.dispatch(tool_name, arguments)
+            outcome = await self.dispatch(tool_name, arguments)
+            self.logger.info(
+                "工具 %s 完成 exit=%s 结果=%s",
+                tool_name,
+                outcome.should_exit,
+                self._summarize_for_log(outcome.data),
+            )
+            return outcome
         except Exception as exc:
-            logger.warning("工具 %s 执行失败: %s", tool_name, exc)
+            self.logger.warning(
+                "工具 %s 执行失败: %s 参数=%s",
+                tool_name,
+                exc,
+                self._summarize_for_log(raw_arguments),
+            )
             return StepOutcome(
                 {
                     "status": "error",
@@ -442,3 +463,13 @@ class BaseAgent:
         if isinstance(data, str):
             return data
         return json.dumps(data, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _summarize_for_log(data: Any, *, limit: int = 600) -> str:
+        if isinstance(data, str):
+            text = data
+        else:
+            text = json.dumps(data, ensure_ascii=False, default=str)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}...<truncated {len(text) - limit} chars>"

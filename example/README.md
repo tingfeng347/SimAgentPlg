@@ -21,12 +21,14 @@ register the agent object directly with `manager.register(agent)`.
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 - `06_skill.py`: local skill discovery, routing, template, and sample injection
+- `07_god_simulator.py`: LLM-led god sandbox MVP with a CLI
+- `08_god_simulator_web.py`: LLM-led god sandbox MVP in a browser
 
-Tool-enabled agents include two sibling built-in handlers: `BashHandler`
-provides `bash_run`, while `FinishHandler` provides `run_finish`. The finish
-result contains the model's summary plus Git files added, modified, or deleted
-during that `runtime()` call. Plain text does not finish a tool task, and the
-third identical consecutive tool call is rejected before execution.
+Tool-enabled agents expose only the handlers explicitly passed to
+`BaseAgent`. `BashHandler` provides `bash_run`, while `FinishHandler` provides
+`run_finish`. A custom tool can also finish a task by returning
+`StepOutcome(..., should_exit=True)`. Plain text does not finish a tool task,
+and the third identical consecutive tool call is rejected before execution.
 
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
@@ -36,3 +38,8 @@ The skill example loads `example/skills/release_notes/`. `SKILL_MODEL` selects
 the model used to route the task to a skill; when omitted, it defaults to
 `gpt-4o-mini`. The selected `SKILL.md`, optional `template.md`, and optional
 `examples/sample.md` are injected into the agent context.
+
+The god simulator example requires model credentials because every faction
+leader is controlled by an LLM agent at strategic turns.
+The web version starts a local FastAPI server and opens at
+`http://127.0.0.1:8000` by default.

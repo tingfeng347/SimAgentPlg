@@ -21,6 +21,7 @@ register the agent object directly with `manager.register(agent)`.
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 - `06_skill.py`: local skill discovery, routing, template, and sample injection
+- `07_bash_approval.py`: deterministic `BashApprovalMiddleware` y/n approval
 
 Tool-enabled agents expose only the handlers explicitly passed to
 `BaseAgent`. `BashHandler` provides `bash_run`, while `FinishHandler` provides
@@ -36,4 +37,3 @@ The skill example loads `example/skills/release_notes/`. `SKILL_MODEL` selects
 the model used to route the task to a skill; when omitted, it defaults to
 `gpt-4o-mini`. The selected `SKILL.md`, optional `template.md`, and optional
 `examples/sample.md` are injected into the agent context.
-

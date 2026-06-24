@@ -7,6 +7,13 @@ from simagentplg.agent.manager import (
     AgentManagerError,
     AgentNotFoundError,
 )
+from simagentplg.agent.middleware import (
+    BashApprovalMiddleware,
+    HumanApproval,
+    MiddleWare,
+    ToolMiddleware,
+    format_tool_call_preview,
+)
 from simagentplg.agent.workflow import (
     AgentWorkflow,
     WorkflowExecutionError,
@@ -36,6 +43,11 @@ __all__ = [
     "AgentManagerError",
     "AgentAlreadyExistsError",
     "AgentNotFoundError",
+    "MiddleWare",
+    "ToolMiddleware",
+    "HumanApproval",
+    "BashApprovalMiddleware",
+    "format_tool_call_preview",
     "AgentWorkflow",
     "WorkflowStep",
     "WorkflowStepResult",

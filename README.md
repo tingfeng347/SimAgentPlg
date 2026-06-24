@@ -138,8 +138,7 @@ Tool mode stops with an error when:
 ## Built-In Handlers
 
 `BashHandler` exposes `bash_run` and executes a bounded Bash command. It has a
-working directory, timeout, output limit, and a small blacklist for obviously
-dangerous commands.
+working directory, timeout, and output limit.
 
 `GitDiffHandler` exposes `run_gitdiff`. It inspects the current Git working
 tree and does not finish the task:
@@ -163,6 +162,31 @@ current `runtime()`:
 {
   "summary": "Created hello.py"
 }
+```
+
+## Tool Middleware
+
+`ToolMiddleware` can inspect tool calls before execution. The framework does
+not define global risk levels; applications can write their own middleware or
+use `BashApprovalMiddleware` to require y/n approval only when `bash_run`
+matches risky command patterns:
+
+```python
+from simagentplg import (
+    BaseAgent,
+    BashApprovalMiddleware,
+    BashHandler,
+    FinishHandler,
+    ModelConfig,
+)
+
+agent = BaseAgent(
+    ModelConfig.from_env(),
+    agent_id="coder",
+    handlers=[BashHandler(), FinishHandler()],
+    middlewares=[BashApprovalMiddleware()],
+    enable_tools=True,
+)
 ```
 
 ## Custom Tool Handlers
@@ -404,6 +428,7 @@ uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
 uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
+uv run python example/07_bash_approval.py
 ```
 
 ## Testing
@@ -414,8 +439,8 @@ Run the test suite from the repository root:
 uv run python -m unittest
 ```
 
-The current tests cover agents, custom handlers, finish behavior, manager
-locking/concurrency, workflows, and importable examples.
+The current tests cover agents, custom handlers, tool middleware, finish
+behavior, manager locking/concurrency, workflows, and importable examples.
 
 ## Public API
 
@@ -426,6 +451,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = REACT_LOOP_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
+    middlewares: Iterable[MiddleWare] | None = None,
     enable_tools: bool = False,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,

@@ -3,15 +3,20 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from simagentplg import (
     BaseAgent,
+    BashApprovalMiddleware,
     BashHandler,
     FinishHandler,
+    HumanApproval,
     McpToolHandler,
     MethodToolHandler,
     ModelConfig,
     StepOutcome,
+    ToolMiddleware,
+    format_tool_call_preview,
 )
 
 TEST_CONFIG = ModelConfig(
@@ -161,6 +166,66 @@ class FakeMcpManager:
     ) -> str:
         self.calls.append((tool_name, arguments))
         return "mcp-result"
+
+
+class RecordingToolMiddleware(ToolMiddleware):
+    def __init__(
+        self,
+        outcome: StepOutcome | None = None,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        super().__init__(enabled=enabled)
+        self.outcome = outcome
+        self.started = 0
+        self.stopped = 0
+        self.task_starts = 0
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def startup(self) -> None:
+        self.started += 1
+
+    async def shutdown(self) -> None:
+        self.stopped += 1
+
+    async def on_task_start(self) -> None:
+        self.task_starts += 1
+
+    async def before_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> StepOutcome | None:
+        self.calls.append((tool_name, dict(arguments)))
+        return self.outcome
+
+
+class ApprovalToolMiddleware(ToolMiddleware):
+    def __init__(self, approval: HumanApproval, *, high_risk: bool) -> None:
+        super().__init__()
+        self.approval = approval
+        self.high_risk = high_risk
+
+    async def before_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> StepOutcome | None:
+        if not self.high_risk:
+            return None
+        approved = await self.approval.approve(
+            format_tool_call_preview(tool_name, arguments)
+        )
+        if approved:
+            return None
+        return StepOutcome(
+            {
+                "status": "rejected",
+                "tool": tool_name,
+                "reason": "human rejected tool execution",
+            },
+            should_exit=True,
+        )
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
@@ -537,6 +602,306 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await agent.runtime(task="second")
 
         self.assertEqual(handler.task_starts, 2)
+
+    async def test_tool_middleware_lifecycle_and_low_risk_execution(self) -> None:
+        handler = EchoHandler()
+        middleware = RecordingToolMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-low-risk",
+            handlers=[handler],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        outcome = await agent.dispatch("echo", {"text": "allowed"})
+        await agent.shutdown()
+
+        self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
+        self.assertEqual(handler.calls, 1)
+        self.assertEqual(middleware.started, 1)
+        self.assertEqual(middleware.stopped, 1)
+        self.assertEqual(middleware.calls, [("echo", {"text": "allowed"})])
+
+    async def test_tool_middleware_task_start_hook_runs_for_each_task(self) -> None:
+        middleware = RecordingToolMiddleware()
+        client = FakeClient(
+            [
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction("done", '{"summary": "first"}'),
+                        )
+                    ]
+                ),
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-2",
+                            function=FakeFunction("done", '{"summary": "second"}'),
+                        )
+                    ]
+                ),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-task-hooks",
+            handlers=[DoneHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=client,
+        )
+
+        await agent.runtime(task="first")
+        await agent.runtime(task="second")
+
+        self.assertEqual(middleware.task_starts, 2)
+
+    async def test_middlewares_do_not_run_when_tools_are_disabled(self) -> None:
+        middleware = RecordingToolMiddleware()
+        client = FakeClient([FakeMessage("plain chat")])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-disabled",
+            handlers=[EchoHandler()],
+            middlewares=[middleware],
+            enable_tools=False,
+            client=client,
+        )
+
+        result = await agent.runtime(task="hello")
+
+        self.assertEqual(result, "plain chat")
+        self.assertEqual(middleware.started, 0)
+        self.assertEqual(middleware.task_starts, 0)
+        self.assertEqual(middleware.calls, [])
+
+    async def test_tool_middleware_rejection_ends_runtime(self) -> None:
+        handler = EchoHandler()
+        middleware = RecordingToolMiddleware(
+            StepOutcome(
+                {
+                    "status": "rejected",
+                    "tool": "echo",
+                    "reason": "human rejected tool execution",
+                },
+                should_exit=True,
+            )
+        )
+        client = FakeClient(
+            [
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction("echo", '{"text": "blocked"}'),
+                        )
+                    ]
+                )
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-reject",
+            handlers=[handler],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=client,
+        )
+
+        result = await agent.runtime(task="try echo")
+
+        payload = json.loads(result or "")
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["tool"], "echo")
+        self.assertEqual(handler.calls, 0)
+
+    async def test_middlewares_short_circuit_in_order(self) -> None:
+        first = RecordingToolMiddleware(
+            StepOutcome({"status": "blocked"}, should_exit=True)
+        )
+        second = RecordingToolMiddleware()
+        handler = EchoHandler()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-chain",
+            handlers=[handler],
+            middlewares=[first, second],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        outcome = await agent.dispatch("echo", {"text": "blocked"})
+
+        self.assertEqual(outcome.data, {"status": "blocked"})
+        self.assertEqual(first.calls, [("echo", {"text": "blocked"})])
+        self.assertEqual(second.calls, [])
+        self.assertEqual(handler.calls, 0)
+
+    async def test_human_approval_accepts_y_after_invalid_input(self) -> None:
+        approval = HumanApproval(max_preview_chars=10)
+
+        with (
+            patch("builtins.input", side_effect=["maybe", "Y"]),
+            patch("builtins.print") as print_mock,
+        ):
+            approved = await approval.approve("0123456789abcdef")
+
+        self.assertTrue(approved)
+        first_print = print_mock.call_args_list[0].args[0]
+        self.assertIn("...<truncated 6 chars>", first_print)
+
+    async def test_human_approval_middleware_can_reject_high_risk_tool(self) -> None:
+        handler = EchoHandler()
+        middleware = ApprovalToolMiddleware(
+            HumanApproval(),
+            high_risk=True,
+        )
+        client = FakeClient(
+            [
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction("echo", '{"text": "blocked"}'),
+                        )
+                    ]
+                )
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="human-approval-reject",
+            handlers=[handler],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=client,
+        )
+
+        with (
+            patch("builtins.input", return_value="n"),
+            patch("builtins.print"),
+        ):
+            result = await agent.runtime(task="try echo")
+
+        payload = json.loads(result or "")
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(handler.calls, 0)
+
+    async def test_human_approval_middleware_can_approve_high_risk_tool(self) -> None:
+        handler = EchoHandler()
+        middleware = ApprovalToolMiddleware(
+            HumanApproval(),
+            high_risk=True,
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="human-approval-allow",
+            handlers=[handler],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="y"),
+            patch("builtins.print"),
+        ):
+            outcome = await agent.dispatch("echo", {"text": "allowed"})
+
+        self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
+        self.assertEqual(handler.calls, 1)
+
+    async def test_bash_approval_middleware_allows_low_risk_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-low-risk",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with patch("builtins.input") as input_mock:
+            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
+
+        input_mock.assert_not_called()
+        self.assertFalse(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["stdout"], "ok")
+
+    async def test_bash_approval_middleware_rejects_risky_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-reject",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="n") as input_mock,
+            patch("builtins.print"),
+        ):
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "printf ok > /dev/null"},
+            )
+
+        input_mock.assert_called_once()
+        self.assertTrue(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "rejected")
+        self.assertEqual(outcome.data["tool"], "bash_run")
+
+    async def test_bash_approval_middleware_approves_risky_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-approve",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="y") as input_mock,
+            patch("builtins.print"),
+        ):
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "printf ok > /dev/null"},
+            )
+
+        input_mock.assert_called_once()
+        self.assertFalse(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["exit_code"], 0)
+
+    async def test_bash_approval_middleware_ignores_non_bash_tools(self) -> None:
+        handler = EchoHandler()
+        middleware = BashApprovalMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-ignore",
+            handlers=[handler],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with patch("builtins.input") as input_mock:
+            outcome = await agent.dispatch("echo", {"text": "allowed"})
+
+        input_mock.assert_not_called()
+        self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
+        self.assertEqual(handler.calls, 1)
 
     async def test_third_identical_tool_call_fails_before_execution(self) -> None:
         handler = EchoHandler()

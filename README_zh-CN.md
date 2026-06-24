@@ -137,7 +137,7 @@ BaseAgent
 ## 内置 Handler
 
 `BashHandler` 暴露 `bash_run`，用于执行有边界的 Bash 命令。它支持工作目录、
-超时、输出长度限制，并包含一个针对明显危险命令的小型黑名单。
+超时和输出长度限制。
 
 `GitDiffHandler` 暴露 `run_gitdiff`。它查看当前 Git 工作区变化，不会结束任务：
 
@@ -160,6 +160,30 @@ BaseAgent
 {
   "summary": "已创建 hello.py"
 }
+```
+
+## Tool Middleware
+
+`ToolMiddleware` 可在工具执行前做安全检查。框架不内置高低风险规则，业务
+可以继承 middleware 自行分类，也可以使用 `BashApprovalMiddleware` 为
+命中风险模式的 `bash_run` 增加 y/n 人工审批：
+
+```python
+from simagentplg import (
+    BaseAgent,
+    BashApprovalMiddleware,
+    BashHandler,
+    FinishHandler,
+    ModelConfig,
+)
+
+agent = BaseAgent(
+    ModelConfig.from_env(),
+    agent_id="coder",
+    handlers=[BashHandler(), FinishHandler()],
+    middlewares=[BashApprovalMiddleware()],
+    enable_tools=True,
+)
 ```
 
 ## 自定义工具 Handler
@@ -397,6 +421,7 @@ uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
 uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
+uv run python example/07_bash_approval.py
 ```
 
 ## 测试
@@ -407,8 +432,8 @@ uv run python example/06_skill.py
 uv run python -m unittest
 ```
 
-当前测试覆盖 Agent、Custom Handler、Finish 行为、Manager 锁和并发、
-Workflow，以及示例文件是否可导入。
+当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为、Manager
+锁和并发、Workflow，以及示例文件是否可导入。
 
 ## 公共 API
 
@@ -419,6 +444,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = REACT_LOOP_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
+    middlewares: Iterable[MiddleWare] | None = None,
     enable_tools: bool = False,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,

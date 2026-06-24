@@ -64,13 +64,13 @@ class ModelConfig:
         """Build a config from the environment used by SimAgentPlg 0.1.x."""
 
         load_dotenv()
-        model = os.getenv("CHAT_MODEL")
+        model = os.getenv("BASE_MODEL")
         api_key = os.getenv("MODEL_API_KEY")
         base_url = os.getenv("MODEL_URL")
 
         if not model or not api_key or not base_url:
             raise ValueError(
-                "CHAT_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
+                "BASE_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
             )
 
         try:
@@ -184,6 +184,11 @@ class BaseAgent:
                 await handler.startup()
                 started_handlers.append(handler)
             self._tool_routes = self._build_tool_routes()
+            self.logger.info(
+                "已装载 %d 个工具，注册工具: %s",
+                len(self.handlers),
+                ", ".join(name for name in sorted(self._build_tool_routes())),
+            )
             if self._skill_manager is not None:
                 await self._skill_manager.discover()
         except Exception:

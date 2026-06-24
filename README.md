@@ -13,7 +13,8 @@ local skill routing, and simple role-based multi-agent workflows.
 - OpenAI-compatible model configuration through `.env` or direct construction
 - Opt-in tool mode with explicit handler registration
 - Built-in `BashHandler` for bounded Bash execution
-- Built-in `FinishHandler` for explicit task completion and Git change reports
+- Built-in `GitDiffHandler` for Git working-tree inspection
+- Built-in `FinishHandler` for explicit task completion
 - `MethodToolHandler` for small custom Python tools
 - `AgentManager` with per-agent serialization and cross-agent concurrency
 - Linear `AgentWorkflow` for planner, executor, reviewer, and similar roles
@@ -88,20 +89,25 @@ Set `enable_tools=True` and pass handlers explicitly:
 ```python
 import json
 
-from simagentplg import BaseAgent, BashHandler, FinishHandler, ModelConfig
+from simagentplg import (
+    BaseAgent,
+    BashHandler,
+    FinishHandler,
+    GitDiffHandler,
+    ModelConfig,
+)
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="developer",
     system_prompt="Complete coding tasks using the available tools.",
-    handlers=[BashHandler(), FinishHandler()],
+    handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
     enable_tools=True,
 )
 
 result = await agent.runtime(task="Create hello.py that prints 'hello'.")
 report = json.loads(result)
 print(report["summary"])
-print(report["changes"])
 
 await agent.shutdown()
 ```
@@ -112,6 +118,8 @@ Tool-enabled agents expose only the handlers passed to `BaseAgent`:
 BaseAgent
   -> BashHandler
        -> bash_run
+  -> GitDiffHandler
+       -> run_gitdiff
   -> FinishHandler
        -> run_finish
   -> MethodToolHandler subclasses
@@ -133,25 +141,29 @@ Tool mode stops with an error when:
 working directory, timeout, output limit, and a small blacklist for obviously
 dangerous commands.
 
+`GitDiffHandler` exposes `run_gitdiff`. It inspects the current Git working
+tree and does not finish the task:
+
+```json
+{
+  "status": "success",
+  "mode": "status",
+  "command": "git status --short",
+  "output": "?? hello.py\n"
+}
+```
+
+Supported modes are `status` for `git status --short`, `stat` for
+`git diff --stat`, and `diff` for `git diff`.
+
 `FinishHandler` exposes `run_finish`. It returns a JSON result and exits the
 current `runtime()`:
 
 ```json
 {
-  "summary": "Created hello.py",
-  "changes": {
-    "available": true,
-    "repository": "/repo/root",
-    "added": ["hello.py"],
-    "modified": [],
-    "deleted": []
-  }
+  "summary": "Created hello.py"
 }
 ```
-
-The change report compares Git state at the beginning and end of the current
-task. `run_finish` does not commit, stage, or revert files. Outside a Git
-repository, the task can still finish with `changes.available` set to `false`.
 
 ## Custom Tool Handlers
 
@@ -428,13 +440,13 @@ await agent.shutdown()
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 `AgentManager`, workflow types, handler base classes, `MethodToolHandler`,
-`BashHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
+`BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
 `McpServerManager`, `SkillManager`, and default resource paths.
 
 ## Changes in 0.2.2
 
 - Added the sibling `FinishHandler` and built-in `run_finish` tool
-- Added per-task Git change reporting
+- Added the sibling `GitDiffHandler` and built-in `run_gitdiff` tool
 - Required explicit finishing-tool completion in tool mode
 - Added protection against three identical consecutive tool calls
 - Raised a clear error when tool mode exhausts `max_steps`

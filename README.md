@@ -2,27 +2,29 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.1 is a lightweight framework for stateful
-OpenAI-compatible agents, composable tool handlers, MCP integration, and
-role-based multi-agent workflows.
+SimAgentPlg 0.2.1 is a lightweight framework for building stateful
+OpenAI-compatible agents with composable tool handlers, optional MCP tools,
+local skill routing, and simple role-based multi-agent workflows.
 
 ## Features
 
-- Stateful `BaseAgent` with explicit `reset()` support
+- Stateful `BaseAgent` with conversation memory and explicit `reset()`
 - Immutable, required `agent_id` owned by each agent
-- Reusable local and external tool handlers
-- Built-in `BashHandler` for bounded command execution
-- Built-in `FinishHandler` for explicit completion and Git change reporting
+- OpenAI-compatible model configuration through `.env` or direct construction
+- Opt-in tool mode with explicit handler registration
+- Built-in `BashHandler` for bounded Bash execution
+- Built-in `FinishHandler` for explicit task completion and Git change reports
+- `MethodToolHandler` for small custom Python tools
 - `AgentManager` with per-agent serialization and cross-agent concurrency
-- Linear `AgentWorkflow` for planner, executor, reviewer, and other roles
-- Optional MCP tools and local skills
-- OpenAI-compatible model configuration
+- Linear `AgentWorkflow` for planner, executor, reviewer, and similar roles
+- Optional MCP integration through `McpToolHandler` and `McpServerManager`
+- Optional local skill discovery and routing through `SkillManager`
 
 Python 3.12 or newer is required.
 
 ## Installation
 
-Or install the local project with uv:
+Install the local project and dependencies with `uv`:
 
 ```bash
 uv sync
@@ -30,19 +32,21 @@ uv sync
 
 ## Configuration
 
-Create a `.env` file:
+Copy `.env_example` to `.env`, then fill in your model credentials:
 
 ```env
-CHAT_MODEL=deepseek-v4-flash
-SKILL_MODEL=deepseek-v4-flash
 MODEL_API_KEY=sk-xxxxxxxx
 MODEL_URL=https://api.deepseek.com
+CHAT_MODEL=deepseek-v4-flash
+SKILL_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
 
-`ModelConfig.from_env()` reads these variables. A configuration can also be
-constructed directly and shared by multiple agents:
+`ModelConfig.from_env()` reads `CHAT_MODEL`, `MODEL_API_KEY`, `MODEL_URL`,
+`LLM_TIMEOUT`, and `LLM_TEMPERATURE`.
+
+You can also construct a config directly:
 
 ```python
 from simagentplg import ModelConfig
@@ -58,8 +62,8 @@ config = ModelConfig(
 
 ### Plain Chat
 
-Tool execution is disabled by default. A plain agent keeps conversation
-history between `runtime()` calls:
+Tool execution is disabled by default. A plain agent keeps conversation history
+between `runtime()` calls:
 
 ```python
 from simagentplg import BaseAgent, ModelConfig
@@ -79,7 +83,7 @@ await agent.shutdown()
 
 ### Tool Mode
 
-Set `enable_tools=True` and pass explicit handlers to expose tools:
+Set `enable_tools=True` and pass handlers explicitly:
 
 ```python
 import json
@@ -94,9 +98,7 @@ agent = BaseAgent(
     enable_tools=True,
 )
 
-result = await agent.runtime(
-    task="Create hello.py that prints 'hello'."
-)
+result = await agent.runtime(task="Create hello.py that prints 'hello'.")
 report = json.loads(result)
 print(report["summary"])
 print(report["changes"])
@@ -112,16 +114,27 @@ BaseAgent
        -> bash_run
   -> FinishHandler
        -> run_finish
-  -> custom handlers
+  -> MethodToolHandler subclasses
   -> McpToolHandler
 ```
 
-`bash_run` executes a bounded Bash command. When the task is complete, the
-model must call `run_finish` with a non-empty summary. Returning ordinary text
-does not finish a tool task. A custom tool may also finish a task by returning
+In tool mode, ordinary text does not complete a task. The model must call a
+finishing tool, normally `run_finish`, or a custom tool must return
 `StepOutcome(..., should_exit=True)`.
 
-`run_finish` returns a JSON result and exits the current `runtime()`:
+Tool mode stops with an error when:
+
+- no finishing tool is called within `max_steps`
+- the same tool and arguments are requested three consecutive times
+
+## Built-In Handlers
+
+`BashHandler` exposes `bash_run` and executes a bounded Bash command. It has a
+working directory, timeout, output limit, and a small blacklist for obviously
+dangerous commands.
+
+`FinishHandler` exposes `run_finish`. It returns a JSON result and exits the
+current `runtime()`:
 
 ```json
 {
@@ -137,30 +150,18 @@ does not finish a tool task. A custom tool may also finish a task by returning
 ```
 
 The change report compares Git state at the beginning and end of the current
-task. Existing dirty files are omitted unless the task changes them again.
-`run_finish` does not commit, stage, or revert files. Outside a Git repository,
-the task can still finish with `changes.available` set to `false`.
-
-Tool mode stops with an error when:
-
-- no finishing tool is called within `max_steps`
-- the same tool and arguments are requested three consecutive times
+task. `run_finish` does not commit, stage, or revert files. Outside a Git
+repository, the task can still finish with `changes.available` set to `false`.
 
 ## Custom Tool Handlers
 
-`MethodToolHandler` maps a tool named `add` to an async method named
-`do_add`:
+`MethodToolHandler` maps a tool named `add` to an async method named `do_add`:
 
 ```python
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg import (
-    BaseAgent,
-    MethodToolHandler,
-    ModelConfig,
-    StepOutcome,
-)
+from simagentplg import BaseAgent, MethodToolHandler, ModelConfig, StepOutcome
 
 ADD_TOOL = {
     "type": "function",
@@ -183,10 +184,7 @@ class MathHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((ADD_TOOL,))
 
-    async def do_add(
-        self,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome:
+    async def do_add(self, arguments: Mapping[str, Any]) -> StepOutcome:
         return StepOutcome(
             {"value": arguments["left"] + arguments["right"]}
         )
@@ -201,8 +199,7 @@ agent = BaseAgent(
 ```
 
 Handler startup builds one routing table. Duplicate tool names are rejected
-instead of silently overriding another handler. A custom tool may also return
-`StepOutcome(data=..., should_exit=True)` to terminate the task.
+instead of silently overriding another handler.
 
 ## Agent Manager
 
@@ -244,12 +241,12 @@ Calls to different agents can run concurrently. `run_many()` returns failures
 as values so one failed agent does not cancel the others.
 
 `run_isolated(agent_id, task)` resets and executes an agent while holding the
-same per-agent lock. It is used by workflows to prevent implicit history from
-leaking between roles or steps.
+same per-agent lock. Workflows use it to avoid implicit history leaks between
+roles or steps.
 
 ## Role-Based Workflow
 
-`AgentWorkflow` executes different agent roles as a validated linear pipeline:
+`AgentWorkflow` executes agent roles as a validated linear pipeline:
 
 ```python
 from simagentplg import (
@@ -314,16 +311,10 @@ print(result.final_output)
 await manager.shutdown()
 ```
 
-Workflow templates support:
-
-- `{input}`: previous step output, or the original task for the first step
-- `{original_task}`: the task passed to `workflow.run()`
-- `{step_name}`: output from an already completed named step
-
-Unknown and forward references are rejected when the workflow is created.
-Steps stop at the first failure and `WorkflowExecutionError` preserves the
-failed step, original cause, and completed results. Version 0.2.1 supports
-linear steps only; branching, loops, and automatic retries are not included.
+Workflow templates support `{input}`, `{original_task}`, and outputs from
+completed named steps such as `{plan}` or `{execute}`. Unknown variables and
+forward references are rejected when the workflow is created. Version 0.2.1
+supports linear steps only.
 
 ## MCP Tools
 
@@ -335,7 +326,7 @@ from simagentplg import BaseAgent, McpToolHandler, ModelConfig
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="browser",
-    handlers=[McpToolHandler("my_project/mcp_config.json")],
+    handlers=[McpToolHandler("example/mcp_config.json")],
     enable_tools=True,
 )
 ```
@@ -344,14 +335,17 @@ Example MCP configuration:
 
 ```json
 {
-  "playwright": {
-    "command": "npx",
-    "args": ["@playwright/mcp@latest", "--headless"]
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--headless"]
+    }
   }
 }
 ```
 
-Only tools explicitly registered by `McpToolHandler` are routed to MCP.
+`McpServerManager` loads configured services, exposes tools with service-name
+prefixes, and lets one failed service avoid blocking the rest.
 
 ## Skills
 
@@ -362,20 +356,18 @@ from pathlib import Path
 
 from simagentplg import BaseAgent, ModelConfig
 
-skills_dir = Path("example/skills")
-
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
-    skills_dir=skills_dir,
+    skills_dir=Path("example/skills"),
     enable_tools=True,
 )
 ```
 
 `SkillManager` scans each child directory containing `SKILL.md`. The routing
-model selected by `SKILL_MODEL` chooses the matching skill from its YAML front
-matter. The skill definition and optional template and sample are then
-injected into the agent context:
+model selected by `SKILL_MODEL` chooses a skill from its YAML front matter.
+The selected `SKILL.md`, optional `template.md`, and optional
+`examples/sample.md` are injected into the agent context.
 
 ```text
 example/skills/
@@ -387,9 +379,7 @@ example/skills/
 ```
 
 Skills currently run through the tool-mode lifecycle, so set
-`enable_tools=True` and finish with `run_finish`. See
-[`example/06_skill.py`](example/06_skill.py) for a complete local skill
-example.
+`enable_tools=True` and finish with `run_finish`.
 
 ## Examples
 
@@ -404,6 +394,17 @@ uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
 ```
 
+## Testing
+
+Run the test suite from the repository root:
+
+```bash
+uv run python -m unittest
+```
+
+The current tests cover agents, custom handlers, finish behavior, manager
+locking/concurrency, workflows, and importable examples.
+
 ## Public API
 
 ```python
@@ -416,6 +417,7 @@ BaseAgent(
     enable_tools: bool = False,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
+    client: Any | None = None,
 )
 
 await agent.runtime(*, task: str) -> str | None
@@ -425,14 +427,15 @@ await agent.shutdown()
 ```
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
-`AgentManager`, workflow types, handler base classes, `BashHandler`,
-`FinishHandler`, `McpToolHandler`, and resource defaults.
+`AgentManager`, workflow types, handler base classes, `MethodToolHandler`,
+`BashHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
+`McpServerManager`, `SkillManager`, and default resource paths.
 
 ## Changes in 0.2.1
 
 - Added the sibling `FinishHandler` and built-in `run_finish` tool
 - Added per-task Git change reporting
-- Required explicit `run_finish` completion in tool mode
+- Required explicit finishing-tool completion in tool mode
 - Added protection against three identical consecutive tool calls
 - Raised a clear error when tool mode exhausts `max_steps`
 - Kept `BashHandler` focused exclusively on `bash_run`

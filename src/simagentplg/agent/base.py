@@ -434,14 +434,42 @@ class BaseAgent:
         ]
 
         for tool_call in function_calls:
+            tool_name = tool_call.function.name
+            raw_arguments = tool_call.function.arguments
             self._check_repeated_tool_call(
-                tool_call.function.name,
-                tool_call.function.arguments,
+                tool_name,
+                raw_arguments,
             )
-            outcome = await self._execute_tool_call(
-                tool_call.function.name,
-                tool_call.function.arguments,
+            self.logger.info(
+                "调用工具 %s 参数=%s",
+                tool_name,
+                self._summarize_for_log(raw_arguments),
             )
+            try:
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must be a JSON object")
+                outcome = await self.dispatch(tool_name, arguments)
+                self.logger.info(
+                    "工具 %s 完成 exit=%s 结果=%s",
+                    tool_name,
+                    outcome.should_exit,
+                    self._summarize_for_log(outcome.data),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "工具 %s 执行失败: %s 参数=%s",
+                    tool_name,
+                    exc,
+                    self._summarize_for_log(raw_arguments),
+                )
+                outcome = StepOutcome(
+                    {
+                        "status": "error",
+                        "tool": tool_name,
+                        "error": str(exc),
+                    }
+                )
             self.messages.append(
                 {
                     "role": "tool",
@@ -480,43 +508,6 @@ class BaseAgent:
             raise RuntimeError(
                 f"tool {tool_name!r} was called with the same arguments "
                 f"{MAX_REPEATED_TOOL_CALLS} consecutive times"
-            )
-
-    async def _execute_tool_call(
-        self,
-        tool_name: str,
-        raw_arguments: str,
-    ) -> StepOutcome:
-        self.logger.info(
-            "调用工具 %s 参数=%s",
-            tool_name,
-            self._summarize_for_log(raw_arguments),
-        )
-        try:
-            arguments = json.loads(raw_arguments)
-            if not isinstance(arguments, dict):
-                raise TypeError("tool arguments must be a JSON object")
-            outcome = await self.dispatch(tool_name, arguments)
-            self.logger.info(
-                "工具 %s 完成 exit=%s 结果=%s",
-                tool_name,
-                outcome.should_exit,
-                self._summarize_for_log(outcome.data),
-            )
-            return outcome
-        except Exception as exc:
-            self.logger.warning(
-                "工具 %s 执行失败: %s 参数=%s",
-                tool_name,
-                exc,
-                self._summarize_for_log(raw_arguments),
-            )
-            return StepOutcome(
-                {
-                    "status": "error",
-                    "tool": tool_name,
-                    "error": str(exc),
-                }
             )
 
     @staticmethod

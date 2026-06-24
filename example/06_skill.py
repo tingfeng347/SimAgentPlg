@@ -25,7 +25,7 @@ async def main() -> None:
     try:
         result = await agent.runtime(
             task=(
-                "Write release notes for SimAgentPlg 0.2.1. Changes: "
+                "Write release notes for SimAgentPlg 0.2.2. Changes: "
                 "added FinishHandler and run_finish, added Git change "
                 "reporting, and added repeated tool-call protection."
             )

@@ -34,27 +34,6 @@ BASH_TOOL: ToolSchema = {
     },
 }
 
-BASH_BLACKLIST = (
-    "rm ",
-    "rm\n",
-    "rm\t",
-    "rm(",
-    "rm;",
-    "rm\\",
-    "rm|",
-    "rm&",
-    "rm<",
-    "rm>",
-    "sudo ",
-    "mkfs.",
-    "dd if=",
-    ":(){ :|:& };:",
-    "> /dev/sda",
-    "/dev/null",
-    "chmod 777",
-)
-
-
 async def run_bash(
     code: str,
     *,
@@ -63,14 +42,6 @@ async def run_bash(
     max_output: int = 10_000,
 ) -> dict[str, Any]:
     """Execute Bash asynchronously and return a bounded structured result."""
-
-    for pattern in BASH_BLACKLIST:
-        if pattern in code:
-            return {
-                "status": "error",
-                "error": f"禁止执行危险命令: {pattern.strip()}",
-                "exit_code": -1,
-            }
 
     try:
         process = await asyncio.create_subprocess_exec(

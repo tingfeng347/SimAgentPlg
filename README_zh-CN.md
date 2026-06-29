@@ -13,7 +13,8 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill
 - 支持通过 `.env` 或直接构造使用 OpenAI 兼容模型配置
 - 工具模式默认关闭，启用后只暴露显式注册的 Handler
 - 内置 `BashHandler`，用于执行有边界的 Bash 命令
-- 内置 `FinishHandler`，用于明确结束任务并报告 Git 文件变化
+- 内置 `GitDiffHandler`，用于查看 Git 工作区变化
+- 内置 `FinishHandler`，用于明确结束任务
 - `MethodToolHandler` 用于快速定义小型 Python 自定义工具
 - `AgentManager` 支持同一 Agent 串行、不同 Agent 并发
 - 线性 `AgentWorkflow`，适合 planner、executor、reviewer 等角色
@@ -87,20 +88,25 @@ await agent.shutdown()
 ```python
 import json
 
-from simagentplg import BaseAgent, BashHandler, FinishHandler, ModelConfig
+from simagentplg import (
+    BaseAgent,
+    BashHandler,
+    FinishHandler,
+    GitDiffHandler,
+    ModelConfig,
+)
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="developer",
     system_prompt="使用可用工具完成编程任务。",
-    handlers=[BashHandler(), FinishHandler()],
+    handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
     enable_tools=True,
 )
 
 result = await agent.runtime(task="创建 hello.py，并输出 'hello'。")
 report = json.loads(result)
 print(report["summary"])
-print(report["changes"])
 
 await agent.shutdown()
 ```
@@ -111,6 +117,8 @@ await agent.shutdown()
 BaseAgent
   -> BashHandler
        -> bash_run
+  -> GitDiffHandler
+       -> run_gitdiff
   -> FinishHandler
        -> run_finish
   -> MethodToolHandler 子类
@@ -129,27 +137,54 @@ BaseAgent
 ## 内置 Handler
 
 `BashHandler` 暴露 `bash_run`，用于执行有边界的 Bash 命令。它支持工作目录、
-超时、输出长度限制，并包含一个针对明显危险命令的小型黑名单。
+超时和输出长度限制。
+
+`GitDiffHandler` 暴露 `run_gitdiff`。它查看当前 Git 工作区变化，不会结束任务：
+
+```json
+{
+  "status": "success",
+  "mode": "status",
+  "command": "git status --short",
+  "output": "?? hello.py\n"
+}
+```
+
+支持的模式包括：`status` 对应 `git status --short`，`stat` 对应
+`git diff --stat`，`diff` 对应 `git diff`。
 
 `FinishHandler` 暴露 `run_finish`。它返回 JSON 结果，并立即结束当前
 `runtime()`：
 
 ```json
 {
-  "summary": "已创建 hello.py",
-  "changes": {
-    "available": true,
-    "repository": "/repo/root",
-    "added": ["hello.py"],
-    "modified": [],
-    "deleted": []
-  }
+  "summary": "已创建 hello.py"
 }
 ```
 
-文件变化通过比较本次任务开始和结束时的 Git 状态得到。`run_finish` 不会提交、
-暂存或回滚文件。在非 Git 目录中仍然可以完成任务，此时 `changes.available`
-为 `false`。
+## Tool Middleware
+
+`ToolMiddleware` 可在工具执行前做安全检查。框架不内置高低风险规则，业务
+可以继承 middleware 自行分类，也可以使用 `BashApprovalMiddleware` 为
+命中风险模式的 `bash_run` 增加 y/n 人工审批：
+
+```python
+from simagentplg import (
+    BaseAgent,
+    BashApprovalMiddleware,
+    BashHandler,
+    FinishHandler,
+    ModelConfig,
+)
+
+agent = BaseAgent(
+    ModelConfig.from_env(),
+    agent_id="coder",
+    handlers=[BashHandler(), FinishHandler()],
+    middlewares=[BashApprovalMiddleware()],
+    enable_tools=True,
+)
+```
 
 ## 自定义工具 Handler
 
@@ -386,6 +421,7 @@ uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
 uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
+uv run python example/07_bash_approval.py
 ```
 
 ## 测试
@@ -396,8 +432,8 @@ uv run python example/06_skill.py
 uv run python -m unittest
 ```
 
-当前测试覆盖 Agent、Custom Handler、Finish 行为、Manager 锁和并发、
-Workflow，以及示例文件是否可导入。
+当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为、Manager
+锁和并发、Workflow，以及示例文件是否可导入。
 
 ## 公共 API
 
@@ -408,6 +444,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = REACT_LOOP_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
+    middlewares: Iterable[MiddleWare] | None = None,
     enable_tools: bool = False,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
@@ -422,13 +459,13 @@ await agent.shutdown()
 
 顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
 Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、
-`FinishHandler`、`McpToolHandler`、Handler 错误类型、`McpServerManager`、
-`SkillManager` 以及默认资源路径。
+`GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
+`McpServerManager`、`SkillManager` 以及默认资源路径。
 
 ## 0.2.2 版本变化
 
 - 新增与 `BashHandler` 同级的 `FinishHandler` 和内置 `run_finish` 工具
-- 新增单次任务范围内的 Git 文件变化报告
+- 新增与 `BashHandler` 同级的 `GitDiffHandler` 和内置 `run_gitdiff` 工具
 - 工具模式必须显式调用完成工具才算完成
 - 连续三次调用相同工具和参数时提前终止
 - 工具模式耗尽 `max_steps` 时抛出明确错误

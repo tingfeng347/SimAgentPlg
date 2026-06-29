@@ -9,13 +9,12 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
 
+from simagentplg.agent.middleware import MiddleWare
 from simagentplg.logger import get_logger
 from simagentplg.plugins.skill.skill_manager import SkillManager
 
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
-
-
 
 TOOL_COMPLETION_PROMPT = """
 工具模式下，只有调用一个会结束任务的工具才表示任务完成。
@@ -64,13 +63,13 @@ class ModelConfig:
         """Build a config from the environment used by SimAgentPlg 0.1.x."""
 
         load_dotenv()
-        model = os.getenv("CHAT_MODEL")
+        model = os.getenv("BASE_MODEL")
         api_key = os.getenv("MODEL_API_KEY")
         base_url = os.getenv("MODEL_URL")
 
         if not model or not api_key or not base_url:
             raise ValueError(
-                "CHAT_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
+                "BASE_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
             )
 
         try:
@@ -108,6 +107,7 @@ class BaseAgent:
         agent_id: str,
         system_prompt: str = REACT_LOOP_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
+        middlewares: Iterable[MiddleWare] | None = None,
         enable_tools: bool = False,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
@@ -129,6 +129,7 @@ class BaseAgent:
             timeout=self.config.timeout,
         )
         self.handlers = list(handlers or ())
+        self.middlewares = list(middlewares or ())
         self.messages: list[dict[str, Any]] = []
         self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
@@ -179,14 +180,32 @@ class BaseAgent:
             return
 
         started_handlers: list[BaseHandler] = []
+        started_middlewares: list[MiddleWare] = []
         try:
             for handler in self.handlers:
                 await handler.startup()
                 started_handlers.append(handler)
             self._tool_routes = self._build_tool_routes()
+            for middleware in self._enabled_middlewares():
+                await middleware.startup()
+                started_middlewares.append(middleware)
+            self.logger.info(
+                "已装载 %d 个工具，注册工具: %s",
+                len(self.handlers),
+                ", ".join(name for name in sorted(self._build_tool_routes())),
+            )
             if self._skill_manager is not None:
                 await self._skill_manager.discover()
         except Exception:
+            for middleware in reversed(started_middlewares):
+                try:
+                    await middleware.shutdown()
+                except Exception as shutdown_error:
+                    self.logger.warning(
+                        "Middleware %s 回滚关闭失败: %s",
+                        type(middleware).__name__,
+                        shutdown_error,
+                    )
             for handler in reversed(started_handlers):
                 try:
                     await handler.shutdown()
@@ -208,6 +227,11 @@ class BaseAgent:
             return
 
         errors: list[Exception] = []
+        for middleware in reversed(self._enabled_middlewares()):
+            try:
+                await middleware.shutdown()
+            except Exception as exc:
+                errors.append(exc)
         for handler in reversed(self.handlers):
             try:
                 await handler.shutdown()
@@ -240,6 +264,14 @@ class BaseAgent:
             raise KeyError(
                 f"unknown tool {tool_name!r}; available tools: {available}"
             ) from exc
+
+        middleware_outcome = await self._run_middleware_hook(
+            "before_tool_call",
+            tool_name,
+            arguments,
+        )
+        if middleware_outcome is not None:
+            return middleware_outcome
 
         return await handler.dispatch(tool_name, arguments)
 
@@ -300,6 +332,8 @@ class BaseAgent:
             await self.startup()
             for handler in self.handlers:
                 await handler.on_task_start()
+            for middleware in self._enabled_middlewares():
+                await middleware.on_task_start()
 
         self.messages.append({"role": "user", "content": task})
 
@@ -349,6 +383,33 @@ class BaseAgent:
                 routes[tool_name] = handler
         return routes
 
+    def _enabled_middlewares(self) -> list[MiddleWare]:
+        return [
+            middleware
+            for middleware in self.middlewares
+            if middleware.enabled
+        ]
+
+    async def _run_middleware_hook(
+        self,
+        hook_name: str,
+        *args: Any,
+    ) -> StepOutcome | None:
+        for middleware in self._enabled_middlewares():
+            hook = getattr(middleware, hook_name, None)
+            if hook is None:
+                continue
+            outcome = await hook(*args)
+            if outcome is None:
+                continue
+            if not isinstance(outcome, StepOutcome):
+                raise TypeError(
+                    f"{hook_name}() must return StepOutcome or None, "
+                    f"got {type(outcome).__name__}"
+                )
+            return outcome
+        return None
+
     async def _inject_skill_messages(self) -> None:
         if self._skill_manager is None:
             return
@@ -373,14 +434,42 @@ class BaseAgent:
         ]
 
         for tool_call in function_calls:
+            tool_name = tool_call.function.name
+            raw_arguments = tool_call.function.arguments
             self._check_repeated_tool_call(
-                tool_call.function.name,
-                tool_call.function.arguments,
+                tool_name,
+                raw_arguments,
             )
-            outcome = await self._execute_tool_call(
-                tool_call.function.name,
-                tool_call.function.arguments,
+            self.logger.info(
+                "调用工具 %s 参数=%s",
+                tool_name,
+                self._summarize_for_log(raw_arguments),
             )
+            try:
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must be a JSON object")
+                outcome = await self.dispatch(tool_name, arguments)
+                self.logger.info(
+                    "工具 %s 完成 exit=%s 结果=%s",
+                    tool_name,
+                    outcome.should_exit,
+                    self._summarize_for_log(outcome.data),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "工具 %s 执行失败: %s 参数=%s",
+                    tool_name,
+                    exc,
+                    self._summarize_for_log(raw_arguments),
+                )
+                outcome = StepOutcome(
+                    {
+                        "status": "error",
+                        "tool": tool_name,
+                        "error": str(exc),
+                    }
+                )
             self.messages.append(
                 {
                     "role": "tool",
@@ -419,43 +508,6 @@ class BaseAgent:
             raise RuntimeError(
                 f"tool {tool_name!r} was called with the same arguments "
                 f"{MAX_REPEATED_TOOL_CALLS} consecutive times"
-            )
-
-    async def _execute_tool_call(
-        self,
-        tool_name: str,
-        raw_arguments: str,
-    ) -> StepOutcome:
-        self.logger.info(
-            "调用工具 %s 参数=%s",
-            tool_name,
-            self._summarize_for_log(raw_arguments),
-        )
-        try:
-            arguments = json.loads(raw_arguments)
-            if not isinstance(arguments, dict):
-                raise TypeError("tool arguments must be a JSON object")
-            outcome = await self.dispatch(tool_name, arguments)
-            self.logger.info(
-                "工具 %s 完成 exit=%s 结果=%s",
-                tool_name,
-                outcome.should_exit,
-                self._summarize_for_log(outcome.data),
-            )
-            return outcome
-        except Exception as exc:
-            self.logger.warning(
-                "工具 %s 执行失败: %s 参数=%s",
-                tool_name,
-                exc,
-                self._summarize_for_log(raw_arguments),
-            )
-            return StepOutcome(
-                {
-                    "status": "error",
-                    "tool": tool_name,
-                    "error": str(exc),
-                }
             )
 
     @staticmethod

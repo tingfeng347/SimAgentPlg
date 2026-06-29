@@ -8,6 +8,7 @@ from simagentplg.handlers.base import (
 )
 from simagentplg.handlers.bash import BashHandler
 from simagentplg.handlers.finish import FinishHandler
+from simagentplg.handlers.gitdiff import GitDiffHandler
 from simagentplg.handlers.mcp import McpToolHandler
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "UnknownToolError",
     "BashHandler",
     "FinishHandler",
+    "GitDiffHandler",
     "McpToolHandler",
 ]

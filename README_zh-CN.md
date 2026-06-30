@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.2 是一个轻量级多智能体框架，用于构建有状态的
+SimAgentPlg 0.2.3 是一个轻量级多智能体框架，用于构建有状态的
 OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill 路由，
 以及简单的基于角色的多 Agent 工作流。
 
@@ -260,7 +260,7 @@ manager.register(
 
 results = await manager.run_many(
     {
-        "writer": "编写 0.2.2 版本说明。",
+        "writer": "编写 0.2.3 版本说明。",
         "reviewer": "审查本次发布的兼容性风险。",
     }
 )
@@ -344,7 +344,7 @@ await manager.shutdown()
 
 Workflow 模板支持 `{input}`、`{original_task}`，以及已经完成的命名步骤输出，
 例如 `{plan}` 或 `{execute}`。创建 Workflow 时会拒绝未知变量和对后续步骤
-的前向引用。0.2.2 版本只支持线性步骤。
+的前向引用。0.2.3 版本只支持线性步骤。
 
 ## MCP 工具
 
@@ -462,7 +462,7 @@ Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。
 
-## 0.2.2 版本变化
+## 0.2.3 版本变化
 
 - 新增与 `BashHandler` 同级的 `FinishHandler` 和内置 `run_finish` 工具
 - 新增与 `BashHandler` 同级的 `GitDiffHandler` 和内置 `run_gitdiff` 工具

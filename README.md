@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.2 is a lightweight framework for building stateful
+SimAgentPlg 0.2.3 is a lightweight framework for building stateful
 OpenAI-compatible agents with composable tool handlers, optional MCP tools,
 local skill routing, and simple role-based multi-agent workflows.
 
@@ -264,7 +264,7 @@ manager.register(
 
 results = await manager.run_many(
     {
-        "writer": "Write release notes for version 0.2.2.",
+        "writer": "Write release notes for version 0.2.3.",
         "reviewer": "Review the release for compatibility risks.",
     }
 )
@@ -349,7 +349,7 @@ await manager.shutdown()
 
 Workflow templates support `{input}`, `{original_task}`, and outputs from
 completed named steps such as `{plan}` or `{execute}`. Unknown variables and
-forward references are rejected when the workflow is created. Version 0.2.2
+forward references are rejected when the workflow is created. Version 0.2.3
 supports linear steps only.
 
 ## MCP Tools
@@ -469,7 +469,7 @@ The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 `BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
 `McpServerManager`, `SkillManager`, and default resource paths.
 
-## Changes in 0.2.2
+## Changes in 0.2.3
 
 - Added the sibling `FinishHandler` and built-in `run_finish` tool
 - Added the sibling `GitDiffHandler` and built-in `run_gitdiff` tool

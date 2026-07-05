@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg.agent.base import StepOutcome
+from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import MethodToolHandler, ToolSchema
 from simagentplg.logger import get_logger
 

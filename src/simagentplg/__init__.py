@@ -1,6 +1,6 @@
 """Composable stateful agents with tool handlers and MCP integration."""
 
-from simagentplg.agent.base import BaseAgent, ModelConfig, StepOutcome
+from simagentplg.agent.base import BaseAgent, ModelConfig
 from simagentplg.agent.manager import (
     AgentAlreadyExistsError,
     AgentManager,
@@ -14,6 +14,7 @@ from simagentplg.agent.middleware import (
     ToolMiddleware,
     format_tool_call_preview,
 )
+from simagentplg.agent.types import StepOutcome
 from simagentplg.agent.workflow import (
     AgentWorkflow,
     WorkflowExecutionError,

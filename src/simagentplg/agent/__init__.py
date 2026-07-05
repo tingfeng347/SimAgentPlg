@@ -1,6 +1,6 @@
 """Agent runtime and multi-agent coordination."""
 
-from simagentplg.agent.base import BaseAgent, ModelConfig, StepOutcome
+from simagentplg.agent.base import BaseAgent, ModelConfig
 from simagentplg.agent.manager import AgentManager
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
@@ -9,6 +9,7 @@ from simagentplg.agent.middleware import (
     ToolMiddleware,
     format_tool_call_preview,
 )
+from simagentplg.agent.types import StepOutcome
 from simagentplg.agent.workflow import (
     AgentWorkflow,
     WorkflowExecutionError,

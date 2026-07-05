@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-CN.md)
 
 SimAgentPlg 0.2.3 是一个轻量级多智能体框架，用于构建有状态的
-OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill 路由，
+OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill 索引，
 以及简单的基于角色的多 Agent 工作流。
 
 ## 功能特性
@@ -19,7 +19,7 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill
 - `AgentManager` 支持同一 Agent 串行、不同 Agent 并发
 - 线性 `AgentWorkflow`，适合 planner、executor、reviewer 等角色
 - 可选 MCP 集成：`McpToolHandler` 和 `McpServerManager`
-- 可选本地 Skill 发现和路由：`SkillManager`
+- 可选本地 Skill 发现、索引和按需加载：`SkillManager`
 
 需要 Python 3.12 或更高版本。
 
@@ -33,13 +33,12 @@ uv sync
 
 ## 配置
 
-复制 `.env_example` 为 `.env`，然后填写模型凭据：
+复制 `.env.example` 为 `.env`，然后填写模型凭据：
 
 ```env
 MODEL_API_KEY=sk-xxxxxxxx
 MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
-SKILL_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
@@ -384,19 +383,22 @@ Skill 是可选的提示词扩展，与工具 Handler 相互独立：
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, FinishHandler, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
+    handlers=[FinishHandler()],
     skills_dir=Path("example/skills"),
     enable_tools=True,
 )
 ```
 
-`SkillManager` 会扫描每个包含 `SKILL.md` 的子目录。`SKILL_MODEL` 指定的
-路由模型会根据 YAML front matter 选择匹配的 Skill。选中的 `SKILL.md`、
-可选 `template.md` 和可选 `examples/sample.md` 会被注入 Agent 上下文。
+`SkillManager` 会扫描每个包含 `SKILL.md` 的子目录，索引 Skill 名称和
+YAML front matter 中的描述，并把紧凑 metadata 注入模型上下文。完整
+`SKILL.md`、可选 `template.md` 和可选 `examples/sample.md` 会在模型调用
+内置 `load_skill` 工具时按需加载。用户也可以用 `$skill_name` 或
+`skill:skill_name` 强制指定 Skill。
 
 ```text
 example/skills/
@@ -407,8 +409,8 @@ example/skills/
       sample.md
 ```
 
-当前 Skill 通过工具模式生命周期运行，因此需要设置 `enable_tools=True`，
-并通过 `run_finish` 完成任务。
+Skill 上下文本身不要求工具模式。只有当任务需要通过 `run_finish` 结束时，
+才需要设置 `enable_tools=True` 并注册 `FinishHandler`。
 
 ## 示例
 

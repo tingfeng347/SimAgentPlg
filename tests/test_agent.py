@@ -1,6 +1,8 @@
 import json
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -360,6 +362,154 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(message.get("content") == "real task" for message in sent_messages)
         )
+
+    async def test_skill_metadata_is_injected_without_llm_router(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "This full instruction should load only on demand.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient([FakeMessage("ok")])
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-index",
+                skills_dir=skills_dir,
+                enable_tools=False,
+                client=client,
+            )
+
+            with patch.dict("os.environ", {}, clear=True):
+                result = await agent.runtime(task="Write release notes")
+
+        self.assertEqual(result, "ok")
+        sent_messages = client.completions.calls[0]["messages"]
+        joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
+        self.assertIn("Available skills:", joined)
+        self.assertIn("release_notes: Write user-facing release notes.", joined)
+        self.assertNotIn("This full instruction should load only on demand.", joined)
+
+    async def test_explicit_skill_name_loads_full_skill_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            examples_dir = skill_dir / "examples"
+            examples_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "FULL SKILL RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
+            (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
+            client = FakeClient([FakeMessage("ok")])
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-load",
+                skills_dir=skills_dir,
+                enable_tools=False,
+                client=client,
+            )
+
+            await agent.runtime(task="$release_notes Write release notes")
+
+        sent_messages = client.completions.calls[0]["messages"]
+        joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
+        self.assertIn('You are executing the local skill "release_notes".', joined)
+        self.assertIn("FULL SKILL RULES", joined)
+        self.assertIn("TEMPLATE BODY", joined)
+        self.assertIn("SAMPLE BODY", joined)
+
+    async def test_model_can_load_skill_with_internal_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "FULL SKILL RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient(
+                [
+                    FakeMessage(
+                        tool_calls=[
+                            FakeToolCall(
+                                id="skill-call",
+                                function=FakeFunction(
+                                    "load_skill",
+                                    '{"skill_name": "release_notes"}',
+                                ),
+                            )
+                        ]
+                    ),
+                    FakeMessage("release notes"),
+                ]
+            )
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-tool",
+                skills_dir=skills_dir,
+                enable_tools=False,
+                client=client,
+            )
+
+            result = await agent.runtime(task="Write release notes")
+
+        self.assertEqual(result, "release notes")
+        first_tools = client.completions.calls[0]["tools"]
+        self.assertEqual(
+            [tool["function"]["name"] for tool in first_tools],
+            ["load_skill"],
+        )
+        tool_message = next(
+            message
+            for message in agent.messages
+            if message.get("role") == "tool"
+        )
+        self.assertEqual(
+            json.loads(tool_message["content"])["skill_name"],
+            "release_notes",
+        )
+        second_messages = client.completions.calls[1]["messages"]
+        joined = "\n".join(
+            str(message.get("content", "")) for message in second_messages
+        )
+        self.assertIn('You are executing the local skill "release_notes".', joined)
+        self.assertIn("FULL SKILL RULES", joined)
 
     async def test_chat_json_requests_and_parses_json_object(self) -> None:
         client = FakeClient([FakeMessage('{"ok": true, "count": 2}')])

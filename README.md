@@ -4,7 +4,7 @@
 
 SimAgentPlg 0.2.3 is a lightweight framework for building stateful
 OpenAI-compatible agents with composable tool handlers, optional MCP tools,
-local skill routing, and simple role-based multi-agent workflows.
+local skill indexing, and simple role-based multi-agent workflows.
 
 ## Features
 
@@ -19,7 +19,7 @@ local skill routing, and simple role-based multi-agent workflows.
 - `AgentManager` with per-agent serialization and cross-agent concurrency
 - Linear `AgentWorkflow` for planner, executor, reviewer, and similar roles
 - Optional MCP integration through `McpToolHandler` and `McpServerManager`
-- Optional local skill discovery and routing through `SkillManager`
+- Optional local skill discovery, indexing, and on-demand loading through `SkillManager`
 
 Python 3.12 or newer is required.
 
@@ -33,13 +33,12 @@ uv sync
 
 ## Configuration
 
-Copy `.env_example` to `.env`, then fill in your model credentials:
+Copy `.env.example` to `.env`, then fill in your model credentials:
 
 ```env
 MODEL_API_KEY=sk-xxxxxxxx
 MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
-SKILL_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
@@ -390,20 +389,23 @@ Skills are optional prompt extensions and remain separate from tool handlers:
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, FinishHandler, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
+    handlers=[FinishHandler()],
     skills_dir=Path("example/skills"),
     enable_tools=True,
 )
 ```
 
-`SkillManager` scans each child directory containing `SKILL.md`. The routing
-model selected by `SKILL_MODEL` chooses a skill from its YAML front matter.
-The selected `SKILL.md`, optional `template.md`, and optional
-`examples/sample.md` are injected into the agent context.
+`SkillManager` scans each child directory containing `SKILL.md`, indexes the
+skill name and YAML front matter description, and injects compact skill
+metadata into the model context. The model can call the internal `load_skill`
+tool to load full `SKILL.md`, optional `template.md`, and optional
+`examples/sample.md` content on demand. Users can also force a skill with
+`$skill_name` or `skill:skill_name`.
 
 ```text
 example/skills/
@@ -414,8 +416,8 @@ example/skills/
       sample.md
 ```
 
-Skills currently run through the tool-mode lifecycle, so set
-`enable_tools=True` and finish with `run_finish`.
+Skill context itself does not require tool mode. Set `enable_tools=True` and
+register `FinishHandler` only when the task should finish with `run_finish`.
 
 ## Examples
 

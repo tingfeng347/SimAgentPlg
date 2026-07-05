@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from simagentplg.agent.base import StepOutcome
+from simagentplg.agent.types import StepOutcome
 
 
 
@@ -125,8 +124,6 @@ class BashApprovalMiddleware(ToolMiddleware):
         )
         if approved:
             return None
-
-        from simagentplg.agent.base import StepOutcome
 
         return StepOutcome(
             {

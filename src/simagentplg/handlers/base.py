@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from simagentplg.agent.base import StepOutcome
+from simagentplg.agent.types import StepOutcome
 
 ToolSchema = dict[str, Any]
 

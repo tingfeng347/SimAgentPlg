@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from simagentplg.agent.base import StepOutcome
+from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import BaseHandler, ToolSchema, UnknownToolError
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
 

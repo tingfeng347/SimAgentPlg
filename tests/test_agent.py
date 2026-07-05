@@ -229,6 +229,46 @@ class ApprovalToolMiddleware(ToolMiddleware):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_config_reads_chat_model_from_env(self) -> None:
+        with (
+            patch("simagentplg.agent.base.load_dotenv"),
+            patch.dict(
+                "os.environ",
+                {
+                    "CHAT_MODEL": "chat-model",
+                    "MODEL_API_KEY": "key",
+                    "MODEL_URL": "https://model.example",
+                    "LLM_TIMEOUT": "12",
+                    "LLM_TEMPERATURE": "0.2",
+                },
+                clear=True,
+            ),
+        ):
+            config = ModelConfig.from_env()
+
+        self.assertEqual(config.model, "chat-model")
+        self.assertEqual(config.api_key, "key")
+        self.assertEqual(config.base_url, "https://model.example")
+        self.assertEqual(config.timeout, 12)
+        self.assertEqual(config.temperature, 0.2)
+
+    async def test_model_config_accepts_legacy_base_model(self) -> None:
+        with (
+            patch("simagentplg.agent.base.load_dotenv"),
+            patch.dict(
+                "os.environ",
+                {
+                    "BASE_MODEL": "legacy-model",
+                    "MODEL_API_KEY": "key",
+                    "MODEL_URL": "https://model.example",
+                },
+                clear=True,
+            ),
+        ):
+            config = ModelConfig.from_env()
+
+        self.assertEqual(config.model, "legacy-model")
+
     async def test_agents_share_config_but_not_messages(self) -> None:
         first_client = FakeClient([FakeMessage("first")])
         second_client = FakeClient([FakeMessage("second")])
@@ -281,6 +321,44 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "system", "content": agent.system_prompt},
                 {"role": "user", "content": "seed"},
             ],
+        )
+
+    async def test_convert_to_llm_messages_can_filter_internal_context(self) -> None:
+        class FilteringAgent(BaseAgent):
+            def convert_to_llm_messages(
+                self,
+                messages: list[dict[str, Any]],
+            ) -> list[dict[str, Any]]:
+                return [
+                    dict(message)
+                    for message in messages
+                    if not message.get("exclude_from_llm")
+                ]
+
+        client = FakeClient([FakeMessage("visible")])
+        agent = FilteringAgent(
+            TEST_CONFIG,
+            agent_id="context",
+            enable_tools=False,
+            client=client,
+        )
+        agent.messages.append(
+            {
+                "role": "user",
+                "content": "internal note",
+                "exclude_from_llm": True,
+            }
+        )
+
+        result = await agent.runtime(task="real task")
+
+        self.assertEqual(result, "visible")
+        sent_messages = client.completions.calls[0]["messages"]
+        self.assertFalse(
+            any(message.get("content") == "internal note" for message in sent_messages)
+        )
+        self.assertTrue(
+            any(message.get("content") == "real task" for message in sent_messages)
         )
 
     async def test_chat_json_requests_and_parses_json_object(self) -> None:

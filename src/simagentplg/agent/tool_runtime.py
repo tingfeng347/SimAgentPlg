@@ -1,3 +1,4 @@
+import logging
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -29,12 +30,6 @@ class ToolHandler(Protocol):
     ) -> StepOutcome: ...
 
 
-class LoggerLike(Protocol):
-    def info(self, message: str, *args: Any) -> None: ...
-
-    def warning(self, message: str, *args: Any) -> None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class ToolCallResult:
     messages: tuple[dict[str, Any], ...]
@@ -49,7 +44,7 @@ class ToolRuntime:
         handlers: Iterable[ToolHandler],
         middlewares: Iterable[MiddleWare],
         *,
-        logger: LoggerLike,
+        logger: logging.Logger,
     ) -> None:
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)

@@ -25,23 +25,27 @@ from simagentplg.plugins.skill.skill_manager import (
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
 
-TOOL_COMPLETION_PROMPT = """
-工具模式下，只有调用一个会结束任务的工具才表示任务完成。
-完成所有操作后，必须单独调用当前任务指定的完成工具。
-不要用普通文本结束任务，也不要在完成后继续调用其他工具。
+DEFAULT_SYSTEM_PROMPT = "You are a helpful, concise assistant."
+
+TOOL_PROTOCOL_PROMPT = """
+You can call external tools when they are available.
+
+Tool protocol:
+- Use tool calls for actions that require a registered tool.
+- Wait for tool results before deciding the next action.
+- Do not repeat the same ineffective tool call.
+- In tool mode, plain text does not finish the task.
+- After completing all work, call the task's finishing tool.
 """.strip()
 
-REACT_LOOP_PROMPT = """
-你是一个有能力调用外部工具的智能助手。你必须严格遵循以下 ReAct 流程：
-
-1. Thought: 分析当前问题，规划下一步行动。
-2. Action: 调用一个工具来执行行动。
-重要规则：
-- 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
-- 工具执行结果会返回给你，请根据结果继续思考下一步。
-- 不要重复相同的无效操作。
-- 完成所有操作后，必须调用当前任务指定的完成工具来结束任务。
+TOOL_COMPLETION_RETRY_PROMPT = """
+Tool mode requires a finishing tool call to complete the task.
+If the work is complete, call the task's finishing tool now.
+Do not end with plain text.
 """.strip()
+
+REACT_LOOP_PROMPT = TOOL_PROTOCOL_PROMPT
+TOOL_COMPLETION_PROMPT = TOOL_COMPLETION_RETRY_PROMPT
 
 DEFAULT_MAX_STEPS = 20
 
@@ -106,10 +110,11 @@ class BaseAgent:
         config: ModelConfig | None = None,
         *,
         agent_id: str,
-        system_prompt: str = REACT_LOOP_PROMPT,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
         middlewares: Iterable[MiddleWare] | None = None,
         enable_tools: bool = False,
+        inject_tool_prompt: bool = True,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,
@@ -123,6 +128,7 @@ class BaseAgent:
         self.config = config or ModelConfig.from_env()
         self.system_prompt = system_prompt
         self.enable_tools = enable_tools
+        self.inject_tool_prompt = inject_tool_prompt
         self.max_steps = max_steps
         self.client = client or AsyncOpenAI(
             api_key=self.config.api_key,
@@ -162,10 +168,8 @@ class BaseAgent:
         """Reset conversation memory while preserving the agent identity."""
 
         self.messages = [{"role": "system", "content": self.system_prompt}]
-        if self.enable_tools and self.system_prompt != REACT_LOOP_PROMPT:
-            self.messages.append(
-                {"role": "system", "content": TOOL_COMPLETION_PROMPT}
-            )
+        if self.enable_tools and self.inject_tool_prompt:
+            self.messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
         if history:
             self.messages.extend(dict(message) for message in history)
         self._active_skill_name = None
@@ -301,11 +305,11 @@ class BaseAgent:
             if not message.tool_calls:
                 if not self.enable_tools and message.content:
                     return message.content
-                if self.enable_tools:
+                if self.enable_tools and self.inject_tool_prompt:
                     self.messages.append(
                         {
                             "role": "system",
-                            "content": TOOL_COMPLETION_PROMPT,
+                            "content": TOOL_COMPLETION_RETRY_PROMPT,
                         }
                     )
                 continue

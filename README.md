@@ -457,10 +457,11 @@ BaseAgent(
     config: ModelConfig | None = None,
     *,
     agent_id: str,
-    system_prompt: str = REACT_LOOP_PROMPT,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[MiddleWare] | None = None,
     enable_tools: bool = False,
+    inject_tool_prompt: bool = True,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,
@@ -471,6 +472,10 @@ agent.reset(history=None)
 await agent.startup()
 await agent.shutdown()
 ```
+
+When `enable_tools=True`, `BaseAgent` injects a separate tool protocol system
+message by default. Set `inject_tool_prompt=False` only when your custom
+`system_prompt` fully defines the tool-use and finishing contract.
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 `AgentManager`, workflow types, handler base classes, `MethodToolHandler`,

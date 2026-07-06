@@ -20,6 +20,11 @@ from simagentplg import (
     ToolMiddleware,
     format_tool_call_preview,
 )
+from simagentplg.agent.base import (
+    DEFAULT_SYSTEM_PROMPT,
+    TOOL_COMPLETION_RETRY_PROMPT,
+    TOOL_PROTOCOL_PROMPT,
+)
 
 TEST_CONFIG = ModelConfig(
     model="test-model",
@@ -323,6 +328,75 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "system", "content": agent.system_prompt},
                 {"role": "user", "content": "seed"},
             ],
+        )
+
+    async def test_default_system_prompt_is_plain_chat_prompt(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="default-prompt",
+            enable_tools=False,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(agent.system_prompt, DEFAULT_SYSTEM_PROMPT)
+        self.assertEqual(
+            agent.messages,
+            [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}],
+        )
+
+    async def test_tool_mode_injects_tool_protocol_explicitly(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tool-protocol",
+            system_prompt="You are a custom coding agent.",
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            agent.messages,
+            [
+                {"role": "system", "content": "You are a custom coding agent."},
+                {"role": "system", "content": TOOL_PROTOCOL_PROMPT},
+            ],
+        )
+
+    async def test_tool_protocol_injection_can_be_disabled(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tool-protocol-disabled",
+            system_prompt="I manage my own tool protocol.",
+            enable_tools=True,
+            inject_tool_prompt=False,
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            agent.messages,
+            [
+                {"role": "system", "content": "I manage my own tool protocol."},
+            ],
+        )
+
+    async def test_disabled_tool_prompt_does_not_add_retry_prompt(self) -> None:
+        client = FakeClient([FakeMessage("plain text"), FakeMessage(None)])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tool-retry-disabled",
+            enable_tools=True,
+            inject_tool_prompt=False,
+            max_steps=2,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
+            await agent.runtime(task="finish without prompt injection")
+
+        self.assertFalse(
+            any(
+                message.get("content") == TOOL_COMPLETION_RETRY_PROMPT
+                for message in agent.messages
+            )
         )
 
     async def test_convert_to_llm_messages_can_filter_internal_context(self) -> None:
@@ -739,7 +813,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 message.get("role") == "system"
-                and "完成工具" in message.get("content", "")
+                and message.get("content") == TOOL_COMPLETION_RETRY_PROMPT
                 for message in second_messages
             )
         )
@@ -1043,7 +1117,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
         self.assertEqual(handler.calls, 1)
 
-    async def test_bash_approval_middleware_reviews_every_bash_run_by_default(self) -> None:
+    async def test_bash_approval_middleware_reviews_unlisted_bash_run_by_default(self) -> None:
         middleware = BashApprovalMiddleware()
         agent = BaseAgent(
             TEST_CONFIG,
@@ -1063,7 +1137,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         input_mock.assert_called_once()
         preview = print_mock.call_args_list[0].args[0]
         self.assertIn("Review:", preview)
-        self.assertIn("every bash_run", preview)
+        self.assertIn("safe command allowlist", preview)
         self.assertFalse(outcome.should_exit)
         self.assertEqual(outcome.data["status"], "success")
         self.assertEqual(outcome.data["stdout"], "ok")

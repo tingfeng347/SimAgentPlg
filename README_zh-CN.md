@@ -449,10 +449,11 @@ BaseAgent(
     config: ModelConfig | None = None,
     *,
     agent_id: str,
-    system_prompt: str = REACT_LOOP_PROMPT,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[MiddleWare] | None = None,
     enable_tools: bool = False,
+    inject_tool_prompt: bool = True,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,
@@ -463,6 +464,10 @@ agent.reset(history=None)
 await agent.startup()
 await agent.shutdown()
 ```
+
+当 `enable_tools=True` 时，`BaseAgent` 默认会额外注入一条工具协议
+system message。只有在自定义 `system_prompt` 已经完整定义工具调用和完成
+约定时，才建议设置 `inject_tool_prompt=False`。
 
 顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
 Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、

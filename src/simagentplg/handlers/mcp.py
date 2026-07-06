@@ -7,7 +7,7 @@ from simagentplg.handlers.base import BaseHandler, ToolSchema, UnknownToolError
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
 
 
-class McpManagerProtocol(Protocol):
+class _McpManager(Protocol):
     async def startup(self) -> None: ...
 
     async def shutdown(self) -> None: ...
@@ -28,7 +28,7 @@ class McpToolHandler(BaseHandler):
         self,
         config_path: str | Path | None = None,
         *,
-        manager: McpManagerProtocol | None = None,
+        manager: _McpManager | None = None,
     ) -> None:
         self.manager = manager or McpServerManager(
             Path(config_path) if config_path is not None else None

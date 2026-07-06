@@ -1,33 +1,14 @@
 import logging
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from simagentplg.agent.middleware import MiddleWare
 from simagentplg.agent.types import StepOutcome
+from simagentplg.handlers.base import BaseHandler
 
 MAX_REPEATED_TOOL_CALLS = 3
-
-
-class ToolHandler(Protocol):
-    @property
-    def tools(self) -> Sequence[dict[str, Any]]: ...
-
-    @property
-    def tool_names(self) -> tuple[str, ...]: ...
-
-    async def startup(self) -> None: ...
-
-    async def shutdown(self) -> None: ...
-
-    async def on_task_start(self) -> None: ...
-
-    async def dispatch(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +22,7 @@ class ToolRuntime:
 
     def __init__(
         self,
-        handlers: Iterable[ToolHandler],
+        handlers: Iterable[BaseHandler],
         middlewares: Iterable[MiddleWare],
         *,
         logger: logging.Logger,
@@ -49,7 +30,7 @@ class ToolRuntime:
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)
         self.logger = logger
-        self._tool_routes: dict[str, ToolHandler] = {}
+        self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
         self._last_tool_signature: tuple[str, str] | None = None
         self._repeated_tool_calls = 0
@@ -70,7 +51,7 @@ class ToolRuntime:
         if self._started:
             return
 
-        started_handlers: list[ToolHandler] = []
+        started_handlers: list[BaseHandler] = []
         started_middlewares: list[MiddleWare] = []
         try:
             for handler in self.handlers:
@@ -224,8 +205,8 @@ class ToolRuntime:
             return ToolCallResult((message,), exit_value=serialized)
         return ToolCallResult((message,))
 
-    def _build_tool_routes(self) -> dict[str, ToolHandler]:
-        routes: dict[str, ToolHandler] = {}
+    def _build_tool_routes(self) -> dict[str, BaseHandler]:
+        routes: dict[str, BaseHandler] = {}
         for handler in self.handlers:
             for tool_name in handler.tool_names:
                 if tool_name in routes:

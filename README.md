@@ -4,7 +4,7 @@
 
 SimAgentPlg 0.2.3 is a lightweight framework for building stateful
 OpenAI-compatible agents with composable tool handlers, optional MCP tools,
-local skill indexing, and simple role-based multi-agent workflows.
+and local skill indexing.
 
 ## Features
 
@@ -17,7 +17,6 @@ local skill indexing, and simple role-based multi-agent workflows.
 - Built-in `FinishHandler` for explicit task completion
 - `MethodToolHandler` for small custom Python tools
 - `AgentManager` with per-agent serialization and cross-agent concurrency
-- Linear `AgentWorkflow` for planner, executor, reviewer, and similar roles
 - Optional MCP integration through `McpToolHandler` and `McpServerManager`
 - Optional local skill discovery, indexing, and on-demand loading through `SkillManager`
 
@@ -246,7 +245,6 @@ Each agent owns its identity, so registration does not repeat the ID:
 
 ```python
 from simagentplg import AgentManager, BaseAgent, ModelConfig
-from simagentplg import BashHandler, FinishHandler, GitDiffHandler
 
 config = ModelConfig.from_env()
 manager = AgentManager()
@@ -279,82 +277,6 @@ await manager.shutdown()
 Calls to the same agent are serialized because they share message history.
 Calls to different agents can run concurrently. `run_many()` returns failures
 as values so one failed agent does not cancel the others.
-
-`run_isolated(agent_id, task)` resets and executes an agent while holding the
-same per-agent lock. Workflows use it to avoid implicit history leaks between
-roles or steps.
-
-## Role-Based Workflow
-
-`AgentWorkflow` executes agent roles as a validated linear pipeline:
-
-```python
-from simagentplg import (
-    AgentManager,
-    AgentWorkflow,
-    BaseAgent,
-    ModelConfig,
-    WorkflowStep,
-)
-
-config = ModelConfig.from_env()
-manager = AgentManager()
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="planner",
-        system_prompt="Create concise implementation plans.",
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="executor",
-        system_prompt="Execute the plan using tools.",
-        handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="reviewer",
-        system_prompt="Review completed work for correctness and risk.",
-    )
-)
-
-workflow = AgentWorkflow(
-    manager,
-    [
-        WorkflowStep(
-            name="plan",
-            agent_id="planner",
-            prompt="Plan this task:\n{input}",
-        ),
-        WorkflowStep(
-            name="execute",
-            agent_id="executor",
-            prompt=(
-                "Original task:\n{original_task}\n\n"
-                "Execute this plan:\n{input}"
-            ),
-        ),
-        WorkflowStep(
-            name="review",
-            agent_id="reviewer",
-            prompt="Review the execution result:\n{execute}",
-        ),
-    ],
-)
-
-result = await workflow.run("Implement user login")
-print(result.final_output)
-await manager.shutdown()
-```
-
-Workflow templates support `{input}`, `{original_task}`, and outputs from
-completed named steps such as `{plan}` or `{execute}`. Unknown variables and
-forward references are rejected when the workflow is created. Version 0.2.3
-supports linear steps only.
 
 ## MCP Tools
 
@@ -431,7 +353,6 @@ uv run python example/01_stateful_chat.py
 uv run python example/02_custom_tool.py
 uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
-uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
 uv run python example/07_bash_approval.py
 ```
@@ -445,7 +366,7 @@ uv run python -m unittest
 ```
 
 The current tests cover agents, custom handlers, tool middleware, finish
-behavior, manager locking/concurrency, workflows, and importable examples.
+behavior, manager locking/concurrency, and importable examples.
 
 ## Public API
 
@@ -474,7 +395,7 @@ plain chat; `skills_dir` can still expose the internal `load_skill` context
 tool without requiring a finishing tool.
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
-`AgentManager`, workflow types, handler base classes, `MethodToolHandler`,
+`AgentManager`, handler base classes, `MethodToolHandler`,
 `BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
 `McpServerManager`, `SkillManager`, and default resource paths.
 

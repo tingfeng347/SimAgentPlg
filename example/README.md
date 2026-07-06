@@ -19,7 +19,6 @@ register the agent object directly with `manager.register(agent)`.
 - `02_custom_tool.py`: a custom atomic tool with `MethodToolHandler`
 - `03_multi_agent.py`: concurrent tasks coordinated by `AgentManager`
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
-- `05_role_workflow.py`: planner, executor, and reviewer in a linear workflow
 - `06_skill.py`: local skill discovery, indexing, template, and sample injection
 - `07_bash_approval.py`: deterministic `BashApprovalMiddleware` y/n approval
 

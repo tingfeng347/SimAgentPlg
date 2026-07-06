@@ -3,8 +3,8 @@
 [English](README.md) | [简体中文](README_zh-CN.md)
 
 SimAgentPlg 0.2.3 是一个轻量级多智能体框架，用于构建有状态的
-OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill 索引，
-以及简单的基于角色的多 Agent 工作流。
+OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地 Skill
+发现、索引和按需加载。
 
 ## 功能特性
 
@@ -17,7 +17,6 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill
 - 内置 `FinishHandler`，用于明确结束任务
 - `MethodToolHandler` 用于快速定义小型 Python 自定义工具
 - `AgentManager` 支持同一 Agent 串行、不同 Agent 并发
-- 线性 `AgentWorkflow`，适合 planner、executor、reviewer 等角色
 - 可选 MCP 集成：`McpToolHandler` 和 `McpServerManager`
 - 可选本地 Skill 发现、索引和按需加载：`SkillManager`
 
@@ -241,7 +240,6 @@ Handler 启动时会创建统一的工具路由表。重复工具名会立即报
 
 ```python
 from simagentplg import AgentManager, BaseAgent, ModelConfig
-from simagentplg import BashHandler, FinishHandler, GitDiffHandler
 
 config = ModelConfig.from_env()
 manager = AgentManager()
@@ -274,80 +272,6 @@ await manager.shutdown()
 同一个 Agent 的调用会串行执行，因为它们共享同一份消息历史。不同 Agent
 之间可以并发执行。`run_many()` 会将异常作为对应任务的结果返回，因此一个
 Agent 失败不会取消其他 Agent。
-
-`run_isolated(agent_id, task)` 会在持有该 Agent 锁的期间执行 `reset()` 和
-任务。Workflow 使用它来避免角色或步骤之间产生隐式历史依赖。
-
-## 多角色工作流
-
-`AgentWorkflow` 可以将不同角色组织为经过校验的线性流水线：
-
-```python
-from simagentplg import (
-    AgentManager,
-    AgentWorkflow,
-    BaseAgent,
-    ModelConfig,
-    WorkflowStep,
-)
-
-config = ModelConfig.from_env()
-manager = AgentManager()
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="planner",
-        system_prompt="创建简洁且可执行的实现方案。",
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="executor",
-        system_prompt="使用工具执行给定方案。",
-        handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="reviewer",
-        system_prompt="审查执行结果的正确性和风险。",
-    )
-)
-
-workflow = AgentWorkflow(
-    manager,
-    [
-        WorkflowStep(
-            name="plan",
-            agent_id="planner",
-            prompt="规划以下任务：\n{input}",
-        ),
-        WorkflowStep(
-            name="execute",
-            agent_id="executor",
-            prompt=(
-                "原始任务：\n{original_task}\n\n"
-                "执行以下方案：\n{input}"
-            ),
-        ),
-        WorkflowStep(
-            name="review",
-            agent_id="reviewer",
-            prompt="审查以下执行结果：\n{execute}",
-        ),
-    ],
-)
-
-result = await workflow.run("实现用户登录")
-print(result.final_output)
-await manager.shutdown()
-```
-
-Workflow 模板支持 `{input}`、`{original_task}`，以及已经完成的命名步骤输出，
-例如 `{plan}` 或 `{execute}`。创建 Workflow 时会拒绝未知变量和对后续步骤
-的前向引用。0.2.3 版本只支持线性步骤。
 
 ## MCP 工具
 
@@ -423,7 +347,6 @@ uv run python example/01_stateful_chat.py
 uv run python example/02_custom_tool.py
 uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
-uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
 uv run python example/07_bash_approval.py
 ```
@@ -437,7 +360,7 @@ uv run python -m unittest
 ```
 
 当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为、Manager
-锁和并发、Workflow，以及示例文件是否可导入。
+锁和并发，以及示例文件是否可导入。
 
 ## 公共 API
 
@@ -465,7 +388,7 @@ await agent.shutdown()
 暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
 
 顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
-Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、
+Handler 基类、`MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。
 

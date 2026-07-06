@@ -166,9 +166,9 @@ current `runtime()`:
 ## Tool Middleware
 
 `ToolMiddleware` can inspect tool calls before execution. The framework does
-not define global risk levels; applications can write their own middleware or
-use `BashApprovalMiddleware` to require y/n approval only when `bash_run`
-matches risky command patterns:
+not define global risk levels; applications can write their own middleware.
+`BashApprovalMiddleware` is an approval gate, not a shell sandbox or security
+boundary. By default, every `bash_run` call requires y/n approval:
 
 ```python
 from simagentplg import (
@@ -187,6 +187,12 @@ agent = BaseAgent(
     enable_tools=True,
 )
 ```
+
+To reduce prompts, `approval_policy="unless_safe"` skips approval only for a
+small allowlist of simple read-only commands such as `pwd`, `ls`, `git status`,
+`git diff`, `git log`, `rg`, `sed -n`, `cat`, and Python unittest invocations.
+Anything outside that allowlist still requires approval. `approval_policy="never"`
+disables this approval gate explicitly.
 
 ## Custom Tool Handlers
 

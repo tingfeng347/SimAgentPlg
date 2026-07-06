@@ -163,9 +163,9 @@ BaseAgent
 
 ## Tool Middleware
 
-`ToolMiddleware` 可在工具执行前做安全检查。框架不内置高低风险规则，业务
-可以继承 middleware 自行分类，也可以使用 `BashApprovalMiddleware` 为
-命中风险模式的 `bash_run` 增加 y/n 人工审批：
+`ToolMiddleware` 可在工具执行前做检查。框架不内置高低风险规则，业务
+可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
+不是 shell 沙箱或安全边界。默认情况下，每个 `bash_run` 都需要 y/n 审批：
 
 ```python
 from simagentplg import (
@@ -184,6 +184,11 @@ agent = BaseAgent(
     enable_tools=True,
 )
 ```
+
+如果想减少弹窗，可以显式设置 `approval_policy="unless_safe"`：只有少量
+明确的只读命令会跳过审批，例如 `pwd`、`ls`、`git status`、`git diff`、
+`git log`、`rg`、`sed -n`、`cat` 和 Python unittest 调用。allowlist 之外
+的命令仍然需要审批。`approval_policy="never"` 会显式关闭这一审批门。
 
 ## 自定义工具 Handler
 

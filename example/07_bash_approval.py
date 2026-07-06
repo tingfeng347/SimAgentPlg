@@ -1,4 +1,4 @@
-"""Trigger BashApprovalMiddleware with a deterministic bash_run call."""
+"""Trigger BashApprovalMiddleware with a deterministic bash_run approval."""
 
 import asyncio
 import json

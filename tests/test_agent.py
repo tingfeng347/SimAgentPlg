@@ -1043,11 +1043,36 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
         self.assertEqual(handler.calls, 1)
 
-    async def test_bash_approval_middleware_allows_low_risk_bash_run(self) -> None:
+    async def test_bash_approval_middleware_reviews_every_bash_run_by_default(self) -> None:
         middleware = BashApprovalMiddleware()
         agent = BaseAgent(
             TEST_CONFIG,
-            agent_id="bash-approval-low-risk",
+            agent_id="bash-approval-default",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="y") as input_mock,
+            patch("builtins.print") as print_mock,
+        ):
+            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
+
+        input_mock.assert_called_once()
+        preview = print_mock.call_args_list[0].args[0]
+        self.assertIn("Review:", preview)
+        self.assertIn("every bash_run", preview)
+        self.assertFalse(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["stdout"], "ok")
+
+    async def test_bash_approval_middleware_can_skip_review_explicitly(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="never")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-never",
             handlers=[BashHandler()],
             middlewares=[middleware],
             enable_tools=True,
@@ -1062,8 +1087,76 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data["status"], "success")
         self.assertEqual(outcome.data["stdout"], "ok")
 
-    async def test_bash_approval_middleware_rejects_risky_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware()
+    async def test_bash_approval_safe_policy_skips_allowlisted_command(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-safe",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with patch("builtins.input") as input_mock:
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "git status --short"},
+            )
+
+        input_mock.assert_not_called()
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["exit_code"], 0)
+
+    async def test_bash_approval_safe_policy_reviews_unlisted_command(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-unlisted",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="n") as input_mock,
+            patch("builtins.print") as print_mock,
+        ):
+            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
+
+        input_mock.assert_called_once()
+        preview = print_mock.call_args_list[0].args[0]
+        self.assertIn("safe command allowlist", preview)
+        self.assertTrue(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "rejected")
+
+    async def test_bash_approval_safe_policy_reviews_shell_redirection(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-dev-null",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="n") as input_mock,
+            patch("builtins.print"),
+        ):
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "git status --short > /dev/null"},
+            )
+
+        input_mock.assert_called_once()
+        self.assertTrue(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "rejected")
+
+    async def test_bash_approval_middleware_rejects_legacy_hint_policy_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="on_review_hint")
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="bash-approval-reject",
@@ -1079,7 +1172,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await agent.dispatch(
                 "bash_run",
-                {"code": "printf ok > /dev/null"},
+                {"code": "rm -rf build"},
             )
 
         input_mock.assert_called_once()
@@ -1087,8 +1180,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data["status"], "rejected")
         self.assertEqual(outcome.data["tool"], "bash_run")
 
-    async def test_bash_approval_middleware_approves_risky_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware()
+    async def test_bash_approval_middleware_approves_unlisted_safe_policy_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="bash-approval-approve",
@@ -1104,7 +1197,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await agent.dispatch(
                 "bash_run",
-                {"code": "printf ok > /dev/null"},
+                {"code": "rm -rf build"},
             )
 
         input_mock.assert_called_once()

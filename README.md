@@ -11,7 +11,7 @@ local skill indexing, and simple role-based multi-agent workflows.
 - Stateful `BaseAgent` with conversation memory and explicit `reset()`
 - Immutable, required `agent_id` owned by each agent
 - OpenAI-compatible model configuration through `.env` or direct construction
-- Opt-in tool mode with explicit handler registration
+- Handler-driven tool execution with no separate tool-mode switch
 - Built-in `BashHandler` for bounded Bash execution
 - Built-in `GitDiffHandler` for Git working-tree inspection
 - Built-in `FinishHandler` for explicit task completion
@@ -83,7 +83,7 @@ await agent.shutdown()
 
 ### Tool Mode
 
-Set `enable_tools=True` and pass handlers explicitly:
+Pass handlers explicitly to enable tool execution:
 
 ```python
 import json
@@ -101,7 +101,6 @@ agent = BaseAgent(
     agent_id="developer",
     system_prompt="Complete coding tasks using the available tools.",
     handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-    enable_tools=True,
 )
 
 result = await agent.runtime(task="Create hello.py that prints 'hello'.")
@@ -111,7 +110,7 @@ print(report["summary"])
 await agent.shutdown()
 ```
 
-Tool-enabled agents expose only the handlers passed to `BaseAgent`:
+Agents expose only the handlers passed to `BaseAgent`:
 
 ```text
 BaseAgent
@@ -168,7 +167,8 @@ current `runtime()`:
 `ToolMiddleware` can inspect tool calls before execution. The framework does
 not define global risk levels; applications can write their own middleware.
 `BashApprovalMiddleware` is an approval gate, not a shell sandbox or security
-boundary. By default, every `bash_run` call requires y/n approval:
+boundary. By default, commands outside a small safe allowlist require y/n
+approval:
 
 ```python
 from simagentplg import (
@@ -184,15 +184,14 @@ agent = BaseAgent(
     agent_id="coder",
     handlers=[BashHandler(), FinishHandler()],
     middlewares=[BashApprovalMiddleware()],
-    enable_tools=True,
 )
 ```
 
-To reduce prompts, `approval_policy="unless_safe"` skips approval only for a
-small allowlist of simple read-only commands such as `pwd`, `ls`, `git status`,
-`git diff`, `git log`, `rg`, `sed -n`, `cat`, and Python unittest invocations.
-Anything outside that allowlist still requires approval. `approval_policy="never"`
-disables this approval gate explicitly.
+The default `approval_policy="unless_safe"` skips approval only for simple
+read-only commands such as `pwd`, `ls`, `git status`, `git diff`, `git log`,
+`rg`, `sed -n`, `cat`, and Python unittest invocations. Use
+`approval_policy="always"` to review every `bash_run` command.
+`approval_policy="never"` disables this approval gate explicitly.
 
 ## Custom Tool Handlers
 
@@ -235,7 +234,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="calculator",
     handlers=[MathHandler()],
-    enable_tools=True,
 )
 ```
 
@@ -248,6 +246,7 @@ Each agent owns its identity, so registration does not repeat the ID:
 
 ```python
 from simagentplg import AgentManager, BaseAgent, ModelConfig
+from simagentplg import BashHandler, FinishHandler, GitDiffHandler
 
 config = ModelConfig.from_env()
 manager = AgentManager()
@@ -312,7 +311,7 @@ manager.register(
         config=config,
         agent_id="executor",
         system_prompt="Execute the plan using tools.",
-        enable_tools=True,
+        handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
     )
 )
 manager.register(
@@ -368,7 +367,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="browser",
     handlers=[McpToolHandler("example/mcp_config.json")],
-    enable_tools=True,
 )
 ```
 
@@ -402,7 +400,6 @@ agent = BaseAgent(
     agent_id="skilled-agent",
     handlers=[FinishHandler()],
     skills_dir=Path("example/skills"),
-    enable_tools=True,
 )
 ```
 
@@ -422,8 +419,8 @@ example/skills/
       sample.md
 ```
 
-Skill context itself does not require tool mode. Set `enable_tools=True` and
-register `FinishHandler` only when the task should finish with `run_finish`.
+Skill context itself does not require handler tools. Register `FinishHandler`
+only when the task should finish with `run_finish`.
 
 ## Examples
 
@@ -460,8 +457,6 @@ BaseAgent(
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[MiddleWare] | None = None,
-    enable_tools: bool = False,
-    inject_tool_prompt: bool = True,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,
@@ -473,9 +468,10 @@ await agent.startup()
 await agent.shutdown()
 ```
 
-When `enable_tools=True`, `BaseAgent` injects a separate tool protocol system
-message by default. Set `inject_tool_prompt=False` only when your custom
-`system_prompt` fully defines the tool-use and finishing contract.
+Passing handlers puts `BaseAgent` in tool execution mode and injects the
+runtime's internal tool protocol system message. Without handlers, the agent is
+plain chat; `skills_dir` can still expose the internal `load_skill` context
+tool without requiring a finishing tool.
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
 `AgentManager`, workflow types, handler base classes, `MethodToolHandler`,

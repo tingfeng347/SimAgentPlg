@@ -44,9 +44,6 @@ If the work is complete, call the task's finishing tool now.
 Do not end with plain text.
 """.strip()
 
-REACT_LOOP_PROMPT = TOOL_PROTOCOL_PROMPT
-TOOL_COMPLETION_PROMPT = TOOL_COMPLETION_RETRY_PROMPT
-
 DEFAULT_MAX_STEPS = 20
 
 
@@ -113,8 +110,6 @@ class BaseAgent:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
         middlewares: Iterable[MiddleWare] | None = None,
-        enable_tools: bool = False,
-        inject_tool_prompt: bool = True,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,
@@ -127,8 +122,6 @@ class BaseAgent:
 
         self.config = config or ModelConfig.from_env()
         self.system_prompt = system_prompt
-        self.enable_tools = enable_tools
-        self.inject_tool_prompt = inject_tool_prompt
         self.max_steps = max_steps
         self.client = client or AsyncOpenAI(
             api_key=self.config.api_key,
@@ -161,6 +154,12 @@ class BaseAgent:
 
         return self._llm_tools()
 
+    @property
+    def has_handler_tools(self) -> bool:
+        """Return whether this agent has executable handler tools."""
+
+        return bool(self.handlers)
+
     def reset(
         self,
         history: Sequence[Mapping[str, Any]] | None = None,
@@ -168,7 +167,7 @@ class BaseAgent:
         """Reset conversation memory while preserving the agent identity."""
 
         self.messages = [{"role": "system", "content": self.system_prompt}]
-        if self.enable_tools and self.inject_tool_prompt:
+        if self.has_handler_tools:
             self.messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
         if history:
             self.messages.extend(dict(message) for message in history)
@@ -177,7 +176,7 @@ class BaseAgent:
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
 
-        if self._started or not self.enable_tools:
+        if self._started or not self.has_handler_tools:
             return
 
         try:
@@ -222,7 +221,7 @@ class BaseAgent:
     ) -> StepOutcome:
         """Dispatch a tool call to its explicitly registered handler."""
 
-        if not self.enable_tools:
+        if not self.has_handler_tools:
             raise RuntimeError("tool execution is disabled for this agent")
         if not self._started:
             await self.startup()
@@ -283,7 +282,7 @@ class BaseAgent:
         if self._skill_manager is not None:
             await self._skill_manager.discover()
 
-        if self.enable_tools:
+        if self.has_handler_tools:
             await self.startup()
             await self._tool_runtime.on_task_start()
 
@@ -303,9 +302,9 @@ class BaseAgent:
             self.messages.append(message.model_dump())
 
             if not message.tool_calls:
-                if not self.enable_tools and message.content:
+                if not self.has_handler_tools and message.content:
                     return message.content
-                if self.enable_tools and self.inject_tool_prompt:
+                if self.has_handler_tools:
                     self.messages.append(
                         {
                             "role": "system",
@@ -319,7 +318,7 @@ class BaseAgent:
             if tool_result.exit_value is not None:
                 return tool_result.exit_value
 
-        if self.enable_tools:
+        if self.has_handler_tools:
             raise RuntimeError(
                 f"agent {self.agent_id!r} did not finish within "
                 f"{self.max_steps} steps"
@@ -374,7 +373,7 @@ class BaseAgent:
 
     def _llm_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
-        if self.enable_tools:
+        if self.has_handler_tools:
             tools.extend(self._tool_runtime.tools)
         if self._skill_manager is not None:
             load_skill_tool = self._skill_manager.build_load_skill_tool()
@@ -395,7 +394,7 @@ class BaseAgent:
                 result_messages.append(self._execute_load_skill_call(tool_call))
                 continue
 
-            if not self.enable_tools:
+            if not self.has_handler_tools:
                 result_messages.append(
                     self._tool_error_message(
                         tool_call.id,

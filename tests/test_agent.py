@@ -282,13 +282,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         first = BaseAgent(
             TEST_CONFIG,
             agent_id="first",
-            enable_tools=False,
             client=first_client,
         )
         second = BaseAgent(
             TEST_CONFIG,
             agent_id="second",
-            enable_tools=False,
             client=second_client,
         )
 
@@ -309,7 +307,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="memory",
-            enable_tools=False,
             client=client,
         )
 
@@ -334,7 +331,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="default-prompt",
-            enable_tools=False,
             client=FakeClient([]),
         )
 
@@ -349,7 +345,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tool-protocol",
             system_prompt="You are a custom coding agent.",
-            enable_tools=True,
+            handlers=[DoneHandler()],
             client=FakeClient([]),
         )
 
@@ -361,37 +357,33 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_tool_protocol_injection_can_be_disabled(self) -> None:
+    async def test_plain_chat_has_no_tool_protocol_message(self) -> None:
         agent = BaseAgent(
             TEST_CONFIG,
-            agent_id="tool-protocol-disabled",
-            system_prompt="I manage my own tool protocol.",
-            enable_tools=True,
-            inject_tool_prompt=False,
+            agent_id="plain-protocol",
+            system_prompt="You are a plain chat agent.",
             client=FakeClient([]),
         )
 
         self.assertEqual(
             agent.messages,
             [
-                {"role": "system", "content": "I manage my own tool protocol."},
+                {"role": "system", "content": "You are a plain chat agent."},
             ],
         )
 
-    async def test_disabled_tool_prompt_does_not_add_retry_prompt(self) -> None:
-        client = FakeClient([FakeMessage("plain text"), FakeMessage(None)])
+    async def test_plain_chat_returns_text_without_retry_prompt(self) -> None:
+        client = FakeClient([FakeMessage("plain text")])
         agent = BaseAgent(
             TEST_CONFIG,
-            agent_id="tool-retry-disabled",
-            enable_tools=True,
-            inject_tool_prompt=False,
+            agent_id="plain-retry",
             max_steps=2,
             client=client,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
-            await agent.runtime(task="finish without prompt injection")
+        result = await agent.runtime(task="plain chat")
 
+        self.assertEqual(result, "plain text")
         self.assertFalse(
             any(
                 message.get("content") == TOOL_COMPLETION_RETRY_PROMPT
@@ -415,7 +407,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = FilteringAgent(
             TEST_CONFIG,
             agent_id="context",
-            enable_tools=False,
             client=client,
         )
         agent.messages.append(
@@ -462,7 +453,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 TEST_CONFIG,
                 agent_id="skills-index",
                 skills_dir=skills_dir,
-                enable_tools=False,
                 client=client,
             )
 
@@ -504,7 +494,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 TEST_CONFIG,
                 agent_id="skills-load",
                 skills_dir=skills_dir,
-                enable_tools=False,
                 client=client,
             )
 
@@ -557,7 +546,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 TEST_CONFIG,
                 agent_id="skills-tool",
                 skills_dir=skills_dir,
-                enable_tools=False,
                 client=client,
             )
 
@@ -590,7 +578,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="json",
-            enable_tools=False,
             client=client,
         )
 
@@ -609,7 +596,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="bad-json",
-            enable_tools=False,
             client=client,
         )
 
@@ -620,7 +606,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="  assistant  ",
-            enable_tools=False,
             client=FakeClient([]),
         )
 
@@ -635,7 +620,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     BaseAgent(
                         TEST_CONFIG,
                         agent_id=agent_id,
-                        enable_tools=False,
                         client=FakeClient([]),
                     )
 
@@ -643,7 +627,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TypeError, "agent_id"):
             BaseAgent(  # type: ignore[call-arg]
                 TEST_CONFIG,
-                enable_tools=False,
                 client=FakeClient([]),
             )
 
@@ -661,7 +644,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[echo],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -678,7 +660,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[bash, echo],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -694,7 +675,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[finish],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -708,7 +688,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="chat",
-            enable_tools=False,
             client=FakeClient([]),
         )
 
@@ -720,7 +699,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="duplicate-tools",
             handlers=[EchoHandler(), EchoHandler()],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -732,7 +710,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="unknown-tool",
             handlers=[EchoHandler()],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -767,7 +744,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="invalid-json",
             handlers=[EchoHandler(), DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -802,7 +778,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="finish-required",
             handlers=[DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -849,7 +824,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="log-tools",
             handlers=[EchoHandler(), DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -896,7 +870,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="task-hooks",
             handlers=[handler, DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -913,7 +886,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-low-risk",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -953,7 +925,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-task-hooks",
             handlers=[DoneHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -962,15 +933,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(middleware.task_starts, 2)
 
-    async def test_middlewares_do_not_run_when_tools_are_disabled(self) -> None:
+    async def test_middlewares_do_not_run_without_handlers(self) -> None:
         middleware = RecordingToolMiddleware()
         client = FakeClient([FakeMessage("plain chat")])
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="middleware-disabled",
-            handlers=[EchoHandler()],
             middlewares=[middleware],
-            enable_tools=False,
             client=client,
         )
 
@@ -1010,7 +979,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-reject",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -1032,7 +1000,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-chain",
             handlers=[handler],
             middlewares=[first, second],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1079,7 +1046,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="human-approval-reject",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -1104,7 +1070,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="human-approval-allow",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1124,7 +1089,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-default",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1149,7 +1113,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-never",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1168,7 +1131,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-safe",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1189,7 +1151,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-unlisted",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1212,7 +1173,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-dev-null",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1236,7 +1196,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-reject",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1261,7 +1220,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-approve",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1287,7 +1245,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-ignore",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -1315,7 +1272,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="repeat-guard",
             handlers=[handler],
-            enable_tools=True,
             max_steps=3,
             client=client,
         )
@@ -1330,7 +1286,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="step-limit",
-            enable_tools=True,
+            handlers=[DoneHandler()],
             max_steps=2,
             client=client,
         )
@@ -1338,21 +1294,17 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
             await agent.runtime(task="never finish")
 
-    async def test_tool_disabled_mode_does_not_start_handlers(self) -> None:
-        handler = EchoHandler()
+    async def test_plain_chat_mode_does_not_start_handlers(self) -> None:
         client = FakeClient([FakeMessage("plain chat")])
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="plain-chat",
-            handlers=[handler],
-            enable_tools=False,
             client=client,
         )
 
         result = await agent.runtime(task="hello")
 
         self.assertEqual(result, "plain chat")
-        self.assertEqual(handler.started, 0)
         self.assertIsNone(client.completions.calls[0]["tools"])
 
     async def test_bash_handler_rejects_invalid_arguments(self) -> None:

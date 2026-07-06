@@ -33,7 +33,6 @@ async def main() -> None:
                 "complete, call run_finish with a concise summary."
             ),
             handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-            enable_tools=True,
         ),
     )
     manager.register(

@@ -19,7 +19,6 @@ async def main() -> None:
         ),
         handlers=[FinishHandler()],
         skills_dir=SKILLS_DIR,
-        enable_tools=True,
     )
 
     try:

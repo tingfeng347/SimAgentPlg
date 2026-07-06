@@ -17,7 +17,6 @@ async def main() -> None:
             "run_finish with the page title and relevant result summary."
         ),
         handlers=[McpToolHandler(MCP_CONFIG), FinishHandler()],
-        enable_tools=True,
     )
 
     try:

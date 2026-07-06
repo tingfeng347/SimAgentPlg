@@ -11,7 +11,7 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill
 - 有状态的 `BaseAgent`，支持对话记忆和显式 `reset()`
 - 每个 Agent 拥有必填且不可修改的 `agent_id`
 - 支持通过 `.env` 或直接构造使用 OpenAI 兼容模型配置
-- 工具模式默认关闭，启用后只暴露显式注册的 Handler
+- Handler 驱动的工具执行，不需要单独的工具模式开关
 - 内置 `BashHandler`，用于执行有边界的 Bash 命令
 - 内置 `GitDiffHandler`，用于查看 Git 工作区变化
 - 内置 `FinishHandler`，用于明确结束任务
@@ -82,7 +82,7 @@ await agent.shutdown()
 
 ### 工具模式
 
-设置 `enable_tools=True` 并显式传入 Handler：
+显式传入 Handler 即可启用工具执行：
 
 ```python
 import json
@@ -100,7 +100,6 @@ agent = BaseAgent(
     agent_id="developer",
     system_prompt="使用可用工具完成编程任务。",
     handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-    enable_tools=True,
 )
 
 result = await agent.runtime(task="创建 hello.py，并输出 'hello'。")
@@ -110,7 +109,7 @@ print(report["summary"])
 await agent.shutdown()
 ```
 
-工具模式只会暴露显式传给 `BaseAgent` 的 Handler：
+Agent 只会暴露显式传给 `BaseAgent` 的 Handler：
 
 ```text
 BaseAgent
@@ -165,7 +164,8 @@ BaseAgent
 
 `ToolMiddleware` 可在工具执行前做检查。框架不内置高低风险规则，业务
 可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
-不是 shell 沙箱或安全边界。默认情况下，每个 `bash_run` 都需要 y/n 审批：
+不是 shell 沙箱或安全边界。默认情况下，safe allowlist 之外的命令需要 y/n
+审批：
 
 ```python
 from simagentplg import (
@@ -181,14 +181,13 @@ agent = BaseAgent(
     agent_id="coder",
     handlers=[BashHandler(), FinishHandler()],
     middlewares=[BashApprovalMiddleware()],
-    enable_tools=True,
 )
 ```
 
-如果想减少弹窗，可以显式设置 `approval_policy="unless_safe"`：只有少量
-明确的只读命令会跳过审批，例如 `pwd`、`ls`、`git status`、`git diff`、
-`git log`、`rg`、`sed -n`、`cat` 和 Python unittest 调用。allowlist 之外
-的命令仍然需要审批。`approval_policy="never"` 会显式关闭这一审批门。
+默认的 `approval_policy="unless_safe"` 只会让少量明确的只读命令跳过审批，
+例如 `pwd`、`ls`、`git status`、`git diff`、`git log`、`rg`、`sed -n`、
+`cat` 和 Python unittest 调用。设置 `approval_policy="always"` 可以审批
+每个 `bash_run` 命令；`approval_policy="never"` 会显式关闭这一审批门。
 
 ## 自定义工具 Handler
 
@@ -231,7 +230,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="calculator",
     handlers=[MathHandler()],
-    enable_tools=True,
 )
 ```
 
@@ -243,6 +241,7 @@ Handler 启动时会创建统一的工具路由表。重复工具名会立即报
 
 ```python
 from simagentplg import AgentManager, BaseAgent, ModelConfig
+from simagentplg import BashHandler, FinishHandler, GitDiffHandler
 
 config = ModelConfig.from_env()
 manager = AgentManager()
@@ -306,7 +305,7 @@ manager.register(
         config=config,
         agent_id="executor",
         system_prompt="使用工具执行给定方案。",
-        enable_tools=True,
+        handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
     )
 )
 manager.register(
@@ -361,7 +360,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="browser",
     handlers=[McpToolHandler("example/mcp_config.json")],
-    enable_tools=True,
 )
 ```
 
@@ -395,7 +393,6 @@ agent = BaseAgent(
     agent_id="skilled-agent",
     handlers=[FinishHandler()],
     skills_dir=Path("example/skills"),
-    enable_tools=True,
 )
 ```
 
@@ -414,8 +411,8 @@ example/skills/
       sample.md
 ```
 
-Skill 上下文本身不要求工具模式。只有当任务需要通过 `run_finish` 结束时，
-才需要设置 `enable_tools=True` 并注册 `FinishHandler`。
+Skill 上下文本身不要求 Handler 工具。只有当任务需要通过 `run_finish`
+结束时，才需要注册 `FinishHandler`。
 
 ## 示例
 
@@ -452,8 +449,6 @@ BaseAgent(
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[MiddleWare] | None = None,
-    enable_tools: bool = False,
-    inject_tool_prompt: bool = True,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,
@@ -465,9 +460,9 @@ await agent.startup()
 await agent.shutdown()
 ```
 
-当 `enable_tools=True` 时，`BaseAgent` 默认会额外注入一条工具协议
-system message。只有在自定义 `system_prompt` 已经完整定义工具调用和完成
-约定时，才建议设置 `inject_tool_prompt=False`。
+传入 Handler 后，`BaseAgent` 会进入工具执行模式，并注入 runtime 内部工具
+协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可
+暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
 
 顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
 Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、

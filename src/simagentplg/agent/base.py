@@ -182,7 +182,7 @@ class BaseAgent:
         try:
             await self._tool_runtime.startup()
             self.logger.info(
-                "已装载 %d 个工具，注册工具: %s",
+                "Loaded %d handler(s); registered tools: %s",
                 len(self.handlers),
                 ", ".join(
                     sorted(
@@ -291,7 +291,7 @@ class BaseAgent:
         self._activate_explicit_skill()
 
         for turn in range(self.max_steps):
-            self.logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
+            self.logger.info("Turn %d/%d", turn + 1, self.max_steps)
             context_messages = self.transform_context(self.messages)
             llm_messages = self.convert_to_llm_messages(context_messages)
 

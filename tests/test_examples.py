@@ -2,7 +2,7 @@ import runpy
 import unittest
 from pathlib import Path
 
-from simagentplg import MethodToolHandler, SkillManager
+from simagentplg import DEFAULT_SKILLS_DIR, MethodToolHandler, SkillManager
 
 EXAMPLES_DIR = Path(__file__).parents[1] / "example"
 
@@ -41,6 +41,11 @@ class ExampleTests(unittest.IsolatedAsyncioTestCase):
         skill = manager._skills["release_notes"]
         self.assertIsNotNone(skill.template_md)
         self.assertIsNotNone(skill.sample_md)
+
+    def test_skill_manager_default_uses_packaged_skills_dir(self) -> None:
+        manager = SkillManager()
+
+        self.assertEqual(manager.skills_root, DEFAULT_SKILLS_DIR)
 
 
 if __name__ == "__main__":

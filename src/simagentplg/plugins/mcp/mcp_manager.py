@@ -1,5 +1,5 @@
 import json
-import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,16 +22,13 @@ class _McpToolRoute:
 
 
 class McpServerManager:
-    """MCP 多服务管理器，负责从 JSON 配置加载、连接和管理多个 MCP 服务。
-
-    支持按服务名前缀路由工具调用，单个服务连接失败不影响其他服务。
-    """
+    """Load, connect, and route tools across configured MCP services."""
 
     def __init__(self, path: Path | None = None):
-        """初始化管理器。
+        """Initialize the manager.
 
         Args:
-            path: MCP 配置 JSON 文件路径。
+            path: MCP configuration JSON path.
         """
         if path is None:
             path = DEFAULT_MCP_CONFIG
@@ -40,85 +37,87 @@ class McpServerManager:
         self._tools_by_service: dict[str, list[Tool]] = {}
         self._tool_routes: dict[str, _McpToolRoute] = {}
         self._openai_tools: list[dict[str, Any]] = []
+        self._exit_stack: AsyncExitStack | None = None
 
     async def startup(self) -> None:
-        """启动所有 MCP 服务连接。
+        """Connect configured MCP services and index their tools.
 
-        从 JSON 配置文件读取服务列表，逐个建立连接并拉取工具列表。
-        单个服务连接失败会记录错误日志但不阻断其他服务的启动。
+        One service failure is logged and does not block other services.
         """
-        logger.info("MCP 服务管理器启动中...")
+        logger.info("Starting MCP server manager")
+        stack = AsyncExitStack()
         with open(self.path, "r", encoding="utf-8") as f:
             mcp_configs = MCPConfig.from_dict(json.load(f))
-            logger.info(f"加载到 {len(mcp_configs.mcpServers)} 个 MCP 服务配置")
+            logger.info("Loaded %d MCP service config(s)", len(mcp_configs.mcpServers))
             for service_name, server_model in mcp_configs.mcpServers.items():
-                mcp_client: Client | None = None
-                entered = False
+                service_stack = AsyncExitStack()
                 try:
-                    logger.info(f"正在连接 {service_name} ...")
-                    mcp_client = Client({service_name: server_model.model_dump()})
-                    await mcp_client.__aenter__()
-                    entered = True
+                    logger.info("Connecting MCP service %s", service_name)
+                    mcp_client = await service_stack.enter_async_context(
+                        Client({service_name: server_model.model_dump()})
+                    )
                     tools = await mcp_client.list_tools()
                     self._register_service_tools(service_name, mcp_client, tools)
-                    logger.info(f"{service_name} 连接成功，加载 {len(tools)} 个工具")
+                    stack.push_async_callback(service_stack.aclose)
+                    logger.info(
+                        "MCP service %s connected with %d tool(s)",
+                        service_name,
+                        len(tools),
+                    )
                 except Exception as e:
-                    if mcp_client is not None and entered:
-                        try:
-                            await mcp_client.__aexit__(None, None, None)
-                        except Exception as shutdown_error:
-                            logger.warning(
-                                f"关闭失败的 MCP 服务 {service_name} 时出错: "
-                                f"{shutdown_error}"
-                            )
-                    logger.error(f"连接 {service_name} 失败: {e}")
+                    await service_stack.aclose()
+                    logger.error("Failed to connect MCP service %s: %s", service_name, e)
+        self._exit_stack = stack
         logger.info(
-            f"MCP 服务管理器启动完成，共 {len(self._clients_by_service)} 个服务在线"
+            "MCP server manager started with %d online service(s)",
+            len(self._clients_by_service),
         )
 
     async def shutdown(self) -> None:
-        """关闭所有 MCP 服务连接，释放资源。"""
-        logger.info("MCP 服务管理器关闭中...")
-        for service_name, mcp_client in self._clients_by_service.items():
-            await mcp_client.__aexit__(None, None, None)
-            logger.info(f"{service_name} 已断开")
+        """Close all MCP service connections."""
+        logger.info("Shutting down MCP server manager")
+        if self._exit_stack is not None:
+            await self._exit_stack.aclose()
+            self._exit_stack = None
+        for service_name in self._clients_by_service:
+            logger.info("MCP service %s disconnected", service_name)
         self._clients_by_service.clear()
         self._tools_by_service.clear()
         self._tool_routes.clear()
         self._openai_tools.clear()
-        logger.info("MCP 服务管理器已关闭")
+        logger.info("MCP server manager stopped")
 
     async def call_tool(self, tool_name: str, args: dict[str, object]) -> str:
-        """调用 MCP 工具，按服务名前缀自动路由。
+        """Call a routed MCP tool.
 
         Args:
-            tool_name: 工具名，格式为 "{服务名}__{工具名}"，如 "playwright__browser_navigate"。
-            args: 传递给工具的参数字典。
+            tool_name: Prefixed tool name, such as "playwright__browser_navigate".
+            args: Tool arguments.
 
         Returns:
-            工具执行结果的字符串表示。
+            String representation of the tool result.
 
         Raises:
-            ValueError: 当工具名不存在于任何已连接的服务中时抛出。
+            ValueError: If the tool is not registered.
         """
-        logger.info(f"调用工具: {tool_name}, 参数: {args}")
+        logger.info("Calling MCP tool %s arguments=%s", tool_name, args)
         try:
             route = self._tool_routes[tool_name]
         except KeyError as exc:
-            logger.error(f"未知的 MCP 工具: {tool_name}")
+            logger.error("Unknown MCP tool: %s", tool_name)
             raise ValueError(f"unknown MCP tool: {tool_name}") from exc
 
         result = await route.client.call_tool(route.raw_name, args)
-        logger.info(f"工具 {tool_name} 执行成功")
+        logger.info("MCP tool %s completed", tool_name)
         return str(result)
 
     def get_openai_tools(self) -> list[dict[str, Any]]:
-        """将所有已连接服务的工具转换为 OpenAI tools 格式。
+        """Return connected service tools in OpenAI tool format.
 
         Returns:
-            OpenAI tools 参数格式的列表。
+            OpenAI tools.
         """
-        logger.info(f"转换到 OpenAI tools 格式的工具: {len(self._openai_tools)} 个工具")
+        logger.info("Returning %d OpenAI MCP tool(s)", len(self._openai_tools))
         return list(self._openai_tools)
 
     def _register_service_tools(
@@ -154,14 +153,3 @@ class McpServerManager:
         self._tools_by_service[service_name] = tools
         self._tool_routes.update(routes)
         self._openai_tools.extend(openai_tools)
-
-
-async def main():
-    mcp_manager = McpServerManager()
-    await mcp_manager.startup()
-    mcp_manager.get_openai_tools()
-    await mcp_manager.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

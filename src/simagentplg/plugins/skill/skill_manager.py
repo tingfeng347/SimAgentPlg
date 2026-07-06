@@ -6,6 +6,7 @@ from typing import Any
 import yaml
 
 from simagentplg.logger import get_logger
+from simagentplg.resources import DEFAULT_SKILLS_DIR
 
 logger = get_logger("skill")
 
@@ -33,11 +34,11 @@ class SkillManager:
             skills_root: Root directory whose child folders may contain SKILL.md.
         """
         if skills_root is None:
-            skills_root = Path(__file__).parent / "my_skills"
+            skills_root = DEFAULT_SKILLS_DIR
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
         self._discovered = False
-        logger.info("技能注册表初始化，根目录: %s", self.skills_root)
+        logger.info("Skill registry initialized root=%s", self.skills_root)
 
     @property
     def skills(self) -> tuple[Skill, ...]:
@@ -82,11 +83,13 @@ class SkillManager:
 
         if not self._skills:
             logger.debug(
-                "技能扫描完成，未发现任何技能（skills_root: %s）", self.skills_root
+                "Skill discovery completed with no skills root=%s", self.skills_root
             )
         else:
             logger.info(
-                "发现 %d 个技能: %s", len(self._skills), list(self._skills.keys())
+                "Discovered %d skill(s): %s",
+                len(self._skills),
+                list(self._skills.keys()),
             )
 
     async def dispatch(

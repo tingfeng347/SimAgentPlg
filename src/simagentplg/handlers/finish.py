@@ -13,8 +13,8 @@ FINISH_TOOL: ToolSchema = {
     "function": {
         "name": "run_finish",
         "description": (
-            "任务完成后调用。提交任务完成总结，并结束当前任务。"
-            "调用该工具后不应继续执行其他工具。"
+            "Call this when the task is complete. Submit a completion summary "
+            "and end the current task. Do not call additional tools after this."
         ),
         "parameters": {
             "type": "object",
@@ -22,7 +22,7 @@ FINISH_TOOL: ToolSchema = {
                 "summary": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "任务完成情况的简明总结。",
+                    "description": "A concise summary of the completed task.",
                 },
             },
             "required": ["summary"],
@@ -52,5 +52,5 @@ class FinishHandler(MethodToolHandler):
             )
 
         summary = summary.strip()
-        logger.info("任务完成，summary=%s", summary[:80])
+        logger.info("Task completed summary=%s", summary[:80])
         return StepOutcome({"summary": summary}, should_exit=True)

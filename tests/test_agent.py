@@ -832,11 +832,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(json.loads(result or "")["summary"], "logged")
         logs = "\n".join(captured.output)
-        self.assertIn("调用工具 echo", logs)
-        self.assertIn('参数={"text": "hello"}', logs)
-        self.assertIn("工具 echo 完成 exit=False", logs)
-        self.assertIn("调用工具 done", logs)
-        self.assertIn("工具 done 完成 exit=True", logs)
+        self.assertIn("Calling tool echo", logs)
+        self.assertIn('arguments={"text": "hello"}', logs)
+        self.assertIn("Tool echo completed exit=False", logs)
+        self.assertIn("Calling tool done", logs)
+        self.assertIn("Tool done completed exit=True", logs)
 
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()

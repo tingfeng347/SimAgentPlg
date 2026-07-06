@@ -67,7 +67,7 @@ class ToolRuntime:
                     await middleware.shutdown()
                 except Exception as shutdown_error:
                     self.logger.warning(
-                        "Middleware %s 回滚关闭失败: %s",
+                        "Middleware %s rollback shutdown failed: %s",
                         type(middleware).__name__,
                         shutdown_error,
                     )
@@ -76,7 +76,7 @@ class ToolRuntime:
                     await handler.shutdown()
                 except Exception as shutdown_error:
                     self.logger.warning(
-                        "Handler %s 回滚关闭失败: %s",
+                        "Handler %s rollback shutdown failed: %s",
                         type(handler).__name__,
                         shutdown_error,
                     )
@@ -165,7 +165,7 @@ class ToolRuntime:
         raw_arguments = tool_call.function.arguments
         self._check_repeated_tool_call(tool_name, raw_arguments)
         self.logger.info(
-            "调用工具 %s 参数=%s",
+            "Calling tool %s arguments=%s",
             tool_name,
             summarize_for_log(raw_arguments),
         )
@@ -175,14 +175,14 @@ class ToolRuntime:
                 raise TypeError("tool arguments must be a JSON object")
             outcome = await self.dispatch(tool_name, arguments)
             self.logger.info(
-                "工具 %s 完成 exit=%s 结果=%s",
+                "Tool %s completed exit=%s result=%s",
                 tool_name,
                 outcome.should_exit,
                 summarize_for_log(outcome.data),
             )
         except Exception as exc:
             self.logger.warning(
-                "工具 %s 执行失败: %s 参数=%s",
+                "Tool %s failed: %s arguments=%s",
                 tool_name,
                 exc,
                 summarize_for_log(raw_arguments),

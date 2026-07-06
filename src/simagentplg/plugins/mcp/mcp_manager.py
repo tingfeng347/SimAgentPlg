@@ -1,13 +1,24 @@
 import json
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
 from fastmcp import Client
 from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
+
 from simagentplg.logger import get_logger
 from simagentplg.resources import DEFAULT_MCP_CONFIG
 
 logger = get_logger(name="MCP")
+
+
+@dataclass(frozen=True, slots=True)
+class _McpToolRoute:
+    service_name: str
+    raw_name: str
+    client: Any
 
 
 class McpServerManager:
@@ -25,8 +36,10 @@ class McpServerManager:
         if path is None:
             path = DEFAULT_MCP_CONFIG
         self.path = path
-        self.mcp_clients_map: dict[str, Client] = {}
-        self.mcp_tools_map: dict[str, list[Tool]] = {}
+        self._clients_by_service: dict[str, Client] = {}
+        self._tools_by_service: dict[str, list[Tool]] = {}
+        self._tool_routes: dict[str, _McpToolRoute] = {}
+        self._openai_tools: list[dict[str, Any]] = []
 
     async def startup(self) -> None:
         """启动所有 MCP 服务连接。
@@ -39,26 +52,40 @@ class McpServerManager:
             mcp_configs = MCPConfig.from_dict(json.load(f))
             logger.info(f"加载到 {len(mcp_configs.mcpServers)} 个 MCP 服务配置")
             for service_name, server_model in mcp_configs.mcpServers.items():
+                mcp_client: Client | None = None
+                entered = False
                 try:
                     logger.info(f"正在连接 {service_name} ...")
                     mcp_client = Client({service_name: server_model.model_dump()})
                     await mcp_client.__aenter__()
+                    entered = True
                     tools = await mcp_client.list_tools()
-                    self.mcp_tools_map[service_name] = tools
-                    self.mcp_clients_map[service_name] = mcp_client
+                    self._register_service_tools(service_name, mcp_client, tools)
                     logger.info(f"{service_name} 连接成功，加载 {len(tools)} 个工具")
                 except Exception as e:
+                    if mcp_client is not None and entered:
+                        try:
+                            await mcp_client.__aexit__(None, None, None)
+                        except Exception as shutdown_error:
+                            logger.warning(
+                                f"关闭失败的 MCP 服务 {service_name} 时出错: "
+                                f"{shutdown_error}"
+                            )
                     logger.error(f"连接 {service_name} 失败: {e}")
         logger.info(
-            f"MCP 服务管理器启动完成，共 {len(self.mcp_clients_map)} 个服务在线"
+            f"MCP 服务管理器启动完成，共 {len(self._clients_by_service)} 个服务在线"
         )
 
     async def shutdown(self) -> None:
         """关闭所有 MCP 服务连接，释放资源。"""
         logger.info("MCP 服务管理器关闭中...")
-        for service_name, mcp_client in self.mcp_clients_map.items():
+        for service_name, mcp_client in self._clients_by_service.items():
             await mcp_client.__aexit__(None, None, None)
             logger.info(f"{service_name} 已断开")
+        self._clients_by_service.clear()
+        self._tools_by_service.clear()
+        self._tool_routes.clear()
+        self._openai_tools.clear()
         logger.info("MCP 服务管理器已关闭")
 
     async def call_tool(self, tool_name: str, args: dict[str, object]) -> str:
@@ -75,37 +102,58 @@ class McpServerManager:
             ValueError: 当工具名不存在于任何已连接的服务中时抛出。
         """
         logger.info(f"调用工具: {tool_name}, 参数: {args}")
-        for service_name, client in self.mcp_clients_map.items():
-            prefix = f"{service_name}__"
-            if tool_name.startswith(prefix):
-                raw_name = tool_name[len(prefix) :]
-                result = await client.call_tool(raw_name, args)
-                logger.info(f"工具 {tool_name} 执行成功")
-                return str(result)
-        logger.error(f"未知的 MCP 工具: {tool_name}")
-        raise ValueError(f"unknown MCP tool: {tool_name}")
+        try:
+            route = self._tool_routes[tool_name]
+        except KeyError as exc:
+            logger.error(f"未知的 MCP 工具: {tool_name}")
+            raise ValueError(f"unknown MCP tool: {tool_name}") from exc
 
-    def get_openai_tools(self) -> list[dict]:
+        result = await route.client.call_tool(route.raw_name, args)
+        logger.info(f"工具 {tool_name} 执行成功")
+        return str(result)
+
+    def get_openai_tools(self) -> list[dict[str, Any]]:
         """将所有已连接服务的工具转换为 OpenAI tools 格式。
 
         Returns:
             OpenAI tools 参数格式的列表。
         """
-        openai_tools = []
-        for service_name, tools in self.mcp_tools_map.items():
-            for tool in tools:
-                openai_tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": f"{service_name}__{tool.name}",
-                            "description": tool.description,
-                            "parameters": tool.inputSchema,
-                        },
-                    }
-                )
-        logger.info(f"转换到 OpenAI tools 格式的工具: {len(openai_tools)} 个工具")
-        return openai_tools
+        logger.info(f"转换到 OpenAI tools 格式的工具: {len(self._openai_tools)} 个工具")
+        return list(self._openai_tools)
+
+    def _register_service_tools(
+        self,
+        service_name: str,
+        client: Client,
+        tools: list[Tool],
+    ) -> None:
+        routes: dict[str, _McpToolRoute] = {}
+        openai_tools: list[dict[str, Any]] = []
+
+        for tool in tools:
+            prefixed_name = f"{service_name}__{tool.name}"
+            if prefixed_name in self._tool_routes or prefixed_name in routes:
+                raise ValueError(f"duplicate MCP tool {prefixed_name!r}")
+            routes[prefixed_name] = _McpToolRoute(
+                service_name=service_name,
+                raw_name=tool.name,
+                client=client,
+            )
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": prefixed_name,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema,
+                    },
+                }
+            )
+
+        self._clients_by_service[service_name] = client
+        self._tools_by_service[service_name] = tools
+        self._tool_routes.update(routes)
+        self._openai_tools.extend(openai_tools)
 
 
 async def main():

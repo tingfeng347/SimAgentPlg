@@ -92,30 +92,6 @@ class SkillManager:
                 list(self._skills.keys()),
             )
 
-    async def dispatch(
-        self,
-        messages: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        """Compatibility shim: load only an explicitly named local skill.
-
-        This no longer calls an LLM router. A skill is selected only when the
-        user names it with ``$skill_name`` or ``skill:skill_name``.
-        """
-
-        if not self._discovered:
-            await self.discover()
-
-        skill_name = self.select_explicit_skill(messages)
-        if skill_name is None:
-            return None
-
-        task = self._latest_user_task(messages)
-        return {
-            "skill_name": skill_name,
-            "task": task,
-            "messages": self.build_skill_messages(skill_name, task),
-        }
-
     def build_index_message(self) -> dict[str, str] | None:
         """Return compact skill metadata for the model context."""
 
@@ -192,18 +168,6 @@ class SkillManager:
             "role": "system",
             "content": "\n".join(self._skill_content_parts(skill)),
         }
-
-    def build_skill_messages(
-        self,
-        skill_name: str,
-        task: str,
-    ) -> list[dict[str, str]]:
-        """Load full skill instructions plus the current skill task."""
-
-        return [
-            self.build_skill_context_message(skill_name),
-            {"role": "user", "content": task},
-        ]
 
     def get(self, skill_name: str) -> Skill:
         try:

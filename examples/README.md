@@ -7,7 +7,7 @@ running them.
 Run an example from the repository root:
 
 ```bash
-uv run python example/01_stateful_chat.py
+uv run python examples/01_stateful_chat.py
 ```
 
 Every `BaseAgent` declares its own immutable `agent_id`. Manager examples
@@ -32,7 +32,7 @@ The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
 through `npx`.
 
-The skill example loads `example/skills/release_notes/`. Skill metadata is
+The skill example loads `examples/skills/release_notes/`. Skill metadata is
 injected into the model context. The model can call the internal `load_skill`
 tool to load full `SKILL.md`, optional `template.md`, and optional
 `examples/sample.md` content, and the user can still name a skill explicitly.

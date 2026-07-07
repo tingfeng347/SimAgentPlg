@@ -5,7 +5,7 @@ from simagentplg.agent.manager import AgentManager
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
-    MiddleWare,
+    Middleware,
     ToolMiddleware,
     format_tool_call_preview,
 )
@@ -16,7 +16,7 @@ __all__ = [
     "ModelConfig",
     "StepOutcome",
     "AgentManager",
-    "MiddleWare",
+    "Middleware",
     "ToolMiddleware",
     "HumanApproval",
     "BashApprovalMiddleware",

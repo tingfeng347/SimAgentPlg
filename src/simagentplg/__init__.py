@@ -10,7 +10,7 @@ from simagentplg.agent.manager import (
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
-    MiddleWare,
+    Middleware,
     ToolMiddleware,
     format_tool_call_preview,
 )
@@ -37,7 +37,7 @@ __all__ = [
     "AgentManagerError",
     "AgentAlreadyExistsError",
     "AgentNotFoundError",
-    "MiddleWare",
+    "Middleware",
     "ToolMiddleware",
     "HumanApproval",
     "BashApprovalMiddleware",

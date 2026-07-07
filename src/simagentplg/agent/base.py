@@ -13,7 +13,7 @@ from simagentplg.agent.context import (
     convert_to_llm_messages,
     transform_context,
 )
-from simagentplg.agent.middleware import MiddleWare
+from simagentplg.agent.middleware import Middleware
 from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
 from simagentplg.agent.types import AgentMessage, StepOutcome
 from simagentplg.logger import get_logger
@@ -109,7 +109,7 @@ class BaseAgent:
         agent_id: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
-        middlewares: Iterable[MiddleWare] | None = None,
+        middlewares: Iterable[Middleware] | None = None,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,

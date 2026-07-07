@@ -13,6 +13,7 @@ from simagentplg import (
     BashHandler,
     FinishHandler,
     HumanApproval,
+    Middleware,
     McpToolHandler,
     MethodToolHandler,
     ModelConfig,
@@ -236,6 +237,9 @@ class ApprovalToolMiddleware(ToolMiddleware):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_middleware_base_class_is_exported_with_standard_spelling(self) -> None:
+        self.assertTrue(issubclass(ToolMiddleware, Middleware))
+
     async def test_model_config_reads_chat_model_from_env(self) -> None:
         with (
             patch("simagentplg.agent.base.load_dotenv"),

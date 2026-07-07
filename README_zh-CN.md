@@ -3,23 +3,22 @@
 [English](README.md) | [简体中文](README_zh-CN.md)
 
 SimAgentPlg 0.2.3 是一个轻量级多智能体框架，用于构建有状态的
-OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具、本地 Skill 路由，
-以及简单的基于角色的多 Agent 工作流。
+OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地 Skill
+发现、索引和按需加载。
 
 ## 功能特性
 
 - 有状态的 `BaseAgent`，支持对话记忆和显式 `reset()`
 - 每个 Agent 拥有必填且不可修改的 `agent_id`
 - 支持通过 `.env` 或直接构造使用 OpenAI 兼容模型配置
-- 工具模式默认关闭，启用后只暴露显式注册的 Handler
+- Handler 驱动的工具执行，不需要单独的工具模式开关
 - 内置 `BashHandler`，用于执行有边界的 Bash 命令
 - 内置 `GitDiffHandler`，用于查看 Git 工作区变化
 - 内置 `FinishHandler`，用于明确结束任务
 - `MethodToolHandler` 用于快速定义小型 Python 自定义工具
 - `AgentManager` 支持同一 Agent 串行、不同 Agent 并发
-- 线性 `AgentWorkflow`，适合 planner、executor、reviewer 等角色
 - 可选 MCP 集成：`McpToolHandler` 和 `McpServerManager`
-- 可选本地 Skill 发现和路由：`SkillManager`
+- 可选本地 Skill 发现、索引和按需加载：`SkillManager`
 
 需要 Python 3.12 或更高版本。
 
@@ -33,13 +32,12 @@ uv sync
 
 ## 配置
 
-复制 `.env_example` 为 `.env`，然后填写模型凭据：
+复制 `.env.example` 为 `.env`，然后填写模型凭据：
 
 ```env
 MODEL_API_KEY=sk-xxxxxxxx
 MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
-SKILL_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
@@ -83,7 +81,7 @@ await agent.shutdown()
 
 ### 工具模式
 
-设置 `enable_tools=True` 并显式传入 Handler：
+显式传入 Handler 即可启用工具执行：
 
 ```python
 import json
@@ -101,7 +99,6 @@ agent = BaseAgent(
     agent_id="developer",
     system_prompt="使用可用工具完成编程任务。",
     handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-    enable_tools=True,
 )
 
 result = await agent.runtime(task="创建 hello.py，并输出 'hello'。")
@@ -111,7 +108,7 @@ print(report["summary"])
 await agent.shutdown()
 ```
 
-工具模式只会暴露显式传给 `BaseAgent` 的 Handler：
+Agent 只会暴露显式传给 `BaseAgent` 的 Handler：
 
 ```text
 BaseAgent
@@ -164,9 +161,10 @@ BaseAgent
 
 ## Tool Middleware
 
-`ToolMiddleware` 可在工具执行前做安全检查。框架不内置高低风险规则，业务
-可以继承 middleware 自行分类，也可以使用 `BashApprovalMiddleware` 为
-命中风险模式的 `bash_run` 增加 y/n 人工审批：
+`ToolMiddleware` 可在工具执行前做检查。框架不内置高低风险规则，业务
+可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
+不是 shell 沙箱或安全边界。默认情况下，safe allowlist 之外的命令需要 y/n
+审批：
 
 ```python
 from simagentplg import (
@@ -182,9 +180,13 @@ agent = BaseAgent(
     agent_id="coder",
     handlers=[BashHandler(), FinishHandler()],
     middlewares=[BashApprovalMiddleware()],
-    enable_tools=True,
 )
 ```
+
+默认的 `approval_policy="unless_safe"` 只会让少量明确的只读命令跳过审批，
+例如 `pwd`、`ls`、`git status`、`git diff`、`git log`、`rg`、`sed -n`、
+`cat` 和 Python unittest 调用。设置 `approval_policy="always"` 可以审批
+每个 `bash_run` 命令；`approval_policy="never"` 会显式关闭这一审批门。
 
 ## 自定义工具 Handler
 
@@ -227,7 +229,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="calculator",
     handlers=[MathHandler()],
-    enable_tools=True,
 )
 ```
 
@@ -272,80 +273,6 @@ await manager.shutdown()
 之间可以并发执行。`run_many()` 会将异常作为对应任务的结果返回，因此一个
 Agent 失败不会取消其他 Agent。
 
-`run_isolated(agent_id, task)` 会在持有该 Agent 锁的期间执行 `reset()` 和
-任务。Workflow 使用它来避免角色或步骤之间产生隐式历史依赖。
-
-## 多角色工作流
-
-`AgentWorkflow` 可以将不同角色组织为经过校验的线性流水线：
-
-```python
-from simagentplg import (
-    AgentManager,
-    AgentWorkflow,
-    BaseAgent,
-    ModelConfig,
-    WorkflowStep,
-)
-
-config = ModelConfig.from_env()
-manager = AgentManager()
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="planner",
-        system_prompt="创建简洁且可执行的实现方案。",
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="executor",
-        system_prompt="使用工具执行给定方案。",
-        enable_tools=True,
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="reviewer",
-        system_prompt="审查执行结果的正确性和风险。",
-    )
-)
-
-workflow = AgentWorkflow(
-    manager,
-    [
-        WorkflowStep(
-            name="plan",
-            agent_id="planner",
-            prompt="规划以下任务：\n{input}",
-        ),
-        WorkflowStep(
-            name="execute",
-            agent_id="executor",
-            prompt=(
-                "原始任务：\n{original_task}\n\n"
-                "执行以下方案：\n{input}"
-            ),
-        ),
-        WorkflowStep(
-            name="review",
-            agent_id="reviewer",
-            prompt="审查以下执行结果：\n{execute}",
-        ),
-    ],
-)
-
-result = await workflow.run("实现用户登录")
-print(result.final_output)
-await manager.shutdown()
-```
-
-Workflow 模板支持 `{input}`、`{original_task}`，以及已经完成的命名步骤输出，
-例如 `{plan}` 或 `{execute}`。创建 Workflow 时会拒绝未知变量和对后续步骤
-的前向引用。0.2.3 版本只支持线性步骤。
-
 ## MCP 工具
 
 MCP 是可选功能，并使用相同的 Handler 接口：
@@ -357,7 +284,6 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="browser",
     handlers=[McpToolHandler("example/mcp_config.json")],
-    enable_tools=True,
 )
 ```
 
@@ -384,19 +310,21 @@ Skill 是可选的提示词扩展，与工具 Handler 相互独立：
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, FinishHandler, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
+    handlers=[FinishHandler()],
     skills_dir=Path("example/skills"),
-    enable_tools=True,
 )
 ```
 
-`SkillManager` 会扫描每个包含 `SKILL.md` 的子目录。`SKILL_MODEL` 指定的
-路由模型会根据 YAML front matter 选择匹配的 Skill。选中的 `SKILL.md`、
-可选 `template.md` 和可选 `examples/sample.md` 会被注入 Agent 上下文。
+`SkillManager` 会扫描每个包含 `SKILL.md` 的子目录，索引 Skill 名称和
+YAML front matter 中的描述，并把紧凑 metadata 注入模型上下文。完整
+`SKILL.md`、可选 `template.md` 和可选 `examples/sample.md` 会在模型调用
+内置 `load_skill` 工具时按需加载。用户也可以用 `$skill_name` 或
+`skill:skill_name` 强制指定 Skill。
 
 ```text
 example/skills/
@@ -407,8 +335,8 @@ example/skills/
       sample.md
 ```
 
-当前 Skill 通过工具模式生命周期运行，因此需要设置 `enable_tools=True`，
-并通过 `run_finish` 完成任务。
+Skill 上下文本身不要求 Handler 工具。只有当任务需要通过 `run_finish`
+结束时，才需要注册 `FinishHandler`。
 
 ## 示例
 
@@ -419,7 +347,6 @@ uv run python example/01_stateful_chat.py
 uv run python example/02_custom_tool.py
 uv run python example/03_multi_agent.py
 uv run python example/04_mcp_tools.py
-uv run python example/05_role_workflow.py
 uv run python example/06_skill.py
 uv run python example/07_bash_approval.py
 ```
@@ -433,7 +360,7 @@ uv run python -m unittest
 ```
 
 当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为、Manager
-锁和并发、Workflow，以及示例文件是否可导入。
+锁和并发，以及示例文件是否可导入。
 
 ## 公共 API
 
@@ -442,10 +369,9 @@ BaseAgent(
     config: ModelConfig | None = None,
     *,
     agent_id: str,
-    system_prompt: str = REACT_LOOP_PROMPT,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[MiddleWare] | None = None,
-    enable_tools: bool = False,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,
@@ -457,8 +383,12 @@ await agent.startup()
 await agent.shutdown()
 ```
 
+传入 Handler 后，`BaseAgent` 会进入工具执行模式，并注入 runtime 内部工具
+协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可
+暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
+
 顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
-Workflow 类型、Handler 基类、`MethodToolHandler`、`BashHandler`、
+Handler 基类、`MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。
 

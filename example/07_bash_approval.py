@@ -1,4 +1,4 @@
-"""Trigger BashApprovalMiddleware with a deterministic bash_run call."""
+"""Trigger BashApprovalMiddleware with a deterministic bash_run approval."""
 
 import asyncio
 import json
@@ -17,7 +17,6 @@ async def main() -> None:
         agent_id="bash-approval-demo",
         handlers=[BashHandler()],
         middlewares=[BashApprovalMiddleware()],
-        enable_tools=True,
     )
 
     try:

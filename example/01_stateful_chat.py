@@ -10,7 +10,6 @@ async def main() -> None:
         config=ModelConfig.from_env(),
         agent_id="tutor",
         system_prompt="You are a concise Python tutor.",
-        enable_tools=False,
     )
 
     try:

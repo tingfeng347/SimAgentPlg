@@ -55,7 +55,6 @@ async def main() -> None:
         config=ModelConfig.from_env(),
         agent_id="calculator",
         handlers=[MathHandler()],
-        enable_tools=True,
     )
 
     try:

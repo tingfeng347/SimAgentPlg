@@ -14,30 +14,34 @@ from simagentplg.agent.context import (
     transform_context,
 )
 from simagentplg.agent.middleware import MiddleWare
-from simagentplg.agent.tool_runtime import ToolRuntime
+from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
 from simagentplg.agent.types import AgentMessage, StepOutcome
 from simagentplg.logger import get_logger
-from simagentplg.plugins.skill.skill_manager import SkillManager
+from simagentplg.plugins.skill.skill_manager import (
+    LOAD_SKILL_TOOL_NAME,
+    SkillManager,
+)
 
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
 
-TOOL_COMPLETION_PROMPT = """
-工具模式下，只有调用一个会结束任务的工具才表示任务完成。
-完成所有操作后，必须单独调用当前任务指定的完成工具。
-不要用普通文本结束任务，也不要在完成后继续调用其他工具。
+DEFAULT_SYSTEM_PROMPT = "You are a helpful, concise assistant."
+
+TOOL_PROTOCOL_PROMPT = """
+You can call external tools when they are available.
+
+Tool protocol:
+- Use tool calls for actions that require a registered tool.
+- Wait for tool results before deciding the next action.
+- Do not repeat the same ineffective tool call.
+- In tool mode, plain text does not finish the task.
+- After completing all work, call the task's finishing tool.
 """.strip()
 
-REACT_LOOP_PROMPT = """
-你是一个有能力调用外部工具的智能助手。你必须严格遵循以下 ReAct 流程：
-
-1. Thought: 分析当前问题，规划下一步行动。
-2. Action: 调用一个工具来执行行动。
-重要规则：
-- 每轮只能调用一个或一组工具，不能同时输出思考内容和工具调用之外的文字。
-- 工具执行结果会返回给你，请根据结果继续思考下一步。
-- 不要重复相同的无效操作。
-- 完成所有操作后，必须调用当前任务指定的完成工具来结束任务。
+TOOL_COMPLETION_RETRY_PROMPT = """
+Tool mode requires a finishing tool call to complete the task.
+If the work is complete, call the task's finishing tool now.
+Do not end with plain text.
 """.strip()
 
 DEFAULT_MAX_STEPS = 20
@@ -103,10 +107,9 @@ class BaseAgent:
         config: ModelConfig | None = None,
         *,
         agent_id: str,
-        system_prompt: str = REACT_LOOP_PROMPT,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
         middlewares: Iterable[MiddleWare] | None = None,
-        enable_tools: bool = False,
         skills_dir: str | Path | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,
@@ -119,7 +122,6 @@ class BaseAgent:
 
         self.config = config or ModelConfig.from_env()
         self.system_prompt = system_prompt
-        self.enable_tools = enable_tools
         self.max_steps = max_steps
         self.client = client or AsyncOpenAI(
             api_key=self.config.api_key,
@@ -131,7 +133,7 @@ class BaseAgent:
         self.messages: list[dict[str, Any]] = []
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
-        self._last_skill_name: str | None = None
+        self._active_skill_name: str | None = None
         self.logger = get_logger(f"{self.agent_id}")
         self._tool_runtime = ToolRuntime(
             self.handlers,
@@ -150,7 +152,13 @@ class BaseAgent:
     def tools(self) -> list[dict[str, Any]]:
         """Return the currently registered OpenAI tool definitions."""
 
-        return list(self._tool_runtime.tools)
+        return self._llm_tools()
+
+    @property
+    def has_handler_tools(self) -> bool:
+        """Return whether this agent has executable handler tools."""
+
+        return bool(self.handlers)
 
     def reset(
         self,
@@ -159,24 +167,22 @@ class BaseAgent:
         """Reset conversation memory while preserving the agent identity."""
 
         self.messages = [{"role": "system", "content": self.system_prompt}]
-        if self.enable_tools and self.system_prompt != REACT_LOOP_PROMPT:
-            self.messages.append(
-                {"role": "system", "content": TOOL_COMPLETION_PROMPT}
-            )
+        if self.has_handler_tools:
+            self.messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
         if history:
             self.messages.extend(dict(message) for message in history)
-        self._last_skill_name = None
+        self._active_skill_name = None
 
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
 
-        if self._started or not self.enable_tools:
+        if self._started or not self.has_handler_tools:
             return
 
         try:
             await self._tool_runtime.startup()
             self.logger.info(
-                "已装载 %d 个工具，注册工具: %s",
+                "Loaded %d handler(s); registered tools: %s",
                 len(self.handlers),
                 ", ".join(
                     sorted(
@@ -185,8 +191,6 @@ class BaseAgent:
                     )
                 ),
             )
-            if self._skill_manager is not None:
-                await self._skill_manager.discover()
         except Exception:
             try:
                 await self._tool_runtime.shutdown()
@@ -217,7 +221,7 @@ class BaseAgent:
     ) -> StepOutcome:
         """Dispatch a tool call to its explicitly registered handler."""
 
-        if not self.enable_tools:
+        if not self.has_handler_tools:
             raise RuntimeError("tool execution is disabled for this agent")
         if not self._started:
             await self.startup()
@@ -275,42 +279,46 @@ class BaseAgent:
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
 
-        if self.enable_tools:
+        if self._skill_manager is not None:
+            await self._skill_manager.discover()
+
+        if self.has_handler_tools:
             await self.startup()
             await self._tool_runtime.on_task_start()
 
+        self._active_skill_name = None
         self.messages.append({"role": "user", "content": task})
+        self._activate_explicit_skill()
 
         for turn in range(self.max_steps):
-            self.logger.info("第 %d/%d 轮", turn + 1, self.max_steps)
-            await self._inject_skill_messages()
+            self.logger.info("Turn %d/%d", turn + 1, self.max_steps)
             context_messages = self.transform_context(self.messages)
             llm_messages = self.convert_to_llm_messages(context_messages)
 
             message = await self.chat_text(
                 llm_messages,
-                tools=(self.tools or None) if self.enable_tools else None,
+                tools=self._llm_tools() or None,
             )
             self.messages.append(message.model_dump())
 
             if not message.tool_calls:
-                if not self.enable_tools and message.content:
+                if not self.has_handler_tools and message.content:
                     return message.content
-                if self.enable_tools:
+                if self.has_handler_tools:
                     self.messages.append(
                         {
                             "role": "system",
-                            "content": TOOL_COMPLETION_PROMPT,
+                            "content": TOOL_COMPLETION_RETRY_PROMPT,
                         }
                     )
                 continue
 
-            tool_result = await self._tool_runtime.execute_tool_calls(message)
+            tool_result = await self._execute_tool_calls(message)
             self.messages.extend(tool_result.messages)
             if tool_result.exit_value is not None:
                 return tool_result.exit_value
 
-        if self.enable_tools:
+        if self.has_handler_tools:
             raise RuntimeError(
                 f"agent {self.agent_id!r} did not finish within "
                 f"{self.max_steps} steps"
@@ -323,7 +331,29 @@ class BaseAgent:
     ) -> list[AgentMessage]:
         """Transform internal messages before provider conversion."""
 
-        return transform_context(messages)
+        context = transform_context(messages)
+        if self._skill_manager is None:
+            return context
+
+        skill_messages: list[dict[str, str]] = []
+        skill_index_message = self._skill_manager.build_index_message()
+        if skill_index_message is not None:
+            skill_messages.append(skill_index_message)
+        if self._active_skill_name is not None:
+            skill_messages.append(
+                self._skill_manager.build_skill_context_message(
+                    self._active_skill_name
+                )
+            )
+        if skill_messages:
+            insert_at = 0
+            while (
+                insert_at < len(context)
+                and context[insert_at].get("role") == "system"
+            ):
+                insert_at += 1
+            context[insert_at:insert_at] = skill_messages
+        return context
 
     def convert_to_llm_messages(
         self,
@@ -333,15 +363,104 @@ class BaseAgent:
 
         return convert_to_llm_messages(messages)
 
-    async def _inject_skill_messages(self) -> None:
+    def _activate_explicit_skill(self) -> None:
         if self._skill_manager is None:
             return
 
-        skill_dispatch = await self._skill_manager.dispatch(self.messages)
-        if not skill_dispatch:
-            return
+        skill_name = self._skill_manager.select_explicit_skill(self.messages)
+        if skill_name is not None:
+            self._active_skill_name = skill_name
 
-        skill_name = skill_dispatch.get("skill_name", "")
-        if skill_name and skill_name != self._last_skill_name:
-            self._last_skill_name = skill_name
-            self.messages.extend(skill_dispatch["messages"])
+    def _llm_tools(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        if self.has_handler_tools:
+            tools.extend(self._tool_runtime.tools)
+        if self._skill_manager is not None:
+            load_skill_tool = self._skill_manager.build_load_skill_tool()
+            if load_skill_tool is not None:
+                tools.append(load_skill_tool)
+        return tools
+
+    async def _execute_tool_calls(
+        self,
+        message: ChatCompletionMessage,
+    ) -> ToolCallResult:
+        result_messages: list[dict[str, Any]] = []
+
+        for tool_call in message.tool_calls or []:
+            if tool_call.type != "function":
+                continue
+            if tool_call.function.name == LOAD_SKILL_TOOL_NAME:
+                result_messages.append(self._execute_load_skill_call(tool_call))
+                continue
+
+            if not self.has_handler_tools:
+                result_messages.append(
+                    self._tool_error_message(
+                        tool_call.id,
+                        tool_call.function.name,
+                        "tool execution is disabled for this agent",
+                    )
+                )
+                continue
+
+            tool_result = await self._tool_runtime.execute_tool_call(tool_call)
+            result_messages.extend(tool_result.messages)
+            if tool_result.exit_value is not None:
+                return ToolCallResult(
+                    tuple(result_messages),
+                    exit_value=tool_result.exit_value,
+                )
+
+        return ToolCallResult(tuple(result_messages))
+
+    def _execute_load_skill_call(self, tool_call: Any) -> dict[str, str]:
+        if self._skill_manager is None:
+            return self._tool_error_message(
+                tool_call.id,
+                LOAD_SKILL_TOOL_NAME,
+                "skill loading is disabled for this agent",
+            )
+
+        try:
+            arguments = json.loads(tool_call.function.arguments)
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be a JSON object")
+            skill_name = arguments.get("skill_name")
+            if not isinstance(skill_name, str) or not skill_name.strip():
+                raise TypeError("skill_name must be a non-empty string")
+            result = self._skill_manager.load_skill(skill_name.strip())
+            self._active_skill_name = result["skill_name"]
+        except Exception as exc:
+            payload: dict[str, Any] = {
+                "status": "error",
+                "tool": LOAD_SKILL_TOOL_NAME,
+                "error": str(exc),
+            }
+        else:
+            payload = result
+
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": json.dumps(payload, ensure_ascii=False, default=str),
+        }
+
+    @staticmethod
+    def _tool_error_message(
+        tool_call_id: str,
+        tool_name: str,
+        error: str,
+    ) -> dict[str, str]:
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(
+                {
+                    "status": "error",
+                    "tool": tool_name,
+                    "error": error,
+                },
+                ensure_ascii=False,
+            ),
+        }

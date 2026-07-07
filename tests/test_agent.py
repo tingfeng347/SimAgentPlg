@@ -1,6 +1,8 @@
 import json
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +19,11 @@ from simagentplg import (
     StepOutcome,
     ToolMiddleware,
     format_tool_call_preview,
+)
+from simagentplg.agent.base import (
+    DEFAULT_SYSTEM_PROMPT,
+    TOOL_COMPLETION_RETRY_PROMPT,
+    TOOL_PROTOCOL_PROMPT,
 )
 
 TEST_CONFIG = ModelConfig(
@@ -275,13 +282,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         first = BaseAgent(
             TEST_CONFIG,
             agent_id="first",
-            enable_tools=False,
             client=first_client,
         )
         second = BaseAgent(
             TEST_CONFIG,
             agent_id="second",
-            enable_tools=False,
             client=second_client,
         )
 
@@ -302,7 +307,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="memory",
-            enable_tools=False,
             client=client,
         )
 
@@ -323,6 +327,70 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_default_system_prompt_is_plain_chat_prompt(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="default-prompt",
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(agent.system_prompt, DEFAULT_SYSTEM_PROMPT)
+        self.assertEqual(
+            agent.messages,
+            [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}],
+        )
+
+    async def test_tool_mode_injects_tool_protocol_explicitly(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tool-protocol",
+            system_prompt="You are a custom coding agent.",
+            handlers=[DoneHandler()],
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            agent.messages,
+            [
+                {"role": "system", "content": "You are a custom coding agent."},
+                {"role": "system", "content": TOOL_PROTOCOL_PROMPT},
+            ],
+        )
+
+    async def test_plain_chat_has_no_tool_protocol_message(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="plain-protocol",
+            system_prompt="You are a plain chat agent.",
+            client=FakeClient([]),
+        )
+
+        self.assertEqual(
+            agent.messages,
+            [
+                {"role": "system", "content": "You are a plain chat agent."},
+            ],
+        )
+
+    async def test_plain_chat_returns_text_without_retry_prompt(self) -> None:
+        client = FakeClient([FakeMessage("plain text")])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="plain-retry",
+            max_steps=2,
+            client=client,
+        )
+
+        result = await agent.runtime(task="plain chat")
+
+        self.assertEqual(result, "plain text")
+        self.assertFalse(
+            any(
+                message.get("content") == TOOL_COMPLETION_RETRY_PROMPT
+                for message in agent.messages
+            )
+        )
+
     async def test_convert_to_llm_messages_can_filter_internal_context(self) -> None:
         class FilteringAgent(BaseAgent):
             def convert_to_llm_messages(
@@ -339,7 +407,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = FilteringAgent(
             TEST_CONFIG,
             agent_id="context",
-            enable_tools=False,
             client=client,
         )
         agent.messages.append(
@@ -361,12 +428,156 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             any(message.get("content") == "real task" for message in sent_messages)
         )
 
+    async def test_skill_metadata_is_injected_without_llm_router(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "This full instruction should load only on demand.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient([FakeMessage("ok")])
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-index",
+                skills_dir=skills_dir,
+                client=client,
+            )
+
+            with patch.dict("os.environ", {}, clear=True):
+                result = await agent.runtime(task="Write release notes")
+
+        self.assertEqual(result, "ok")
+        sent_messages = client.completions.calls[0]["messages"]
+        joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
+        self.assertIn("Available skills:", joined)
+        self.assertIn("release_notes: Write user-facing release notes.", joined)
+        self.assertNotIn("This full instruction should load only on demand.", joined)
+
+    async def test_explicit_skill_name_loads_full_skill_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            examples_dir = skill_dir / "examples"
+            examples_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "FULL SKILL RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
+            (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
+            client = FakeClient([FakeMessage("ok")])
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-load",
+                skills_dir=skills_dir,
+                client=client,
+            )
+
+            await agent.runtime(task="$release_notes Write release notes")
+
+        sent_messages = client.completions.calls[0]["messages"]
+        joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
+        self.assertIn('You are executing the local skill "release_notes".', joined)
+        self.assertIn("FULL SKILL RULES", joined)
+        self.assertIn("TEMPLATE BODY", joined)
+        self.assertIn("SAMPLE BODY", joined)
+
+    async def test_model_can_load_skill_with_internal_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "FULL SKILL RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient(
+                [
+                    FakeMessage(
+                        tool_calls=[
+                            FakeToolCall(
+                                id="skill-call",
+                                function=FakeFunction(
+                                    "load_skill",
+                                    '{"skill_name": "release_notes"}',
+                                ),
+                            )
+                        ]
+                    ),
+                    FakeMessage("release notes"),
+                ]
+            )
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-tool",
+                skills_dir=skills_dir,
+                client=client,
+            )
+
+            result = await agent.runtime(task="Write release notes")
+
+        self.assertEqual(result, "release notes")
+        first_tools = client.completions.calls[0]["tools"]
+        self.assertEqual(
+            [tool["function"]["name"] for tool in first_tools],
+            ["load_skill"],
+        )
+        tool_message = next(
+            message
+            for message in agent.messages
+            if message.get("role") == "tool"
+        )
+        self.assertEqual(
+            json.loads(tool_message["content"])["skill_name"],
+            "release_notes",
+        )
+        second_messages = client.completions.calls[1]["messages"]
+        joined = "\n".join(
+            str(message.get("content", "")) for message in second_messages
+        )
+        self.assertIn('You are executing the local skill "release_notes".', joined)
+        self.assertIn("FULL SKILL RULES", joined)
+
     async def test_chat_json_requests_and_parses_json_object(self) -> None:
         client = FakeClient([FakeMessage('{"ok": true, "count": 2}')])
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="json",
-            enable_tools=False,
             client=client,
         )
 
@@ -385,7 +596,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="bad-json",
-            enable_tools=False,
             client=client,
         )
 
@@ -396,7 +606,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="  assistant  ",
-            enable_tools=False,
             client=FakeClient([]),
         )
 
@@ -411,7 +620,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     BaseAgent(
                         TEST_CONFIG,
                         agent_id=agent_id,
-                        enable_tools=False,
                         client=FakeClient([]),
                     )
 
@@ -419,7 +627,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TypeError, "agent_id"):
             BaseAgent(  # type: ignore[call-arg]
                 TEST_CONFIG,
-                enable_tools=False,
                 client=FakeClient([]),
             )
 
@@ -437,7 +644,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[echo],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -454,7 +660,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[bash, echo],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -470,7 +675,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="tools",
             handlers=[finish],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -484,7 +688,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="chat",
-            enable_tools=False,
             client=FakeClient([]),
         )
 
@@ -496,7 +699,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="duplicate-tools",
             handlers=[EchoHandler(), EchoHandler()],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -508,7 +710,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="unknown-tool",
             handlers=[EchoHandler()],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -543,7 +744,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="invalid-json",
             handlers=[EchoHandler(), DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -578,7 +778,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="finish-required",
             handlers=[DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -589,7 +788,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 message.get("role") == "system"
-                and "完成工具" in message.get("content", "")
+                and message.get("content") == TOOL_COMPLETION_RETRY_PROMPT
                 for message in second_messages
             )
         )
@@ -625,7 +824,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="log-tools",
             handlers=[EchoHandler(), DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -634,11 +832,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(json.loads(result or "")["summary"], "logged")
         logs = "\n".join(captured.output)
-        self.assertIn("调用工具 echo", logs)
-        self.assertIn('参数={"text": "hello"}', logs)
-        self.assertIn("工具 echo 完成 exit=False", logs)
-        self.assertIn("调用工具 done", logs)
-        self.assertIn("工具 done 完成 exit=True", logs)
+        self.assertIn("Calling tool echo", logs)
+        self.assertIn('arguments={"text": "hello"}', logs)
+        self.assertIn("Tool echo completed exit=False", logs)
+        self.assertIn("Calling tool done", logs)
+        self.assertIn("Tool done completed exit=True", logs)
 
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()
@@ -672,7 +870,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="task-hooks",
             handlers=[handler, DoneHandler()],
-            enable_tools=True,
             client=client,
         )
 
@@ -689,7 +886,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-low-risk",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -729,7 +925,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-task-hooks",
             handlers=[DoneHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -738,15 +933,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(middleware.task_starts, 2)
 
-    async def test_middlewares_do_not_run_when_tools_are_disabled(self) -> None:
+    async def test_middlewares_do_not_run_without_handlers(self) -> None:
         middleware = RecordingToolMiddleware()
         client = FakeClient([FakeMessage("plain chat")])
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="middleware-disabled",
-            handlers=[EchoHandler()],
             middlewares=[middleware],
-            enable_tools=False,
             client=client,
         )
 
@@ -786,7 +979,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-reject",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -808,7 +1000,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="middleware-chain",
             handlers=[handler],
             middlewares=[first, second],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -855,7 +1046,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="human-approval-reject",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=client,
         )
 
@@ -880,7 +1070,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="human-approval-allow",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -893,14 +1082,37 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
         self.assertEqual(handler.calls, 1)
 
-    async def test_bash_approval_middleware_allows_low_risk_bash_run(self) -> None:
+    async def test_bash_approval_middleware_reviews_unlisted_bash_run_by_default(self) -> None:
         middleware = BashApprovalMiddleware()
         agent = BaseAgent(
             TEST_CONFIG,
-            agent_id="bash-approval-low-risk",
+            agent_id="bash-approval-default",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="y") as input_mock,
+            patch("builtins.print") as print_mock,
+        ):
+            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
+
+        input_mock.assert_called_once()
+        preview = print_mock.call_args_list[0].args[0]
+        self.assertIn("Review:", preview)
+        self.assertIn("safe command allowlist", preview)
+        self.assertFalse(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["stdout"], "ok")
+
+    async def test_bash_approval_middleware_can_skip_review_explicitly(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="never")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-never",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
             client=FakeClient([]),
         )
 
@@ -912,14 +1124,55 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data["status"], "success")
         self.assertEqual(outcome.data["stdout"], "ok")
 
-    async def test_bash_approval_middleware_rejects_risky_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware()
+    async def test_bash_approval_safe_policy_skips_allowlisted_command(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
         agent = BaseAgent(
             TEST_CONFIG,
-            agent_id="bash-approval-reject",
+            agent_id="bash-approval-safe",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
+            client=FakeClient([]),
+        )
+
+        with patch("builtins.input") as input_mock:
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "git status --short"},
+            )
+
+        input_mock.assert_not_called()
+        self.assertEqual(outcome.data["status"], "success")
+        self.assertEqual(outcome.data["exit_code"], 0)
+
+    async def test_bash_approval_safe_policy_reviews_unlisted_command(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-unlisted",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="n") as input_mock,
+            patch("builtins.print") as print_mock,
+        ):
+            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
+
+        input_mock.assert_called_once()
+        preview = print_mock.call_args_list[0].args[0]
+        self.assertIn("safe command allowlist", preview)
+        self.assertTrue(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "rejected")
+
+    async def test_bash_approval_safe_policy_reviews_shell_redirection(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-dev-null",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
             client=FakeClient([]),
         )
 
@@ -929,7 +1182,30 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await agent.dispatch(
                 "bash_run",
-                {"code": "printf ok > /dev/null"},
+                {"code": "git status --short > /dev/null"},
+            )
+
+        input_mock.assert_called_once()
+        self.assertTrue(outcome.should_exit)
+        self.assertEqual(outcome.data["status"], "rejected")
+
+    async def test_bash_approval_middleware_rejects_legacy_hint_policy_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="on_review_hint")
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="bash-approval-reject",
+            handlers=[BashHandler()],
+            middlewares=[middleware],
+            client=FakeClient([]),
+        )
+
+        with (
+            patch("builtins.input", return_value="n") as input_mock,
+            patch("builtins.print"),
+        ):
+            outcome = await agent.dispatch(
+                "bash_run",
+                {"code": "rm -rf build"},
             )
 
         input_mock.assert_called_once()
@@ -937,14 +1213,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.data["status"], "rejected")
         self.assertEqual(outcome.data["tool"], "bash_run")
 
-    async def test_bash_approval_middleware_approves_risky_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware()
+    async def test_bash_approval_middleware_approves_unlisted_safe_policy_bash_run(self) -> None:
+        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="bash-approval-approve",
             handlers=[BashHandler()],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -954,7 +1229,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await agent.dispatch(
                 "bash_run",
-                {"code": "printf ok > /dev/null"},
+                {"code": "rm -rf build"},
             )
 
         input_mock.assert_called_once()
@@ -970,7 +1245,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             agent_id="bash-approval-ignore",
             handlers=[handler],
             middlewares=[middleware],
-            enable_tools=True,
             client=FakeClient([]),
         )
 
@@ -998,7 +1272,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             TEST_CONFIG,
             agent_id="repeat-guard",
             handlers=[handler],
-            enable_tools=True,
             max_steps=3,
             client=client,
         )
@@ -1013,7 +1286,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="step-limit",
-            enable_tools=True,
+            handlers=[DoneHandler()],
             max_steps=2,
             client=client,
         )
@@ -1021,21 +1294,17 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
             await agent.runtime(task="never finish")
 
-    async def test_tool_disabled_mode_does_not_start_handlers(self) -> None:
-        handler = EchoHandler()
+    async def test_plain_chat_mode_does_not_start_handlers(self) -> None:
         client = FakeClient([FakeMessage("plain chat")])
         agent = BaseAgent(
             TEST_CONFIG,
             agent_id="plain-chat",
-            handlers=[handler],
-            enable_tools=False,
             client=client,
         )
 
         result = await agent.runtime(task="hello")
 
         self.assertEqual(result, "plain chat")
-        self.assertEqual(handler.started, 0)
         self.assertIsNone(client.completions.calls[0]["tools"])
 
     async def test_bash_handler_rejects_invalid_arguments(self) -> None:

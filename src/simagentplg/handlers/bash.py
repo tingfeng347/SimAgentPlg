@@ -14,18 +14,18 @@ BASH_TOOL: ToolSchema = {
     "function": {
         "name": "bash_run",
         "description": (
-            "在 Bash 环境中执行脚本，返回 stdout、退出码和状态。"
+            "Run a Bash script and return stdout, exit code, and status."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "要执行的 Bash 脚本，支持多行",
+                    "description": "Bash script to execute. Multiline scripts are supported.",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "最长等待秒数",
+                    "description": "Maximum runtime in seconds.",
                     "minimum": 1,
                 },
             },
@@ -124,7 +124,7 @@ class BashHandler(MethodToolHandler):
                 }
             )
 
-        logger.info("执行 bash_run, timeout=%d, cwd=%s", timeout, self.cwd)
+        logger.info("Executing bash_run timeout=%d cwd=%s", timeout, self.cwd)
         result = await run_bash(
             code,
             timeout=timeout,

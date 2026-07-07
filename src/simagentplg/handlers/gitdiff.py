@@ -14,8 +14,9 @@ GITDIFF_TOOL: ToolSchema = {
     "function": {
         "name": "run_gitdiff",
         "description": (
-            "查看当前 Git 工作区的文件变化。可用于完成任务前检查文件状态、"
-            "变更统计或完整 diff。调用该工具不会结束当前任务。"
+            "Inspect Git working-tree changes before finishing a task. "
+            "This tool can return status, diff stats, or the full diff. "
+            "Calling it does not finish the task."
         ),
         "parameters": {
             "type": "object",
@@ -25,8 +26,8 @@ GITDIFF_TOOL: ToolSchema = {
                     "enum": ["status", "stat", "diff"],
                     "default": "status",
                     "description": (
-                        "返回 Git 变化的模式：status 返回 git status --short；"
-                        "stat 返回 git diff --stat；diff 返回 git diff。"
+                        "Change report mode: status returns git status --short; "
+                        "stat returns git diff --stat; diff returns git diff."
                     ),
                 },
             },
@@ -95,7 +96,7 @@ class GitDiffHandler(MethodToolHandler):
                 }
             )
 
-        logger.info("Git diff 工具完成，mode=%s", mode)
+        logger.info("Git diff completed mode=%s", mode)
         return StepOutcome(
             {
                 "status": "success",

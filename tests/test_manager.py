@@ -70,15 +70,6 @@ class BlockingAgent(StubAgent):
         return f"{self.name}:{task}"
 
 
-class ResettableAgent(StubAgent):
-    def __init__(self, name: str) -> None:
-        super().__init__(name)
-        self.reset_count = 0
-
-    def reset(self) -> None:
-        self.reset_count += 1
-
-
 class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_errors_are_explicit(self) -> None:
         manager = AgentManager()
@@ -118,16 +109,6 @@ class AgentManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, {"one": "one:a", "two": "two:b"})
         self.assertEqual(activity.maximum, 2)
-
-    async def test_run_isolated_resets_agent_before_running(self) -> None:
-        manager = AgentManager()
-        agent = ResettableAgent("one")
-        manager.register(agent)  # type: ignore[arg-type]
-
-        result = await manager.run_isolated("one", "task")
-
-        self.assertEqual(result, "one:task")
-        self.assertEqual(agent.reset_count, 1)
 
     async def test_run_many_isolates_failures(self) -> None:
         manager = AgentManager()

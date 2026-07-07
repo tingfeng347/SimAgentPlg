@@ -7,16 +7,16 @@ def setup_logger(
     log_file: str = "./logs/app.log",
     fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 ):
-    """创建并配置日志记录器，输出到控制台。
+    """Create and configure a console logger.
 
     Args:
-        name: 日志记录器名称。
-        level: 最低日志级别，默认为 "INFO"。
-        log_file: 日志文件路径（当前仅保留参数，暂未启用文件输出）。
-        fmt: 日志格式字符串。
+        name: Logger name.
+        level: Minimum log level.
+        log_file: Reserved for future file logging.
+        fmt: Log format string.
 
     Returns:
-        配置完成的 logging.Logger 实例。
+        Configured logging.Logger instance.
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -35,12 +35,12 @@ def setup_logger(
 
 
 def get_logger(name: str = "SimAgentPlg") -> logging.Logger:
-    """获取或创建指定名称的日志记录器。
+    """Return a configured logger by name.
 
     Args:
-        name: 日志记录器名称，默认为 "SimAgentPlg"。
+        name: Logger name.
 
     Returns:
-        配置完成的 logging.Logger 实例。
+        Configured logging.Logger instance.
     """
     return setup_logger(name)

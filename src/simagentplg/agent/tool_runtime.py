@@ -1,38 +1,14 @@
+import logging
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from simagentplg.agent.middleware import MiddleWare
 from simagentplg.agent.types import StepOutcome
+from simagentplg.handlers.base import BaseHandler
 
 MAX_REPEATED_TOOL_CALLS = 3
-
-
-class ToolHandler(Protocol):
-    @property
-    def tools(self) -> Sequence[dict[str, Any]]: ...
-
-    @property
-    def tool_names(self) -> tuple[str, ...]: ...
-
-    async def startup(self) -> None: ...
-
-    async def shutdown(self) -> None: ...
-
-    async def on_task_start(self) -> None: ...
-
-    async def dispatch(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome: ...
-
-
-class LoggerLike(Protocol):
-    def info(self, message: str, *args: Any) -> None: ...
-
-    def warning(self, message: str, *args: Any) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,15 +22,15 @@ class ToolRuntime:
 
     def __init__(
         self,
-        handlers: Iterable[ToolHandler],
+        handlers: Iterable[BaseHandler],
         middlewares: Iterable[MiddleWare],
         *,
-        logger: LoggerLike,
+        logger: logging.Logger,
     ) -> None:
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)
         self.logger = logger
-        self._tool_routes: dict[str, ToolHandler] = {}
+        self._tool_routes: dict[str, BaseHandler] = {}
         self._started = False
         self._last_tool_signature: tuple[str, str] | None = None
         self._repeated_tool_calls = 0
@@ -75,7 +51,7 @@ class ToolRuntime:
         if self._started:
             return
 
-        started_handlers: list[ToolHandler] = []
+        started_handlers: list[BaseHandler] = []
         started_middlewares: list[MiddleWare] = []
         try:
             for handler in self.handlers:
@@ -91,7 +67,7 @@ class ToolRuntime:
                     await middleware.shutdown()
                 except Exception as shutdown_error:
                     self.logger.warning(
-                        "Middleware %s 回滚关闭失败: %s",
+                        "Middleware %s rollback shutdown failed: %s",
                         type(middleware).__name__,
                         shutdown_error,
                     )
@@ -100,7 +76,7 @@ class ToolRuntime:
                     await handler.shutdown()
                 except Exception as shutdown_error:
                     self.logger.warning(
-                        "Handler %s 回滚关闭失败: %s",
+                        "Handler %s rollback shutdown failed: %s",
                         type(handler).__name__,
                         shutdown_error,
                     )
@@ -175,57 +151,62 @@ class ToolRuntime:
         ]
 
         for tool_call in function_calls:
-            tool_name = tool_call.function.name
-            raw_arguments = tool_call.function.arguments
-            self._check_repeated_tool_call(tool_name, raw_arguments)
-            self.logger.info(
-                "调用工具 %s 参数=%s",
-                tool_name,
-                summarize_for_log(raw_arguments),
-            )
-            try:
-                arguments = json.loads(raw_arguments)
-                if not isinstance(arguments, dict):
-                    raise TypeError("tool arguments must be a JSON object")
-                outcome = await self.dispatch(tool_name, arguments)
-                self.logger.info(
-                    "工具 %s 完成 exit=%s 结果=%s",
-                    tool_name,
-                    outcome.should_exit,
-                    summarize_for_log(outcome.data),
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "工具 %s 执行失败: %s 参数=%s",
-                    tool_name,
-                    exc,
-                    summarize_for_log(raw_arguments),
-                )
-                outcome = StepOutcome(
-                    {
-                        "status": "error",
-                        "tool": tool_name,
-                        "error": str(exc),
-                    }
-                )
-
-            serialized = serialize_tool_result(outcome.data)
-            result_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": serialized,
-                }
-            )
-            if outcome.should_exit:
+            result = await self.execute_tool_call(tool_call)
+            result_messages.extend(result.messages)
+            if result.exit_value is not None:
                 return ToolCallResult(
                     tuple(result_messages),
-                    exit_value=serialized,
+                    exit_value=result.exit_value,
                 )
         return ToolCallResult(tuple(result_messages))
 
-    def _build_tool_routes(self) -> dict[str, ToolHandler]:
-        routes: dict[str, ToolHandler] = {}
+    async def execute_tool_call(self, tool_call: Any) -> ToolCallResult:
+        tool_name = tool_call.function.name
+        raw_arguments = tool_call.function.arguments
+        self._check_repeated_tool_call(tool_name, raw_arguments)
+        self.logger.info(
+            "Calling tool %s arguments=%s",
+            tool_name,
+            summarize_for_log(raw_arguments),
+        )
+        try:
+            arguments = json.loads(raw_arguments)
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be a JSON object")
+            outcome = await self.dispatch(tool_name, arguments)
+            self.logger.info(
+                "Tool %s completed exit=%s result=%s",
+                tool_name,
+                outcome.should_exit,
+                summarize_for_log(outcome.data),
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Tool %s failed: %s arguments=%s",
+                tool_name,
+                exc,
+                summarize_for_log(raw_arguments),
+            )
+            outcome = StepOutcome(
+                {
+                    "status": "error",
+                    "tool": tool_name,
+                    "error": str(exc),
+                }
+            )
+
+        serialized = serialize_tool_result(outcome.data)
+        message = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": serialized,
+        }
+        if outcome.should_exit:
+            return ToolCallResult((message,), exit_value=serialized)
+        return ToolCallResult((message,))
+
+    def _build_tool_routes(self) -> dict[str, BaseHandler]:
+        routes: dict[str, BaseHandler] = {}
         for handler in self.handlers:
             for tool_name in handler.tool_names:
                 if tool_name in routes:

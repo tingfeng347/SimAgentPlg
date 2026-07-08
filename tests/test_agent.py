@@ -395,6 +395,38 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_plain_chat_rejects_empty_completion(self) -> None:
+        client = FakeClient([FakeMessage(None)])
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="plain-empty",
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "empty content"):
+            await agent.runtime(task="plain chat")
+
+    async def test_plain_chat_raises_when_step_limit_is_exhausted(self) -> None:
+        unknown_call = FakeToolCall(
+            id="call-1",
+            function=FakeFunction("unknown", "{}"),
+        )
+        client = FakeClient(
+            [
+                FakeMessage(tool_calls=[unknown_call]),
+                FakeMessage(tool_calls=[unknown_call]),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="plain-step-limit",
+            max_steps=2,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not finish plain chat"):
+            await agent.runtime(task="plain chat")
+
     async def test_convert_to_llm_messages_can_filter_internal_context(self) -> None:
         class FilteringAgent(BaseAgent):
             def convert_to_llm_messages(
@@ -469,6 +501,52 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Available skills:", joined)
         self.assertIn("release_notes: Write user-facing release notes.", joined)
         self.assertNotIn("This full instruction should load only on demand.", joined)
+
+    async def test_skill_discovery_is_not_repeated_between_runtime_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write release notes.",
+                        "---",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            client = FakeClient([FakeMessage("first"), FakeMessage("second")])
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-once",
+                skills_dir=skills_dir,
+                client=client,
+            )
+
+            await agent.runtime(task="first")
+            new_skill_dir = skills_dir / "hot_loaded"
+            new_skill_dir.mkdir()
+            (new_skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: hot_loaded",
+                        "description: Should not appear without refresh.",
+                        "---",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            await agent.runtime(task="second")
+
+        second_tools = client.completions.calls[1]["tools"]
+        skill_names = second_tools[0]["function"]["parameters"]["properties"][
+            "skill_name"
+        ]["enum"]
+        self.assertEqual(skill_names, ["release_notes"])
 
     async def test_explicit_skill_name_loads_full_skill_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -576,6 +654,71 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn('You are executing the local skill "release_notes".', joined)
         self.assertIn("FULL SKILL RULES", joined)
+
+    async def test_full_skill_context_file_reads_are_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            examples_dir = skill_dir / "examples"
+            examples_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write user-facing release notes.",
+                        "---",
+                        "",
+                        "# Release Notes",
+                        "",
+                        "FULL SKILL RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
+            (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
+            client = FakeClient(
+                [
+                    FakeMessage(
+                        tool_calls=[
+                            FakeToolCall(
+                                id="skill-call",
+                                function=FakeFunction(
+                                    "load_skill",
+                                    '{"skill_name": "release_notes"}',
+                                ),
+                            )
+                        ]
+                    ),
+                    FakeMessage("release notes"),
+                ]
+            )
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="skills-cache",
+                skills_dir=skills_dir,
+                client=client,
+            )
+            await agent.startup()
+
+            original_read_text = Path.read_text
+            read_counts: dict[Path, int] = {}
+
+            def count_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+                read_counts[path] = read_counts.get(path, 0) + 1
+                return original_read_text(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", autospec=True) as read_text:
+                read_text.side_effect = count_read_text
+                result = await agent.runtime(
+                    task="$release_notes Write release notes"
+                )
+
+        self.assertEqual(result, "release notes")
+        self.assertEqual(read_counts[skill_dir / "SKILL.md"], 1)
+        self.assertEqual(read_counts[skill_dir / "template.md"], 1)
+        self.assertEqual(read_counts[examples_dir / "sample.md"], 1)
 
     async def test_chat_json_requests_and_parses_json_object(self) -> None:
         client = FakeClient([FakeMessage('{"ok": true, "count": 2}')])
@@ -797,6 +940,37 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_tool_mode_retries_plain_text_with_diagnostic_limit(self) -> None:
+        client = FakeClient(
+            [
+                FakeMessage("first plain text"),
+                FakeMessage("second plain text"),
+                FakeMessage("third plain text"),
+            ]
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="tool-retry-limit",
+            handlers=[DoneHandler()],
+            max_steps=5,
+            client=client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "without a finishing tool call"):
+            await agent.runtime(task="complete the task")
+
+        retry_prompts = [
+            message["content"]
+            for message in agent.messages
+            if message.get("role") == "system"
+            and message.get("content", "").startswith(
+                "Tool mode requires a finishing tool call"
+            )
+        ]
+        self.assertEqual(len(retry_prompts), 2)
+        self.assertEqual(len(set(retry_prompts)), 2)
+        self.assertIn("Retry 2/3", retry_prompts[1])
+
     async def test_tool_calls_are_logged(self) -> None:
         client = FakeClient(
             [
@@ -881,6 +1055,53 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await agent.runtime(task="second")
 
         self.assertEqual(handler.task_starts, 2)
+
+    async def test_startup_before_runtime_does_not_repeat_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skills_dir = Path(temp_dir)
+            skill_dir = skills_dir / "release_notes"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: release_notes",
+                        "description: Write release notes.",
+                        "---",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            handler = EchoHandler()
+            client = FakeClient(
+                [
+                    FakeMessage(
+                        tool_calls=[
+                            FakeToolCall(
+                                id="call-1",
+                                function=FakeFunction(
+                                    "done",
+                                    '{"summary": "done"}',
+                                ),
+                            )
+                        ]
+                    )
+                ]
+            )
+            agent = BaseAgent(
+                TEST_CONFIG,
+                agent_id="startup-once",
+                handlers=[handler, DoneHandler()],
+                skills_dir=skills_dir,
+                client=client,
+            )
+
+            await agent.startup()
+            result = await agent.runtime(task="finish")
+
+        self.assertEqual(json.loads(result or "")["summary"], "done")
+        self.assertEqual(handler.started, 1)
+        self.assertEqual(handler.task_starts, 1)
 
     async def test_tool_middleware_lifecycle_and_low_risk_execution(self) -> None:
         handler = EchoHandler()

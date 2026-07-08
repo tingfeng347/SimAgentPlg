@@ -109,6 +109,8 @@ class ToolRuntime:
             ) from errors[0]
 
     async def on_task_start(self) -> None:
+        """Reset per-task tool state and notify handlers/middleware."""
+
         self._last_tool_signature = None
         self._repeated_tool_calls = 0
         for handler in self.handlers:

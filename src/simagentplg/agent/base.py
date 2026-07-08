@@ -45,6 +45,7 @@ Do not end with plain text.
 """.strip()
 
 DEFAULT_MAX_STEPS = 20
+MAX_NO_TOOL_RESPONSES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,8 @@ class BaseAgent:
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
 
+        await self._ensure_skills_discovered()
+
         if self._started or not self.has_handler_tools:
             return
 
@@ -279,51 +282,12 @@ class BaseAgent:
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
 
-        if self._skill_manager is not None:
-            await self._skill_manager.discover()
+        await self._ensure_ready()
+        await self._prepare_task(task)
 
         if self.has_handler_tools:
-            await self.startup()
-            await self._tool_runtime.on_task_start()
-
-        self._active_skill_name = None
-        self.messages.append({"role": "user", "content": task})
-        self._activate_explicit_skill()
-
-        for turn in range(self.max_steps):
-            self.logger.info("Turn %d/%d", turn + 1, self.max_steps)
-            context_messages = self.transform_context(self.messages)
-            llm_messages = self.convert_to_llm_messages(context_messages)
-
-            message = await self.chat_text(
-                llm_messages,
-                tools=self._llm_tools() or None,
-            )
-            self.messages.append(message.model_dump())
-
-            if not message.tool_calls:
-                if not self.has_handler_tools and message.content:
-                    return message.content
-                if self.has_handler_tools:
-                    self.messages.append(
-                        {
-                            "role": "system",
-                            "content": TOOL_COMPLETION_RETRY_PROMPT,
-                        }
-                    )
-                continue
-
-            tool_result = await self._execute_tool_calls(message)
-            self.messages.extend(tool_result.messages)
-            if tool_result.exit_value is not None:
-                return tool_result.exit_value
-
-        if self.has_handler_tools:
-            raise RuntimeError(
-                f"agent {self.agent_id!r} did not finish within "
-                f"{self.max_steps} steps"
-            )
-        return None
+            return await self._run_react_loop()
+        return await self._run_plain_chat()
 
     def transform_context(
         self,
@@ -362,6 +326,98 @@ class BaseAgent:
         """Convert agent context messages into model provider messages."""
 
         return convert_to_llm_messages(messages)
+
+    async def _ensure_ready(self) -> None:
+        await self.startup()
+
+    async def _ensure_skills_discovered(self) -> None:
+        if self._skill_manager is not None:
+            await self._skill_manager.discover()
+
+    async def _prepare_task(self, task: str) -> None:
+        if self.has_handler_tools:
+            await self._tool_runtime.on_task_start()
+
+        self._active_skill_name = None
+        self.messages.append({"role": "user", "content": task})
+        self._activate_explicit_skill()
+
+    async def _run_plain_chat(self) -> str:
+        for turn in range(self.max_steps):
+            message = await self._chat_next_turn(turn)
+            self.messages.append(message.model_dump())
+
+            if not message.tool_calls:
+                if message.content:
+                    return message.content
+                raise RuntimeError("plain chat completion returned empty content")
+
+            tool_result = await self._execute_tool_calls(message)
+            self.messages.extend(tool_result.messages)
+            if tool_result.exit_value is not None:
+                return tool_result.exit_value
+
+        raise RuntimeError(
+            f"agent {self.agent_id!r} did not finish plain chat within "
+            f"{self.max_steps} steps"
+        )
+
+    async def _run_react_loop(self) -> str:
+        no_tool_response_count = 0
+
+        for turn in range(self.max_steps):
+            message = await self._chat_next_turn(turn)
+            self.messages.append(message.model_dump())
+
+            if not message.tool_calls:
+                no_tool_response_count += 1
+                if no_tool_response_count >= MAX_NO_TOOL_RESPONSES:
+                    raise RuntimeError(
+                        "tool mode produced plain text without a finishing "
+                        f"tool call {no_tool_response_count} consecutive times"
+                    )
+                self.messages.append(
+                    {
+                        "role": "system",
+                        "content": self._tool_completion_retry_prompt(
+                            no_tool_response_count
+                        ),
+                    }
+                )
+                continue
+
+            no_tool_response_count = 0
+            tool_result = await self._execute_tool_calls(message)
+            self.messages.extend(tool_result.messages)
+            if tool_result.exit_value is not None:
+                return tool_result.exit_value
+
+        raise RuntimeError(
+            f"agent {self.agent_id!r} did not finish within "
+            f"{self.max_steps} steps"
+        )
+
+    async def _chat_next_turn(self, turn: int) -> ChatCompletionMessage:
+        self.logger.info("Turn %d/%d", turn + 1, self.max_steps)
+        context_messages = self.transform_context(self.messages)
+        llm_messages = self.convert_to_llm_messages(context_messages)
+        return await self.chat_text(
+            llm_messages,
+            tools=self._llm_tools() or None,
+        )
+
+    @staticmethod
+    def _tool_completion_retry_prompt(no_tool_response_count: int) -> str:
+        if no_tool_response_count <= 1:
+            return TOOL_COMPLETION_RETRY_PROMPT
+        return (
+            TOOL_COMPLETION_RETRY_PROMPT
+            + "\n\n"
+            + (
+                f"Retry {no_tool_response_count}/{MAX_NO_TOOL_RESPONSES}: "
+                "the previous response still did not include a tool call."
+            )
+        )
 
     def _activate_explicit_skill(self) -> None:
         if self._skill_manager is None:

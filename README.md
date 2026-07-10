@@ -288,7 +288,7 @@ from simagentplg import BaseAgent, McpToolHandler, ModelConfig
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="browser",
-    handlers=[McpToolHandler("example/mcp_config.json")],
+    handlers=[McpToolHandler("examples/mcp_config.json")],
 )
 ```
 
@@ -321,7 +321,7 @@ agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
     handlers=[FinishHandler()],
-    skills_dir=Path("example/skills"),
+    skills_dir=Path("examples/skills"),
 )
 ```
 
@@ -333,7 +333,7 @@ tool to load full `SKILL.md`, optional `template.md`, and optional
 `$skill_name` or `skill:skill_name`.
 
 ```text
-example/skills/
+examples/skills/
   release_notes/
     SKILL.md
     template.md
@@ -346,15 +346,15 @@ only when the task should finish with `run_finish`.
 
 ## Examples
 
-Runnable examples are available in [`example/`](example/README.md):
+Runnable examples are available in [`examples/`](examples/README.md):
 
 ```bash
-uv run python example/01_stateful_chat.py
-uv run python example/02_custom_tool.py
-uv run python example/03_multi_agent.py
-uv run python example/04_mcp_tools.py
-uv run python example/06_skill.py
-uv run python example/07_bash_approval.py
+uv run python examples/01_stateful_chat.py
+uv run python examples/02_custom_tool.py
+uv run python examples/03_multi_agent.py
+uv run python examples/04_mcp_tools.py
+uv run python examples/06_skill.py
+uv run python examples/07_bash_approval.py
 ```
 
 ## Testing
@@ -377,7 +377,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
-    middlewares: Iterable[MiddleWare] | None = None,
+    middlewares: Iterable[Middleware] | None = None,
     skills_dir: str | Path | None = None,
     max_steps: int = 20,
     client: Any | None = None,

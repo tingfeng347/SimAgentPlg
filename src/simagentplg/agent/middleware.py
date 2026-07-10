@@ -26,7 +26,7 @@ BASH_SAFE_COMMAND_PREFIXES = (
 BASH_UNSAFE_SHELL_TOKENS = frozenset("|&;<>()`$")
 
 
-class MiddleWare:
+class Middleware:
     """Base class for reusable agent middleware."""
 
     def __init__(self, *, name: str | None = None, enabled: bool = True) -> None:
@@ -43,7 +43,7 @@ class MiddleWare:
         """Prepare middleware state for one new agent task."""
 
 
-class ToolMiddleware(MiddleWare):
+class ToolMiddleware(Middleware):
     """Middleware hook that runs before a tool handler is dispatched."""
 
     async def before_tool_call(

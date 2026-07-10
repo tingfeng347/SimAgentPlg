@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from simagentplg.agent.middleware import MiddleWare
+from simagentplg.agent.middleware import Middleware
 from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import BaseHandler
 
@@ -23,7 +23,7 @@ class ToolRuntime:
     def __init__(
         self,
         handlers: Iterable[BaseHandler],
-        middlewares: Iterable[MiddleWare],
+        middlewares: Iterable[Middleware],
         *,
         logger: logging.Logger,
     ) -> None:
@@ -52,7 +52,7 @@ class ToolRuntime:
             return
 
         started_handlers: list[BaseHandler] = []
-        started_middlewares: list[MiddleWare] = []
+        started_middlewares: list[Middleware] = []
         try:
             for handler in self.handlers:
                 await handler.startup()
@@ -109,6 +109,8 @@ class ToolRuntime:
             ) from errors[0]
 
     async def on_task_start(self) -> None:
+        """Reset per-task tool state and notify handlers/middleware."""
+
         self._last_tool_signature = None
         self._repeated_tool_calls = 0
         for handler in self.handlers:
@@ -218,7 +220,7 @@ class ToolRuntime:
                 routes[tool_name] = handler
         return routes
 
-    def _enabled_middlewares(self) -> list[MiddleWare]:
+    def _enabled_middlewares(self) -> list[Middleware]:
         return [
             middleware
             for middleware in self.middlewares

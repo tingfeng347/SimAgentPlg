@@ -4,7 +4,7 @@ from pathlib import Path
 
 from simagentplg import DEFAULT_SKILLS_DIR, MethodToolHandler, SkillManager
 
-EXAMPLES_DIR = Path(__file__).parents[1] / "example"
+EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
 
 
 class ExampleTests(unittest.IsolatedAsyncioTestCase):

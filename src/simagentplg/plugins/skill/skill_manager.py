@@ -38,14 +38,23 @@ class SkillManager:
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
         self._discovered = False
+        self._index_message: dict[str, str] | None = None
+        self._skill_context_messages: dict[str, dict[str, str]] = {}
         logger.info("Skill registry initialized root=%s", self.skills_root)
 
     @property
     def skills(self) -> tuple[Skill, ...]:
         return tuple(self._skills.values())
 
+    @property
+    def discovered(self) -> bool:
+        return self._discovered
+
     async def discover(self) -> None:
         """Scan child directories containing SKILL.md and build an index."""
+
+        if self._discovered:
+            return
 
         if not self.skills_root.exists():
             raise FileNotFoundError(f"skills root not found: {self.skills_root}")
@@ -80,6 +89,8 @@ class SkillManager:
 
         self._skills = skills
         self._discovered = True
+        self._index_message = None
+        self._skill_context_messages.clear()
 
         if not self._skills:
             logger.debug(
@@ -92,35 +103,13 @@ class SkillManager:
                 list(self._skills.keys()),
             )
 
-    async def dispatch(
-        self,
-        messages: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        """Compatibility shim: load only an explicitly named local skill.
-
-        This no longer calls an LLM router. A skill is selected only when the
-        user names it with ``$skill_name`` or ``skill:skill_name``.
-        """
-
-        if not self._discovered:
-            await self.discover()
-
-        skill_name = self.select_explicit_skill(messages)
-        if skill_name is None:
-            return None
-
-        task = self._latest_user_task(messages)
-        return {
-            "skill_name": skill_name,
-            "task": task,
-            "messages": self.build_skill_messages(skill_name, task),
-        }
-
     def build_index_message(self) -> dict[str, str] | None:
         """Return compact skill metadata for the model context."""
 
         if not self._skills:
             return None
+        if self._index_message is not None:
+            return dict(self._index_message)
 
         lines = [
             "Local skills are available. Use a skill when its description matches",
@@ -132,10 +121,11 @@ class SkillManager:
         for skill in self._skills.values():
             description = skill.description or "No description provided."
             lines.append(f"- {skill.name}: {description}")
-        return {
+        self._index_message = {
             "role": "system",
             "content": "\n".join(lines),
         }
+        return dict(self._index_message)
 
     def build_load_skill_tool(self) -> dict[str, Any] | None:
         """Return the internal tool schema used for on-demand skill loading."""
@@ -187,23 +177,16 @@ class SkillManager:
     ) -> dict[str, str]:
         """Load full skill instructions for provider context."""
 
+        if skill_name in self._skill_context_messages:
+            return dict(self._skill_context_messages[skill_name])
+
         skill = self.get(skill_name)
-        return {
+        message = {
             "role": "system",
             "content": "\n".join(self._skill_content_parts(skill)),
         }
-
-    def build_skill_messages(
-        self,
-        skill_name: str,
-        task: str,
-    ) -> list[dict[str, str]]:
-        """Load full skill instructions plus the current skill task."""
-
-        return [
-            self.build_skill_context_message(skill_name),
-            {"role": "user", "content": task},
-        ]
+        self._skill_context_messages[skill_name] = message
+        return dict(message)
 
     def get(self, skill_name: str) -> Skill:
         try:

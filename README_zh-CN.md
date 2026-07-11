@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.3 是一个轻量级多智能体框架，用于构建有状态的
+SimAgentPlg 0.2.4 是一个轻量级多智能体框架，用于构建有状态的
 OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地 Skill
 发现、索引和按需加载。
 
@@ -261,7 +261,7 @@ manager.register(
 
 results = await manager.run_many(
     {
-        "writer": "编写 0.2.3 版本说明。",
+        "writer": "编写 0.2.4 版本说明。",
         "reviewer": "审查本次发布的兼容性风险。",
     }
 )
@@ -392,7 +392,7 @@ Handler 基类、`MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。
 
-## 0.2.3 版本变化
+## 0.2.4 版本变化
 
 - 新增与 `BashHandler` 同级的 `FinishHandler` 和内置 `run_finish` 工具
 - 新增与 `BashHandler` 同级的 `GitDiffHandler` 和内置 `run_gitdiff` 工具

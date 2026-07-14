@@ -8,6 +8,7 @@ from simagentplg import (
     BaseAgent,
     MethodToolHandler,
     ModelConfig,
+    OpenAIModelAdapter,
     StepOutcome,
     ToolControl,
 )
@@ -53,7 +54,7 @@ class MathHandler(MethodToolHandler):
 
 async def main() -> None:
     agent = BaseAgent(
-        config=ModelConfig.from_env(),
+        OpenAIModelAdapter(ModelConfig.from_env()),
         agent_id="calculator",
         handlers=[MathHandler()],
     )

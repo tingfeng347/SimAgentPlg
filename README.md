@@ -13,6 +13,7 @@ Requires Python 3.12 or newer.
 ## Core capabilities
 
 - Stateful `BaseAgent` with persistent conversation history and `reset()`
+- Provider-neutral `ModelAdapter` boundary with an OpenAI-compatible adapter
 - Public `AgentOrchestrator` for the provider-tool loop
 - Structured `AgentRunResult`, `RunStatus`, and `StopReason`
 - Explicit `RuntimePolicy` for loop and completion behavior
@@ -48,6 +49,7 @@ LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
 
+`ModelConfig` belongs to `OpenAIModelAdapter`, rather than to `BaseAgent`.
 Configuration can also be supplied directly:
 
 ```python
@@ -60,15 +62,20 @@ config = ModelConfig(
 )
 ```
 
+Other model providers can integrate with the core by implementing
+`ModelAdapter.complete()`. The adapter owns provider client creation,
+response normalization, and optional startup/shutdown resources; `BaseAgent`
+only consumes the normalized `AssistantMessage` contract.
+
 ## Plain agent
 
 Conversation history is preserved across calls:
 
 ```python
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="tutor",
     system_prompt="You are a concise Python tutor.",
 )
@@ -166,7 +173,7 @@ Register it explicitly:
 
 ```python
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="calculator",
     handlers=[MathHandler()],
 )
@@ -174,9 +181,6 @@ agent = BaseAgent(
 
 Duplicate tool names fail during startup instead of being silently
 overwritten.
-
-Tool authors should follow the versioned
-[SimAgentPlg Tool Protocol](TOOL_PROTOCOL.md).
 
 ### Tool control signals
 
@@ -219,10 +223,15 @@ derived agent, not by the core.
 MCP uses the same handler contract:
 
 ```python
-from simagentplg import BaseAgent, McpToolHandler, ModelConfig
+from simagentplg import (
+    BaseAgent,
+    McpToolHandler,
+    ModelConfig,
+    OpenAIModelAdapter,
+)
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="browser",
     handlers=[McpToolHandler("examples/mcp_config.json")],
 )
@@ -239,10 +248,10 @@ Skills are prompt and resource extensions independent of handler tools:
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="skilled-agent",
     skills_dir=Path("examples/skills"),
 )
@@ -268,7 +277,7 @@ SimAgentPlg core owns mechanisms:
 
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
-+ Tool Protocol + Middleware + MCP + Skills
++ Model Adapter + Tool Protocol + Middleware + MCP + Skills
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -301,6 +310,7 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
 - Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`

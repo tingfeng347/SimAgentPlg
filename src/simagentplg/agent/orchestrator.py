@@ -5,8 +5,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from openai.types.chat import ChatCompletionMessage
-
 from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
@@ -24,6 +22,7 @@ from simagentplg.plugins.skill.skill_manager import (
     LOAD_SKILL_TOOL_NAME,
     SkillManager,
 )
+from simagentplg.providers.base import AssistantMessage, ModelToolCall
 
 TOOL_COMPLETION_RETRY_PROMPT = """
 Explicit-finish mode requires a completing tool call to finish the task.
@@ -31,7 +30,7 @@ If the work is complete, call a tool that returns completion control now.
 Do not end with plain text.
 """.strip()
 
-ModelCall = Callable[[ContextBuildResult], Awaitable[ChatCompletionMessage]]
+ModelCall = Callable[[ContextBuildResult], Awaitable[AssistantMessage]]
 
 
 class AgentOrchestrator:
@@ -95,7 +94,7 @@ class AgentOrchestrator:
     async def _run_loop(self) -> AgentRunResult:
         for _ in range(self.policy.max_steps):
             message = await self._chat_next_turn()
-            self.state.add_message(message.model_dump())
+            self.state.add_message(message.to_agent_message())
 
             if not message.tool_calls:
                 if not self.policy.require_explicit_finish:
@@ -137,7 +136,7 @@ class AgentOrchestrator:
             f"{self.policy.max_steps} steps",
         )
 
-    async def _chat_next_turn(self) -> ChatCompletionMessage:
+    async def _chat_next_turn(self) -> AssistantMessage:
         turn = self.state.advance_turn()
         self.logger.info("Turn %d/%d", turn, self.policy.max_steps)
         context = self.context_builder.build(
@@ -187,14 +186,12 @@ class AgentOrchestrator:
 
     async def _execute_tool_calls(
         self,
-        message: ChatCompletionMessage,
+        message: AssistantMessage,
     ) -> ToolCallResult:
         result_messages: list[dict[str, Any]] = []
 
         for tool_call in message.tool_calls or []:
-            if tool_call.type != "function":
-                continue
-            if tool_call.function.name == LOAD_SKILL_TOOL_NAME:
+            if tool_call.name == LOAD_SKILL_TOOL_NAME:
                 result_messages.append(self._execute_load_skill_call(tool_call))
                 continue
 
@@ -202,7 +199,7 @@ class AgentOrchestrator:
                 result_messages.append(
                     self._tool_error_message(
                         tool_call.id,
-                        tool_call.function.name,
+                        tool_call.name,
                         "tool execution is disabled for this agent",
                     )
                 )
@@ -270,7 +267,10 @@ class AgentOrchestrator:
         else:
             self.state.fail(result.error or result.stop_reason.value)
 
-    def _execute_load_skill_call(self, tool_call: Any) -> dict[str, str]:
+    def _execute_load_skill_call(
+        self,
+        tool_call: ModelToolCall,
+    ) -> dict[str, str]:
         if self.skill_manager is None:
             return self._tool_error_message(
                 tool_call.id,
@@ -279,7 +279,7 @@ class AgentOrchestrator:
             )
 
         try:
-            arguments = json.loads(tool_call.function.arguments)
+            arguments = json.loads(tool_call.arguments)
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
             skill_name = arguments.get("skill_name")

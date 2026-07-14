@@ -1,5 +1,5 @@
-import logging
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +13,8 @@ from simagentplg.middleware import (
     ToolNext,
     compose_tool_middlewares,
 )
+from simagentplg.providers.base import ModelToolCall
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCallResult:
@@ -166,9 +168,12 @@ class ToolRuntime:
         )
         return await self._tool_chain(context)
 
-    async def execute_tool_call(self, tool_call: Any) -> ToolCallResult:
-        tool_name = tool_call.function.name
-        raw_arguments = tool_call.function.arguments
+    async def execute_tool_call(
+        self,
+        tool_call: ModelToolCall,
+    ) -> ToolCallResult:
+        tool_name = tool_call.name
+        raw_arguments = tool_call.arguments
         self._check_repeated_tool_call(tool_name, raw_arguments)
         self.logger.info(
             "Calling tool %s arguments=%s",

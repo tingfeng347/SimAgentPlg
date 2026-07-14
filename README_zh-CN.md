@@ -12,6 +12,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 ## 核心能力
 
 - 有状态的 `BaseAgent`，支持持久对话历史和 `reset()`
+- Provider 无关的 `ModelAdapter` 边界，以及 OpenAI-compatible 适配器
 - 公开的 `AgentOrchestrator`，负责模型—工具运行循环
 - 结构化的 `AgentRunResult`、`RunStatus` 和 `StopReason`
 - 显式的 `RuntimePolicy`，控制循环和完成策略
@@ -47,7 +48,7 @@ LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
 
-也可以直接构造：
+`ModelConfig` 属于 `OpenAIModelAdapter`，不再属于 `BaseAgent`。也可以直接构造：
 
 ```python
 from simagentplg import ModelConfig
@@ -59,15 +60,19 @@ config = ModelConfig(
 )
 ```
 
+接入其他模型 Provider 时，只需实现 `ModelAdapter.complete()`。适配器负责 Provider
+Client 的创建、响应归一化以及可选的启动/关闭资源；`BaseAgent` 只消费归一化后的
+`AssistantMessage` 协议。
+
 ## 普通 Agent
 
 多次调用之间会保留对话历史：
 
 ```python
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="tutor",
     system_prompt="你是一名回答简洁的 Python 导师。",
 )
@@ -163,16 +168,13 @@ class MathHandler(MethodToolHandler):
 
 ```python
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="calculator",
     handlers=[MathHandler()],
 )
 ```
 
 重复工具名会在启动阶段报错，不会静默覆盖。
-
-工具作者应遵循版本化的
-[SimAgentPlg Tool Protocol](TOOL_PROTOCOL.md)。
 
 ### 工具控制信号
 
@@ -212,10 +214,15 @@ class AuditMiddleware(ToolMiddleware):
 MCP 使用相同的 Handler 协议：
 
 ```python
-from simagentplg import BaseAgent, McpToolHandler, ModelConfig
+from simagentplg import (
+    BaseAgent,
+    McpToolHandler,
+    ModelConfig,
+    OpenAIModelAdapter,
+)
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="browser",
     handlers=[McpToolHandler("examples/mcp_config.json")],
 )
@@ -231,10 +238,10 @@ Skill 是独立于 Handler 工具的提示词和资源扩展：
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="skilled-agent",
     skills_dir=Path("examples/skills"),
 )
@@ -259,7 +266,7 @@ SimAgentPlg Core 负责机制：
 
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
-+ Tool Protocol + Middleware + MCP + Skills
++ Model Adapter + Tool Protocol + Middleware + MCP + Skills
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -292,6 +299,7 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 包根目录导出：
 
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
+- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`AgentRunError`、`RunStatus`、`StopReason`
 - Context：`AgentContextBuilder`、`ContextBuildResult`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`

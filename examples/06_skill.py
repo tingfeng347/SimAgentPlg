@@ -3,14 +3,14 @@
 import asyncio
 from pathlib import Path
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
 async def main() -> None:
     agent = BaseAgent(
-        config=ModelConfig.from_env(),
+        OpenAIModelAdapter(ModelConfig.from_env()),
         agent_id="release-writer",
         system_prompt=(
             "Use the explicitly loaded local skill to complete the task. "

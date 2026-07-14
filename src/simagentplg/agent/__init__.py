@@ -2,6 +2,7 @@
 
 from simagentplg.agent.base import BaseAgent, ModelConfig
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
+from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
@@ -22,6 +23,7 @@ __all__ = [
     "AgentStatus",
     "AgentContextBuilder",
     "ContextBuildResult",
+    "AgentOrchestrator",
     "StepOutcome",
     "Middleware",
     "ToolMiddleware",

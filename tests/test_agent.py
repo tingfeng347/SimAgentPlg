@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from simagentplg import (
     AgentContextBuilder,
+    AgentOrchestrator,
     AgentState,
     AgentStatus,
     BaseAgent,
@@ -247,6 +248,16 @@ class ApprovalToolMiddleware(ToolMiddleware):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_base_agent_composes_public_orchestrator(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="orchestrated",
+            client=FakeClient([]),
+        )
+
+        self.assertIsInstance(agent.orchestrator, AgentOrchestrator)
+        self.assertIs(agent.orchestrator.state, agent.state)
+
     async def test_middleware_base_class_is_exported_with_standard_spelling(self) -> None:
         self.assertTrue(issubclass(ToolMiddleware, Middleware))
 
@@ -343,7 +354,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 active -= 1
 
-        agent._run_loop = run_loop  # type: ignore[method-assign]
+        agent.orchestrator._run_loop = run_loop  # type: ignore[method-assign]
 
         results = await asyncio.gather(
             agent.runtime(task="first"),

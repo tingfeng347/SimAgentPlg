@@ -517,6 +517,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         result = AgentContextBuilder().build(
             state,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "temporary_tool"},
+                }
+            ],
             transient_messages=[{"role": "system", "content": "temporary"}],
         )
 
@@ -529,6 +535,15 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             (
                 {"role": "user", "content": "saved"},
                 {"role": "system", "content": "temporary"},
+            ),
+        )
+        self.assertEqual(
+            result.tools,
+            (
+                {
+                    "type": "function",
+                    "function": {"name": "temporary_tool"},
+                },
             ),
         )
 

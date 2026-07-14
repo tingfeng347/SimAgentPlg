@@ -355,7 +355,8 @@ await agent.shutdown()
 
 `agent.state` holds the persistent conversation plus the current task's
 status, turn count, active skill, result, and error. `AgentContextBuilder`
-derives each model request from that state without mutating the history.
+derives each complete model request, including structured tool definitions,
+from that state without mutating the history.
 
 Passing handlers puts `BaseAgent` in tool execution mode and injects the
 runtime's internal tool protocol system message. Without handlers, the agent is

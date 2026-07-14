@@ -11,10 +11,11 @@ from simagentplg.plugins.skill.skill_manager import SkillManager
 
 @dataclass(frozen=True, slots=True)
 class ContextBuildResult:
-    """One model-turn context before and after provider conversion."""
+    """One complete model request built from agent state."""
 
     agent_messages: tuple[AgentMessage, ...]
     llm_messages: tuple[AgentMessage, ...]
+    tools: tuple[dict[str, Any], ...]
 
 
 class AgentContextBuilder:
@@ -31,13 +32,14 @@ class AgentContextBuilder:
         self,
         state: AgentState,
         *,
+        tools: Sequence[Mapping[str, Any]] = (),
         transient_messages: Sequence[Mapping[str, Any]] = (),
     ) -> ContextBuildResult:
         """Build the context for one model request.
 
-        Persistent conversation is copied from ``state``. Skill instructions
-        and per-turn control messages are injected only into this temporary
-        context, never written back into the state history.
+        Persistent conversation is copied from ``state``. Skill instructions,
+        per-turn control messages, and tool definitions are combined into a
+        complete provider request without mutating the state history.
         """
 
         context = self._copy_messages(state.messages)
@@ -47,6 +49,7 @@ class AgentContextBuilder:
         return ContextBuildResult(
             agent_messages=tuple(context),
             llm_messages=tuple(llm_messages),
+            tools=tuple(self._copy_tools(tools)),
         )
 
     def convert_to_llm_messages(
@@ -90,6 +93,12 @@ class AgentContextBuilder:
         messages: Sequence[Mapping[str, Any]],
     ) -> list[AgentMessage]:
         return [dict(message) for message in messages]
+
+    @staticmethod
+    def _copy_tools(
+        tools: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [dict(tool) for tool in tools]
 
     @staticmethod
     def _system_message_end(

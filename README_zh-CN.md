@@ -348,7 +348,8 @@ await agent.shutdown()
 ```
 
 `agent.state` 保存持久对话，以及当前任务的状态、轮数、激活 Skill、结果和错误。
-`AgentContextBuilder` 会从该状态派生每轮模型请求上下文，不会修改历史消息。
+`AgentContextBuilder` 会从该状态派生每轮完整模型请求（包括结构化工具定义），
+不会修改历史消息。
 
 传入 Handler 后，`BaseAgent` 会进入工具执行模式，并注入 runtime 内部工具
 协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可

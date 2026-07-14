@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
 
-from simagentplg.agent.context_builder import AgentContextBuilder
+from simagentplg.agent.context_builder import (
+    AgentContextBuilder,
+    ContextBuildResult,
+)
 from simagentplg.agent.middleware import Middleware
 from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
@@ -249,18 +252,16 @@ class BaseAgent:
 
     async def chat_text(
         self,
-        messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None,
+        context: ContextBuildResult,
     ) -> ChatCompletionMessage:
-        """Call the configured model and return its first message."""
+        """Send one complete provider request and return its first message."""
 
         try:
             kwargs: dict[str, Any] = {
                 "model": self.config.model,
-                "messages": cast(Any, messages),
+                "messages": cast(Any, context.llm_messages),
                 "temperature": self.config.temperature,
-                "tools": cast(Any, tools)
+                "tools": cast(Any, context.tools) or None,
             }
             response = await self.client.chat.completions.create(
                 **kwargs,
@@ -335,12 +336,10 @@ class BaseAgent:
         self.logger.info("Turn %d/%d", turn, self.max_steps)
         context = self._context_builder.build(
             self.state,
+            tools=self._llm_tools(),
             transient_messages=self._runtime_context_messages(),
         )
-        return await self.chat_text(
-            list(context.llm_messages),
-            tools=self._llm_tools() or None,
-        )
+        return await self.chat_text(context)
 
     def _runtime_context_messages(self) -> list[dict[str, str]]:
         if self.state.no_tool_response_count == 0:

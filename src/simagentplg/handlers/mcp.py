@@ -16,9 +16,17 @@ class McpToolHandler(BaseHandler):
         *,
         manager: Any | None = None,
     ) -> None:
-        self.manager = manager or McpServerManager(
-            Path(config_path) if config_path is not None else None
-        )
+        if config_path is None and manager is None:
+            raise ValueError(
+                "config_path is required when manager is not provided"
+            )
+        if config_path is not None and manager is not None:
+            raise ValueError("provide either config_path or manager, not both")
+        if manager is not None:
+            self.manager = manager
+        else:
+            assert config_path is not None
+            self.manager = McpServerManager(config_path)
         self._tools: tuple[ToolSchema, ...] = ()
         self._started = False
 

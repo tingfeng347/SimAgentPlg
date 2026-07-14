@@ -6,7 +6,6 @@ from typing import Any
 import yaml
 
 from simagentplg.logger import get_logger
-from simagentplg.resources import DEFAULT_SKILLS_DIR
 
 logger = get_logger("skill")
 
@@ -25,13 +24,11 @@ class Skill:
 class SkillManager:
     """Discover local skills and build explicit context projections."""
 
-    def __init__(self, skills_root: str | Path | None = None):
+    def __init__(self, skills_root: str | Path):
         """
         Args:
             skills_root: Root directory whose child folders may contain SKILL.md.
         """
-        if skills_root is None:
-            skills_root = DEFAULT_SKILLS_DIR
         self.skills_root = Path(skills_root)
         self._skills: dict[str, Skill] = {}
         self._discovered = False

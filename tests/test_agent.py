@@ -1575,6 +1575,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager.started)
         self.assertTrue(manager.stopped)
 
+    async def test_mcp_handler_requires_one_explicit_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "config_path is required"):
+            McpToolHandler()
+        with self.assertRaisesRegex(ValueError, "either config_path or manager"):
+            McpToolHandler("mcp.json", manager=FakeMcpManager())
+
 
 if __name__ == "__main__":
     unittest.main()

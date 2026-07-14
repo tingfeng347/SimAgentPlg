@@ -36,7 +36,6 @@ from simagentplg.providers import (
     ModelToolCall,
     OpenAIModelAdapter,
 )
-from simagentplg.resources import DEFAULT_MCP_CONFIG, DEFAULT_SKILLS_DIR
 
 __all__ = [
     "BaseAgent",
@@ -70,6 +69,4 @@ __all__ = [
     "UnknownToolError",
     "McpServerManager",
     "SkillManager",
-    "DEFAULT_MCP_CONFIG",
-    "DEFAULT_SKILLS_DIR",
 ]

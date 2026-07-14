@@ -1,438 +1,306 @@
-# SimAgentPlg 与 Pi Agent Harness 能力对照分析
+# SimAgentPlg 与 Pi Agent Harness 能力对照
 
-> 分析日期：2026-07-14  
+> 更新日期：2026-07-15
 > 对照范围：`pi/packages/agent`、`pi/packages/coding-agent` 与 SimAgentPlg 当前实现
 
-> 实施更新（2026-07-15）：本文建议的第一阶段已经完成。Core 已加入
-> `RuntimePolicy`、`AgentRunResult`、`RunStatus`、`StopReason` 和
-> `ToolControl`；工具可用性与显式完成策略已经解耦；Bash、GitDiff、Finish
-> 以及具体审批实现已移出 Core。下文第 3—6 节保留为改造前的分析快照，当前公共
-> API 以项目 README 为准。
->
-> 后续更新（2026-07-15）：Core 已增加 `ModelAdapter` Provider 边界；Skill
-> 定位为上下文资源，不再注册内部 `load_skill` 工具；Orchestrator 也不再接收
-> `has_handler_tools`，所有模型工具调用统一进入 `ToolRuntime`。
+## 1. 当前结论
 
-## 1. 结论
+SimAgentPlg 已完成通用 Agent Core 的第一阶段：一个边界明确、可以运行和扩展的
+“执行内核”。目前已经具备稳定的模型—工具循环、结构化运行结果、工具运行时、
+Provider 适配层、MCP 适配和 Skill 上下文资源。
 
-SimAgentPlg 已经实现了一个最小可用的 Agent Runtime，具备模型—工具运行循环、状态管理、上下文构建、工具路由、中间件、Skill 和 MCP 等基础能力。
+它还不是完整的 Agent Harness。与 Pi 相比，主要缺少的是执行内核之上的控制面：
 
-但按照 Pi 的分层定义，SimAgentPlg 目前完成的是 Harness 的“执行内核”，尚未形成完整的“控制面”。主要缺失包括：统一事件协议、流式输出、运行取消、消息队列、Session 持久化、上下文压缩、运行环境抽象和 Provider 抽象。
+- 统一事件协议与 Hook
+- 流式模型输出和工具进度
+- 外部取消与等待空闲
+- Session 持久化、恢复和分支
+- Steering、Follow-up 等消息队列
+- Context Budget 与 Compaction
+- ExecutionEnv 与 Workspace 抽象
 
-当前的 `AgentOrchestrator` 更接近 Pi 的 `agent-loop.ts`，而不是完整的 `AgentHarness`。
+因此，当前 `AgentOrchestrator` 对应 Pi 的 Agent Loop；`BaseAgent` 已具备 Harness
+组装根的雏形，但尚未承担完整 Harness 控制面。
 
-## 2. Pi 的 Harness 分层
-
-Pi 没有把所有能力都放进一个 Agent 类，而是分为三个主要层次：
-
-```text
-Agent Loop
-    ↓
-Agent Harness
-    ├── Session
-    ├── ExecutionEnv
-    ├── Events / Hooks
-    ├── Queues / Abort
-    ├── Compaction
-    └── Runtime configuration
-            ↓
-Coding Agent
-    ├── File tools
-    ├── Shell tools
-    ├── Extension system
-    ├── TUI / RPC
-    └── Project resources
-```
-
-### 2.1 Agent Loop
-
-`pi/packages/agent/src/agent-loop.ts` 负责最底层的模型—工具循环：
-
-- 将 AgentMessage 转换为 LLM Message
-- 流式调用模型
-- 识别和执行工具调用
-- 顺序或并行执行工具
-- 处理 steering 与 follow-up 消息
-- 发出细粒度运行事件
-- 根据工具结果、模型停止原因或外部策略结束循环
-
-### 2.2 Agent Harness
-
-`pi/packages/agent/src/harness/agent-harness.ts` 位于 Agent Loop 之上，负责：
-
-- Session 和消息持久化
-- 运行阶段与并发保护
-- 事件订阅和可修改行为的 Hook
-- 模型、Thinking Level 和工具的动态切换
-- Steering、Follow-up、Next-turn 队列
-- Abort 与 Wait-for-idle
-- Context Compaction
-- Session Tree 与 Branch Summary
-- Skill 和 Prompt Template 显式调用
-- Provider 请求参数及生命周期 Hook
-
-### 2.3 Coding Agent
-
-`pi/packages/coding-agent` 在 Harness 之上提供具体应用能力：
-
-- read、write、edit、grep、find、ls、bash 等工具
-- Extension 加载和运行系统
-- 项目配置与信任策略
-- Session 管理界面
-- TUI、Print、RPC 等交互模式
-- 模型注册、认证和 Provider 配置
-
-这说明文件工具、CLI 和 UI 不属于通用 Agent Core，而属于基于 Harness 构建的具体 Agent 产品层。
-
-## 3. SimAgentPlg 当前分层
+## 2. 当前架构
 
 ```text
 BaseAgent
-    ├── AgentOrchestrator
-    ├── AgentState
-    ├── AgentContextBuilder
-    ├── ToolRuntime
-    │     ├── Handler
-    │     └── Middleware
-    ├── SkillManager
-    └── OpenAI-compatible client
+  ├── ModelAdapter
+  │     └── OpenAIModelAdapter
+  ├── AgentOrchestrator
+  ├── AgentState
+  ├── AgentContextBuilder
+  ├── ToolRuntime
+  │     ├── BaseHandler / MethodToolHandler
+  │     ├── McpToolHandler
+  │     └── ToolMiddleware
+  └── SkillManager
 ```
 
-主要组件职责如下：
+### 2.1 组件职责
 
 | 组件 | 当前职责 |
 |---|---|
-| `BaseAgent` | 组装依赖、管理资源生命周期、串行化外部调用、提供兼容 API |
-| `AgentOrchestrator` | 准备任务并执行模型—工具循环 |
-| `AgentState` | 保存历史消息和当前任务状态 |
-| `AgentContextBuilder` | 构造每轮模型上下文并注入 Skill/临时消息 |
-| `ToolRuntime` | 工具注册、路由、中间件、执行和错误包装 |
-| `BaseHandler` | 可复用工具组接口 |
-| `ToolMiddleware` | 工具调用装饰与审批扩展点 |
-| `SkillManager` | Skill 发现、索引、显式选择和上下文投影 |
+| `BaseAgent` | 依赖组装、外部调用串行化、资源生命周期、兼容 API |
+| `AgentOrchestrator` | 执行模型—工具循环并生成结构化终止结果 |
+| `AgentState` | 保存消息、任务状态、Turn、结果和 Active Skill |
+| `AgentContextBuilder` | 投影每轮上下文，注入 Skill 和临时控制消息 |
+| `ModelAdapter` | 隔离 Provider Client、请求调用和响应归一化 |
+| `ToolRuntime` | 工具生命周期、路由、Middleware、执行与重复调用保护 |
+| `BaseHandler` | 一组可执行工具的最小协议 |
+| `McpToolHandler` | 将 MCP Tool 转换为统一 Handler 工具 |
+| `SkillManager` | Skill 发现、metadata、显式选择和上下文投影 |
+| `RuntimePolicy` | 最大步数、无工具响应、重复调用和显式完成策略 |
+| `AgentRunResult` | 描述运行状态、停止原因、轮数、输出和错误 |
 
-## 4. 能力映射矩阵
-
-| Pi 能力 | SimAgentPlg 对应实现 | 状态 |
-|---|---|---|
-| Agent Loop | `AgentOrchestrator` | 基本具备 |
-| Agent State | `AgentState` | 基础版 |
-| Tool Runtime | `ToolRuntime` + Handler | 基本具备 |
-| Tool Hooks | `ToolMiddleware` | 部分具备 |
-| Context Conversion | `AgentContextBuilder` | 部分具备 |
-| Agent Harness | `BaseAgent` + `AgentOrchestrator` | 仅有骨架 |
-| Skill | `SkillManager` | 基本具备 |
-| Prompt Template | Skill 内可选模板 | 未形成独立资源协议 |
-| MCP 扩展 | `McpToolHandler` | 已具备 |
-| Approval | `BashApprovalMiddleware` | 基础版 |
-| Event Stream | 无 | 未实现 |
-| Streaming Model Output | 无 | 未实现 |
-| Session Repository | 无 | 未实现 |
-| JSONL/Memory Storage | 无 | 未实现 |
-| Session Resume/Fork/Tree | 无 | 未实现 |
-| Context Compaction | 无 | 未实现 |
-| Steering/Follow-up | 无 | 未实现 |
-| Abort/Wait-for-idle | 无 | 未实现 |
-| ExecutionEnv | 零散的 `cwd` 和 subprocess | 未抽象 |
-| Multi-provider Model Runtime | OpenAI-compatible client | 部分具备 |
-| Parallel Tool Calls | 无 | 未实现 |
-| Tool Progress Stream | 无 | 未实现 |
-| Dynamic Model/Tool Configuration | 构造时静态配置 | 未实现 |
-| Coding Agent File Tools | Bash、GitDiff | 少量具备 |
-| Extension System | Handler/Middleware/MCP/Skill | 早期雏形 |
-
-## 5. 已经实现的 Harness 能力
-
-### 5.1 模型—工具运行循环
-
-`AgentOrchestrator` 已经实现：
-
-- 创建并初始化任务
-- 为每轮调用构造上下文
-- 调用模型并保存 Assistant Message
-- 执行一个 Assistant Message 中的多个 Tool Call
-- 保存 Tool Result
-- 根据工具结果判断任务结束
-- 限制最大轮数
-- 检测连续无工具响应
-- 将异常写入 AgentState
-
-这是 Harness 最底层的执行发动机。
-
-### 5.2 工具运行时
-
-`ToolRuntime` 已经实现：
-
-- Handler 和 Middleware 生命周期
-- 工具 Schema 收集
-- 工具名到 Handler 的确定性路由
-- 重复工具名检查
-- JSON 参数解析
-- 工具异常转换为 Tool Message
-- Middleware 组合链
-- 重复工具调用检测
-- 工具主动终止任务
-
-这是当前最完整、最接近通用 Harness 组件的一部分。
-
-### 5.3 上下文投影
-
-`AgentContextBuilder` 已经区分：
-
-- Agent 持久历史
-- Provider 消息
-- 临时运行控制消息
-- Skill 索引和完整 Skill 内容
-- Tool Schema
-
-它与 Pi 的以下模型方向一致：
+### 2.2 Runtime 主链路
 
 ```text
-AgentMessage[]
-  → transformContext()
-  → convertToLlm()
-  → Provider Messages
+BaseAgent.run(task)
+  → startup ModelAdapter + ToolRuntime
+  → AgentOrchestrator.run(task)
+  → AgentState.begin_task(task)
+  → AgentContextBuilder.build(...)
+  → ModelAdapter.complete(context)
+  → AssistantMessage
+  → ToolRuntime.execute_tool_call(...)
+  → AgentRunResult
 ```
 
-目前默认转换仍是复制消息，尚未形成通用 Transform/Hook 管道。
+`BaseAgent.runtime()` 是兼容包装：成功时返回文本输出，失败、拒绝或取消时抛出
+`AgentRunError`。
 
-### 5.4 状态与任务生命周期
+## 3. 已完成的 Core 能力
 
-`AgentState` 已记录：
+### 3.1 稳定的运行与终止语义
 
-- 消息历史
-- 当前任务
-- `idle/running/completed/failed` 状态
-- 当前 Turn
-- 连续无工具响应次数
-- Active Skill
-- Result 和 Error
+`RuntimePolicy` 已集中管理：
 
-`snapshot()` 可以生成独立副本，适合观察或未来接入持久化。
-
-### 5.5 扩展机制雏形
-
-当前已经存在四种扩展原语：
-
-- Handler：添加工具能力
-- Middleware：拦截和装饰工具执行
-- MCP：加载外部工具服务
-- Skill：加载专用提示词与资源
-
-因此 SimAgentPlg 已具备从通用 Core 派生 CodeAgent 的基本可组合性。
-
-## 6. 尚未实现或只部分实现的能力
-
-### 6.1 Event Stream 与 Hook 协议
-
-Pi 会发出以下运行事件：
-
-- `agent_start` / `agent_end`
-- `turn_start` / `turn_end`
-- `message_start` / `message_update` / `message_end`
-- `tool_execution_start` / `tool_execution_update` / `tool_execution_end`
-- `save_point`
-- `settled`
-- `queue_update`
-
-同时提供可以改变行为的 Hook：
-
-- `before_agent_start`
-- `context`
-- `before_provider_request`
-- `before_provider_payload`
-- `tool_call`
-- `tool_result`
-- `session_before_compact`
-- `session_before_tree`
-
-SimAgentPlg 目前只有日志与 ToolMiddleware。缺少统一事件协议会使 CLI、UI、RPC、存储和遥测不得不侵入 Orchestrator。
-
-### 6.2 流式模型输出
-
-当前 `chat_text()` 等待完整 ChatCompletion，缺少：
-
-- Text Delta
-- Thinking Delta
-- Tool Call 参数流
-- Partial Assistant Message
-- 首 Token 延迟
-- 流中断和取消
-
-这会直接限制未来 CodeAgent 的交互体验和可观测性。
-
-### 6.3 Session 与持久化
-
-当前消息仅保存在进程内的平面数组中，缺少：
-
-- `Session` 领域对象
-- `SessionStorage` 接口
-- Memory/JSONL Storage
-- Session Repository
-- Create/Open/List/Delete
-- Resume 和 Fork
-- 消息树和 Branch
-- Label 与 Save Point
-
-`AgentState.snapshot()` 只是内存复制，不等于可恢复的运行持久化。
-
-### 6.4 Context Compaction
-
-消息历史目前会持续增长，缺少：
-
-- Token 估算
-- Context Window 检测
-- 最近消息保留策略
-- 历史摘要
-- 文件操作摘要
-- Compaction Entry
-- Compaction 前后 Hook
-
-长时间运行的 CodeAgent 会很快受到上下文长度限制。
-
-### 6.5 Abort、Steering 与 Follow-up
-
-`BaseAgent` 的 `_operation_lock` 只能保证调用串行，不能控制正在执行的任务。
-
-缺少：
-
-- `abort()`
-- `wait_for_idle()`
-- `steer()`
-- `follow_up()`
-- `next_turn()`
-- 队列消费模式
-- Provider 和 subprocess 取消传播
-
-### 6.6 ExecutionEnv 抽象
-
-Pi Harness 依赖统一的：
-
-```text
-ExecutionEnv
-  ├── FileSystem
-  └── Shell
-```
-
-SimAgentPlg 的 `BashHandler` 和 `GitDiffHandler` 直接调用本地 subprocess，并分别维护 `cwd`。因此当前工具只能自然地运行在本机环境，难以无侵入切换到容器、SSH、远程代理或测试环境。
-
-### 6.7 Provider/Model Adapter
-
-当前 Runtime 直接依赖：
-
-- `AsyncOpenAI`
-- `ChatCompletionMessage`
-- `message.model_dump()`
-- OpenAI Tool Schema
-
-这意味着可以连接 OpenAI-compatible 服务，但 Core 本身并非 Provider-neutral。
-
-后续需要统一抽象：
-
-- 内部 AssistantMessage
-- ModelAdapter
-- Stop Reason
-- Usage 和 Cost
-- Thinking Level
-- Provider Retry
-- Dynamic API Key
-- Timeout 和 Transport 策略
-
-### 6.8 工具执行协议
-
-相较 Pi，当前工具协议缺少：
-
-- JSON Schema 参数验证
-- 并行工具执行
-- 每工具顺序/并行策略
-- 工具进度流
-- Cancellation Token
-- 图片和多段内容结果
-- 独立的 `is_error`
-- Batch 终止语义
-- Tool Result 后处理协议
-
-此外，`StepOutcome.should_exit` 同时承担完成、拒绝和停止等不同语义。例如人工审批拒绝会以 `should_exit=True` 结束任务，并被 AgentState 标记为 Completed。这需要通过结构化终止原因修正。
-
-### 6.9 Runtime Policy
-
-当前以下策略分散在多个类和常量中：
-
-- 最大 Turn 数
-- 最大连续无工具响应次数
-- 最大重复工具调用次数
-- 是否必须调用 Finish Tool
-- 普通文本是否允许结束任务
-
-特别是当前隐含了：
-
-```text
-has_handler_tools == require_explicit_finish
-```
-
-“存在可执行工具”和“必须通过 Finish Tool 结束”应是两个相互独立的概念。它们应由 RuntimePolicy 显式控制。
-
-### 6.10 CodeAgent 应用层
-
-未来 CodeAgent 还需要：
-
-- Read/Write/Edit 文件工具
-- Grep/Find/List 工具
-- 文件修改串行队列
-- Workspace 边界
-- Shell 完整输出落盘和截断提示
-- Git Diff 与 Artifact Collector
-- Sandbox/Approval Policy
-- Extension Loader
-- Project Instructions
-- Prompt Templates
-- CLI、RPC 或 TUI Adapter
-
-这些能力应建立在通用 Harness 之上，不应全部放回 `BaseAgent`。
-
-## 7. 推荐建设顺序
-
-### 阶段一：稳定运行语义
-
-新增 `RuntimePolicy`：
-
-```python
-@dataclass(frozen=True, slots=True)
-class RuntimePolicy:
-    max_steps: int = 20
-    max_no_tool_responses: int = 3
-    max_repeated_tool_calls: int = 3
-    require_explicit_finish: bool = False
-```
-
-新增结构化 `AgentRunResult`：
-
-```python
-@dataclass(frozen=True, slots=True)
-class AgentRunResult:
-    output: str | None
-    status: RunStatus
-    stop_reason: StopReason
-    turns: int
-    error: str | None = None
-```
-
-终止原因至少应区分：
-
-- `text_response`
-- `finish_tool`
-- `rejected`
-- `cancelled`
 - `max_steps`
 - `max_no_tool_responses`
-- `repeated_tool_call`
-- `model_error`
+- `max_repeated_tool_calls`
+- `require_explicit_finish`
 
-`BaseAgent.runtime() -> str | None` 可以作为兼容包装继续保留。
+`AgentRunResult` 与 `StopReason` 已能区分：
 
-### 阶段二：建立事件协议
+- 普通文本完成
+- 工具显式完成
+- 工具拒绝
+- 工具取消
+- 空响应
+- 最大步数
+- 连续无工具响应
+- 重复工具调用
+- Runtime 错误
 
-新增 `agent/events.py`，首先支持：
+工具是否存在与是否必须显式完成已经解耦。工具通过 `ToolControl` 返回
+`CONTINUE`、`COMPLETE`、`REJECT` 或 `CANCEL`，不再使用一个布尔值混合多种终止
+含义。
+
+### 3.2 Provider 适配层
+
+Core 不再直接持有 OpenAI Client。`BaseAgent` 只依赖 `ModelAdapter`：
+
+```text
+ContextBuildResult
+  → ModelAdapter.complete()
+  → AssistantMessage
+      └── ModelToolCall[]
+```
+
+当前提供 `OpenAIModelAdapter` 和对应的 `ModelConfig`。Adapter 负责 Client
+创建、可选 Client 注入、关闭以及 Provider 响应归一化。
+
+目前只实现了 OpenAI-compatible Adapter；Provider 边界已经存在，但多 Provider
+能力仍需通过第二个真实 Adapter 验证。
+
+### 3.3 统一 ToolRuntime
+
+所有模型 Tool Call 都进入 `ToolRuntime`。`AgentOrchestrator` 不再识别具体工具名，
+也不再接收 `has_handler_tools`。
+
+`ToolRuntime` 已具备：
+
+- Handler 生命周期和确定性路由
+- 重复工具名检查
+- JSON 参数解析
+- Tool Middleware 组合
+- 工具异常转换为标准 Tool Message
+- 重复调用检测
+- 结构化控制信号
+- 空工具运行时支持
+
+Middleware 仅在启动后实际存在工具路由时激活。
+
+### 3.4 Skill 是上下文资源
+
+Skill 不属于 ToolRuntime，也不注册内部 `load_skill` 工具。
+
+```text
+SkillManager.discover()
+  → name + description + absolute location
+  → AgentContextBuilder 注入 metadata
+```
+
+当前支持两种使用方式：
+
+1. 用户通过 `$skill_name` 或 `skill:skill_name` 显式选择，完整 Skill 指令直接注入
+   当前模型上下文。
+2. 未来 CodeAgent 拥有 `read` 工具后，模型可以根据 metadata 中的 `location`
+   渐进读取 `SKILL.md`。
+
+这种设计保留了无文件工具 Agent 的显式 Skill 能力，同时不会让 Orchestrator
+出现 Skill Tool 特殊分支。
+
+### 3.5 MCP 是工具适配器
+
+MCP 通过 `McpToolHandler` 接入统一 Handler 协议：
+
+```text
+MCP Server
+  → McpServerManager
+  → McpToolHandler
+  → ToolRuntime
+```
+
+Orchestrator 不知道工具是否来自 MCP。MCP Agent 可以执行工具后用普通文本完成，
+除非 `RuntimePolicy.require_explicit_finish=True`。
+
+Core 不携带默认 MCP Server 配置或默认 Skill。`McpToolHandler`、`McpServerManager`
+和 `SkillManager` 都要求调用方显式提供配置路径，确保未配置能力时不会产生隐藏行为。
+
+## 4. 与 Pi 的关键差异
+
+### 4.1 Pi 的分层
+
+```text
+Agent Loop
+  ↓
+Agent Harness
+  ├── Session
+  ├── Events / Hooks
+  ├── Abort / Queues
+  ├── Compaction
+  ├── ExecutionEnv
+  ├── Runtime configuration
+  └── Skills / Prompt Templates
+        ↓
+Coding Agent
+  ├── File / Shell / Git Tools
+  ├── Extensions
+  ├── Trust / Workspace
+  ├── TUI / Print / RPC
+  └── Project resources
+```
+
+Pi 的 Harness 已经是完整控制面；SimAgentPlg 当前主要完成了 Agent Loop 和
+Harness 的组装骨架。
+
+### 4.2 Pi 的 Skill
+
+Pi 将 Skill 定义为 Harness Resource，而不是 Tool：
+
+- Harness 保存 `Skill[]`
+- System Prompt 注入名称、描述和文件位置
+- Coding Agent 使用普通 `read` 工具加载完整文件
+- 用户可通过 `harness.skill()` 或 `/skill:name` 显式调用
+- Agent Loop 不识别 `load_skill`
+
+SimAgentPlg 采用相同的“Skill 是资源”边界，但保留 `$skill_name` 和
+`skill:skill_name` 作为轻量显式选择语法。
+
+### 4.3 Pi 的 MCP
+
+Pi Coding Agent 明确不内置 MCP。MCP 通常由 Extension 或 Package 建立 Client，
+再通过 `registerTool()` 注册为普通工具。
+
+SimAgentPlg 选择提供可选的 `McpToolHandler`，但执行边界相同：MCP 必须先适配成
+通用工具，Agent Loop 不感知 MCP 协议。
+
+### 4.4 工具集合
+
+Pi Harness 维护通用 Tools Map 和 Active Tool Names，并支持运行时切换。当前
+SimAgentPlg 的工具集合主要由构造时 Handler 决定，MCP Schema 在启动时加载，尚无
+公开的动态启用、禁用或替换工具协议。
+
+## 5. 当前能力矩阵
+
+| Harness 能力 | 当前实现 | 状态 |
+|---|---|---|
+| Agent Loop | `AgentOrchestrator` | 已具备 |
+| 结构化终止 | `AgentRunResult`、`ToolControl` | 已具备 |
+| Runtime Policy | `RuntimePolicy` | 已具备 |
+| Provider 边界 | `ModelAdapter` | 已具备，待多 Provider 验证 |
+| Tool Runtime | `ToolRuntime` + Handler | 已具备 |
+| Tool Middleware | `ToolMiddleware` | 基础版 |
+| MCP | `McpToolHandler` | 已具备，可选 |
+| Skill Resource | `SkillManager` + ContextBuilder | 已具备 |
+| Context Projection | `AgentContextBuilder` | 基础版 |
+| Event Stream | 无 | 未实现 |
+| Hook Protocol | Tool Middleware only | 部分具备 |
+| Streaming Output | 无 | 未实现 |
+| External Abort | 无；仅有 Tool `CANCEL` | 未实现 |
+| Wait for Idle | 无 | 未实现 |
+| Session Storage | 无 | 未实现 |
+| Resume / Fork / Tree | 无 | 未实现 |
+| Steering / Follow-up | 无 | 未实现 |
+| Context Compaction | 无 | 未实现 |
+| Token / Usage Budget | 无 | 未实现 |
+| Parallel Tool Calls | 当前顺序执行 | 未实现 |
+| Tool Progress | 无 | 未实现 |
+| Dynamic Tool Set | 构造时为主 | 未实现 |
+| ExecutionEnv | 无 | 未实现 |
+| CodeAgent Tools | 不属于 Core | 待派生 Agent 实现 |
+
+## 6. 仍需注意的 Core 边界
+
+### 6.1 Context 类型仍是过渡设计
+
+`ContextBuildResult` 同时保留：
+
+```python
+agent_messages: tuple[AgentMessage, ...]
+llm_messages: tuple[AgentMessage, ...]
+```
+
+默认实现中两者内容相同，但为 Context Transform 预留了投影阶段。当前暂时保留，
+等接入第二种 Provider、内部事件消息或 Compaction 后再决定是否合并为统一的
+`ModelContext.messages`。
+
+### 6.2 Tool Schema 仍偏 OpenAI-compatible
+
+`ModelAdapter` 已隔离 Provider Client 和响应类型，但 Handler 暴露的 Tool Schema
+仍使用 OpenAI function-calling 字典形状。未来接入非兼容 Provider 时，需要决定：
+
+- 将当前形状定义为 Core Canonical Tool Schema，由 Adapter 转换；或
+- 新增强类型的 `ToolDefinition`，彻底移除 Provider 风格字段。
+
+这不阻塞当前 Harness 建设，但应在第二个 Provider Adapter 前解决。
+
+### 6.3 Skill 显式选择仍由 Orchestrator 激活
+
+Orchestrator 已不执行 Skill Tool，但 `_activate_explicit_skill()` 仍属于
+Skill-specific 任务准备逻辑。事件与 Hook 协议建立后，可将它迁移到通用的
+`before_task` 或 Context Transform Hook。
+
+## 7. 后续建设顺序
+
+### 阶段一：稳定执行内核——已完成
+
+- `RuntimePolicy`
+- `AgentRunResult`
+- `ToolControl`
+- `AgentOrchestrator`
+- `ToolRuntime`
+- Core 与 CodeAgent 工具边界拆分
+- `ModelAdapter`
+- Skill Resource 化
+- 移除 `has_handler_tools`
+
+### 阶段二：统一事件协议——下一步
+
+建议新增 `agent/events.py`，第一版只提供不可变事件数据：
 
 - `AgentStarted`
 - `TurnStarted`
@@ -443,11 +311,17 @@ class AgentRunResult:
 - `AgentCompleted`
 - `AgentFailed`
 
-Orchestrator 只负责发布事件，不直接依赖 CLI、UI 或持久化实现。
+同时定义最小发布接口：
 
-### 阶段三：引入 Session
+```python
+class AgentEventSink(Protocol):
+    async def emit(self, event: AgentEvent) -> None: ...
+```
 
-定义：
+第一版只做观察事件，不允许 Hook 修改行为。这样可以先稳定事件顺序和错误语义，
+避免事件系统一开始就同时承担拦截器职责。
+
+### 阶段三：Session
 
 ```text
 Session
@@ -456,7 +330,7 @@ MemorySessionStorage
 JsonlSessionStorage
 ```
 
-第一版只实现线性 Session 和恢复运行，不必立即实现完整消息树。稳定后再增加 Fork、Tree Navigation 和 Branch Summary。
+先实现线性 Session、保存和恢复，再考虑 Fork、Tree 和 Branch Summary。
 
 ### 阶段四：取消与流式输出
 
@@ -464,8 +338,9 @@ JsonlSessionStorage
 - `abort()`
 - `wait_for_idle()`
 - Provider Stream Adapter
+- Text / Thinking Delta
 - Tool Progress Event
-- subprocess 取消传播
+- 取消向 Tool 和 subprocess 传播
 
 ### 阶段五：上下文管理
 
@@ -479,43 +354,32 @@ JsonlSessionStorage
 
 ```text
 CodeAgent
-  ├── LocalExecutionEnv
-  ├── Workspace
-  ├── File Handlers
-  ├── Bash Handler
-  ├── Git Handler
-  └── Approval Policy
+  ├── ExecutionEnv / Workspace
+  ├── Read / Write / Edit
+  ├── Grep / Find / List
+  ├── Bash / Git
+  ├── Sandbox / Approval Policy
+  ├── Completion Tool（可选策略）
+  └── CLI / RPC / TUI Adapter
 ```
 
-## 8. 下一步建议
+## 8. 下一步任务建议
 
-下一步优先实现 `RuntimePolicy + AgentRunResult`，暂时不要直接增加更多 CodeAgent 文件工具。
+下一步应实现“只读事件协议”，暂时不增加 Session、流式输出或 CodeAgent 文件工具。
 
-原因是事件、Session、取消、Compaction 和 CodeAgent 都依赖稳定的运行终止协议。如果继续使用 `str + should_exit`，后续模块会分别解释“任务为什么结束”，最终产生重复逻辑和语义冲突。
-
-建议第一轮改动限制在：
+推荐第一轮改动范围：
 
 ```text
-src/simagentplg/agent/runtime_policy.py
-src/simagentplg/agent/result.py
+src/simagentplg/agent/events.py
 src/simagentplg/agent/orchestrator.py
+src/simagentplg/agent/tool_runtime.py
+tests/test_agent_events.py
 ```
 
-由 `AgentOrchestrator.run()` 返回结构化 `AgentRunResult`，再由 `BaseAgent.runtime()` 提供原字符串 API 的兼容层。
+验收标准：
 
-## 9. 总结
-
-SimAgentPlg 已经完成了 Harness 的执行内核：
-
-```text
-Loop + State + Context + Tool Runtime + Lifecycle + Extension Primitives
-```
-
-接下来需要补齐 Harness 的控制面：
-
-```text
-Policy + Result + Events + Session + Cancellation
-+ Persistence + Compaction + Execution Environment
-```
-
-完成这些能力后，SimAgentPlg 才能作为稳定 Core 派生 CodeAgent、ResearchAgent 或其他长时间运行、可恢复、可观察的 Agent 产品。
+1. 普通文本完成产生确定的 Agent、Turn 和 Message 事件顺序。
+2. Tool Call 产生 Tool Started/Completed 事件。
+3. 失败、拒绝和取消产生不同终止事件或终止 payload。
+4. Event Sink 异常策略明确，不得让观察者意外改变 Agent 运行结果。
+5. Core 不依赖 CLI、UI、Session 或具体日志实现。

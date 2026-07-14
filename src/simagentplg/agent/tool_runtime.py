@@ -4,9 +4,15 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from simagentplg.agent.state import AgentState
 from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import BaseHandler
-from simagentplg.middleware import Middleware
+from simagentplg.middleware import (
+    ToolCallContext,
+    ToolMiddleware,
+    ToolNext,
+    compose_tool_middlewares,
+)
 
 MAX_REPEATED_TOOL_CALLS = 3
 
@@ -23,14 +29,18 @@ class ToolRuntime:
     def __init__(
         self,
         handlers: Iterable[BaseHandler],
-        middlewares: Iterable[Middleware],
+        middlewares: Iterable[ToolMiddleware],
         *,
+        state: AgentState,
         logger: logging.Logger,
     ) -> None:
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)
+        self.state = state
         self.logger = logger
         self._tool_routes: dict[str, BaseHandler] = {}
+        self._active_middlewares: list[ToolMiddleware] = []
+        self._tool_chain: ToolNext | None = None
         self._started = False
         self._last_tool_signature: tuple[str, str] | None = None
         self._repeated_tool_calls = 0
@@ -48,15 +58,24 @@ class ToolRuntime:
             return
 
         started_handlers: list[BaseHandler] = []
-        started_middlewares: list[Middleware] = []
+        started_middlewares: list[ToolMiddleware] = []
         try:
             for handler in self.handlers:
                 await handler.startup()
                 started_handlers.append(handler)
             self._tool_routes = self._build_tool_routes()
-            for middleware in self._enabled_middlewares():
+            self._active_middlewares = [
+                middleware
+                for middleware in self.middlewares
+                if middleware.enabled
+            ]
+            for middleware in self._active_middlewares:
                 await middleware.startup()
                 started_middlewares.append(middleware)
+            self._tool_chain = compose_tool_middlewares(
+                self._active_middlewares,
+                self._dispatch_handler,
+            )
         except Exception:
             for middleware in reversed(started_middlewares):
                 try:
@@ -77,6 +96,8 @@ class ToolRuntime:
                         shutdown_error,
                     )
             self._tool_routes.clear()
+            self._active_middlewares.clear()
+            self._tool_chain = None
             raise
 
         self._started = True
@@ -86,7 +107,7 @@ class ToolRuntime:
             return
 
         errors: list[Exception] = []
-        for middleware in reversed(self._enabled_middlewares()):
+        for middleware in reversed(self._active_middlewares):
             try:
                 await middleware.shutdown()
             except Exception as exc:
@@ -98,6 +119,8 @@ class ToolRuntime:
                 errors.append(exc)
 
         self._tool_routes.clear()
+        self._active_middlewares.clear()
+        self._tool_chain = None
         self._started = False
         if errors:
             raise RuntimeError(
@@ -111,34 +134,29 @@ class ToolRuntime:
         self._repeated_tool_calls = 0
         for handler in self.handlers:
             await handler.on_task_start()
-        for middleware in self._enabled_middlewares():
+        for middleware in self._active_middlewares:
             await middleware.on_task_start()
 
     async def dispatch(
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
+        *,
+        tool_call_id: str | None = None,
     ) -> StepOutcome:
         if not self._started:
             await self.startup()
 
-        try:
-            handler = self._tool_routes[tool_name]
-        except KeyError as exc:
-            available = ", ".join(sorted(self._tool_routes)) or "none"
-            raise KeyError(
-                f"unknown tool {tool_name!r}; available tools: {available}"
-            ) from exc
-
-        middleware_outcome = await self._run_middleware_hook(
-            "before_tool_call",
-            tool_name,
-            arguments,
+        self._get_handler(tool_name)
+        if self._tool_chain is None:
+            raise RuntimeError("tool middleware chain is not initialized")
+        context = ToolCallContext(
+            state=self.state,
+            tool_name=tool_name,
+            arguments=dict(arguments),
+            tool_call_id=tool_call_id,
         )
-        if middleware_outcome is not None:
-            return middleware_outcome
-
-        return await handler.dispatch(tool_name, arguments)
+        return await self._tool_chain(context)
 
     async def execute_tool_call(self, tool_call: Any) -> ToolCallResult:
         tool_name = tool_call.function.name
@@ -153,7 +171,11 @@ class ToolRuntime:
             arguments = json.loads(raw_arguments)
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
-            outcome = await self.dispatch(tool_name, arguments)
+            outcome = await self.dispatch(
+                tool_name,
+                arguments,
+                tool_call_id=tool_call.id,
+            )
             self.logger.info(
                 "Tool %s completed exit=%s result=%s",
                 tool_name,
@@ -198,32 +220,18 @@ class ToolRuntime:
                 routes[tool_name] = handler
         return routes
 
-    def _enabled_middlewares(self) -> list[Middleware]:
-        return [
-            middleware
-            for middleware in self.middlewares
-            if middleware.enabled
-        ]
+    def _get_handler(self, tool_name: str) -> BaseHandler:
+        try:
+            return self._tool_routes[tool_name]
+        except KeyError as exc:
+            available = ", ".join(sorted(self._tool_routes)) or "none"
+            raise KeyError(
+                f"unknown tool {tool_name!r}; available tools: {available}"
+            ) from exc
 
-    async def _run_middleware_hook(
-        self,
-        hook_name: str,
-        *args: Any,
-    ) -> StepOutcome | None:
-        for middleware in self._enabled_middlewares():
-            hook = getattr(middleware, hook_name, None)
-            if hook is None:
-                continue
-            outcome = await hook(*args)
-            if outcome is None:
-                continue
-            if not isinstance(outcome, StepOutcome):
-                raise TypeError(
-                    f"{hook_name}() must return StepOutcome or None, "
-                    f"got {type(outcome).__name__}"
-                )
-            return outcome
-        return None
+    async def _dispatch_handler(self, context: ToolCallContext) -> StepOutcome:
+        handler = self._get_handler(context.tool_name)
+        return await handler.dispatch(context.tool_name, context.arguments)
 
     def _check_repeated_tool_call(
         self,

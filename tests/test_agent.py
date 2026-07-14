@@ -22,7 +22,9 @@ from simagentplg import (
     MethodToolHandler,
     ModelConfig,
     StepOutcome,
+    ToolCallContext,
     ToolMiddleware,
+    ToolNext,
     format_tool_call_preview,
 )
 from simagentplg.agent.base import (
@@ -193,6 +195,7 @@ class RecordingToolMiddleware(ToolMiddleware):
         self.stopped = 0
         self.task_starts = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.contexts: list[ToolCallContext] = []
 
     async def startup(self) -> None:
         self.started += 1
@@ -203,13 +206,16 @@ class RecordingToolMiddleware(ToolMiddleware):
     async def on_task_start(self) -> None:
         self.task_starts += 1
 
-    async def before_tool_call(
+    async def __call__(
         self,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> StepOutcome | None:
-        self.calls.append((tool_name, dict(arguments)))
-        return self.outcome
+        context: ToolCallContext,
+        call_next: ToolNext,
+    ) -> StepOutcome:
+        self.calls.append((context.tool_name, dict(context.arguments)))
+        self.contexts.append(context)
+        if self.outcome is not None:
+            return self.outcome
+        return await call_next(context)
 
 
 class ApprovalToolMiddleware(ToolMiddleware):
@@ -218,22 +224,22 @@ class ApprovalToolMiddleware(ToolMiddleware):
         self.approval = approval
         self.high_risk = high_risk
 
-    async def before_tool_call(
+    async def __call__(
         self,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> StepOutcome | None:
+        context: ToolCallContext,
+        call_next: ToolNext,
+    ) -> StepOutcome:
         if not self.high_risk:
-            return None
+            return await call_next(context)
         approved = await self.approval.approve(
-            format_tool_call_preview(tool_name, arguments)
+            format_tool_call_preview(context.tool_name, context.arguments)
         )
         if approved:
-            return None
+            return await call_next(context)
         return StepOutcome(
             {
                 "status": "rejected",
-                "tool": tool_name,
+                "tool": context.tool_name,
                 "reason": "human rejected tool execution",
             },
             should_exit=True,
@@ -1276,6 +1282,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["tool"], "echo")
         self.assertEqual(handler.calls, 0)
+        self.assertEqual(middleware.contexts[0].tool_call_id, "call-1")
+        self.assertIs(middleware.contexts[0].state, agent.state)
 
     async def test_middlewares_short_circuit_in_order(self) -> None:
         first = RecordingToolMiddleware(
@@ -1297,6 +1305,60 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.calls, [("echo", {"text": "blocked"})])
         self.assertEqual(second.calls, [])
         self.assertEqual(handler.calls, 0)
+
+    async def test_tool_middlewares_wrap_handler_in_declaration_order(self) -> None:
+        events: list[str] = []
+
+        class TracingToolMiddleware(ToolMiddleware):
+            def __init__(self, name: str) -> None:
+                super().__init__(name=name)
+
+            async def __call__(
+                self,
+                context: ToolCallContext,
+                call_next: ToolNext,
+            ) -> StepOutcome:
+                events.append(f"{self.name}:before")
+                try:
+                    return await call_next(context)
+                finally:
+                    events.append(f"{self.name}:after")
+
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-wrap-order",
+            handlers=[EchoHandler()],
+            middlewares=[
+                TracingToolMiddleware("first"),
+                TracingToolMiddleware("second"),
+            ],
+            client=FakeClient([]),
+        )
+
+        outcome = await agent.dispatch("echo", {"text": "wrapped"})
+
+        self.assertEqual(outcome.data, {"status": "success", "text": "wrapped"})
+        self.assertEqual(
+            events,
+            ["first:before", "second:before", "second:after", "first:after"],
+        )
+
+    async def test_started_tool_middleware_still_shuts_down_if_disabled(self) -> None:
+        middleware = RecordingToolMiddleware()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-toggle",
+            handlers=[EchoHandler()],
+            middlewares=[middleware],
+            client=FakeClient([]),
+        )
+
+        await agent.startup()
+        middleware.enabled = False
+        await agent.shutdown()
+
+        self.assertEqual(middleware.started, 1)
+        self.assertEqual(middleware.stopped, 1)
 
     async def test_human_approval_accepts_y_after_invalid_input(self) -> None:
         approval = HumanApproval(max_preview_chars=10)

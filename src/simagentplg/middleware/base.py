@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from simagentplg.agent.types import StepOutcome
+
+if TYPE_CHECKING:
+    from simagentplg.agent.state import AgentState
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallContext:
+    """Metadata for one tool execution."""
+
+    state: "AgentState"
+    tool_name: str
+    arguments: dict[str, Any]
+    tool_call_id: str | None = None
+
+
+ToolNext = Callable[[ToolCallContext], Awaitable[StepOutcome]]
 
 
 class Middleware:
@@ -25,16 +42,38 @@ class Middleware:
 
 
 class ToolMiddleware(Middleware):
-    """Middleware hook that runs before a tool handler is dispatched."""
+    """Decorator around one tool execution."""
 
-    async def before_tool_call(
+    async def __call__(
         self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome | None:
-        """Return None to allow execution, or StepOutcome to short-circuit."""
+        context: ToolCallContext,
+        call_next: ToolNext,
+    ) -> StepOutcome:
+        """Invoke the next decorator or handler in the execution chain."""
 
-        return None
+        return await call_next(context)
+
+
+def compose_tool_middlewares(
+    middlewares: Sequence[ToolMiddleware],
+    terminal: ToolNext,
+) -> ToolNext:
+    """Wrap a tool terminal with middleware in declaration order."""
+
+    call_next = terminal
+    for middleware in reversed(middlewares):
+        next_in_chain = call_next
+
+        async def wrapped(
+            context: ToolCallContext,
+            *,
+            middleware: ToolMiddleware = middleware,
+            call_next: ToolNext = next_in_chain,
+        ) -> StepOutcome:
+            return await middleware(context, call_next)
+
+        call_next = wrapped
+    return call_next
 
 
 def format_tool_call_preview(

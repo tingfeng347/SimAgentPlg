@@ -6,7 +6,10 @@ from simagentplg.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
     Middleware,
+    ToolCallContext,
     ToolMiddleware,
+    ToolNext,
+    compose_tool_middlewares,
     format_tool_call_preview,
 )
 from simagentplg.agent.types import StepOutcome
@@ -22,6 +25,9 @@ __all__ = [
     "StepOutcome",
     "Middleware",
     "ToolMiddleware",
+    "ToolCallContext",
+    "ToolNext",
+    "compose_tool_middlewares",
     "HumanApproval",
     "BashApprovalMiddleware",
     "format_tool_call_preview",

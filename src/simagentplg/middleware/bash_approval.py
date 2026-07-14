@@ -6,7 +6,12 @@ from typing import Any, Literal
 
 from simagentplg.agent.types import StepOutcome
 from simagentplg.middleware.approval import HumanApproval
-from simagentplg.middleware.base import ToolMiddleware, format_tool_call_preview
+from simagentplg.middleware.base import (
+    ToolCallContext,
+    ToolMiddleware,
+    ToolNext,
+    format_tool_call_preview,
+)
 
 BashApprovalPolicy = Literal["always", "unless_safe", "never"]
 BASH_SAFE_COMMAND_PREFIXES = (
@@ -49,32 +54,32 @@ class BashApprovalMiddleware(ToolMiddleware):
         self.approval = approval or HumanApproval()
         self.approval_policy = approval_policy
 
-    async def before_tool_call(
+    async def __call__(
         self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome | None:
-        if tool_name != "bash_run":
-            return None
+        context: ToolCallContext,
+        call_next: ToolNext,
+    ) -> StepOutcome:
+        if context.tool_name != "bash_run":
+            return await call_next(context)
 
-        review_reason = self._review_reason(arguments)
+        review_reason = self._review_reason(context.arguments)
         if review_reason is None:
-            return None
+            return await call_next(context)
 
         approved = await self.approval.approve(
             format_tool_call_preview(
-                tool_name,
-                arguments,
+                context.tool_name,
+                context.arguments,
                 review=review_reason,
             )
         )
         if approved:
-            return None
+            return await call_next(context)
 
         return StepOutcome(
             {
                 "status": "rejected",
-                "tool": tool_name,
+                "tool": context.tool_name,
                 "reason": "human rejected tool execution",
             },
             should_exit=True,

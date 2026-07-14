@@ -164,8 +164,8 @@ BaseAgent
 
 ## Tool Middleware
 
-`ToolMiddleware` 可在工具执行前做检查。框架不内置高低风险规则，业务
-可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
+`ToolMiddleware` 会装饰一次工具执行，可在下一层装饰器或 Handler 前后运行
+逻辑。框架不内置高低风险规则，业务可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
 不是 shell 沙箱或安全边界。默认情况下，safe allowlist 之外的命令需要 y/n
 审批：
 
@@ -334,7 +334,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
-    middlewares: Iterable[Middleware] | None = None,
+    middlewares: Iterable[ToolMiddleware] | None = None,
     skills_dir: str | Path | None = None,
     context_builder: AgentContextBuilder | None = None,
     max_steps: int = 20,

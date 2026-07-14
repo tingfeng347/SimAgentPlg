@@ -18,7 +18,7 @@ from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
 from simagentplg.agent.types import StepOutcome
 from simagentplg.logger import get_logger
-from simagentplg.middleware import Middleware
+from simagentplg.middleware import ToolMiddleware
 from simagentplg.plugins.skill.skill_manager import (
     LOAD_SKILL_TOOL_NAME,
     SkillManager,
@@ -111,7 +111,7 @@ class BaseAgent:
         agent_id: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         handlers: Iterable["BaseHandler"] | None = None,
-        middlewares: Iterable[Middleware] | None = None,
+        middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
@@ -144,6 +144,7 @@ class BaseAgent:
         self._tool_runtime = ToolRuntime(
             self.handlers,
             self.middlewares,
+            state=self.state,
             logger=self.logger,
         )
         self.reset()

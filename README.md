@@ -166,8 +166,9 @@ current `runtime()`:
 
 ## Tool Middleware
 
-`ToolMiddleware` can inspect tool calls before execution. The framework does
-not define global risk levels; applications can write their own middleware.
+`ToolMiddleware` decorates one tool execution and can run code before and
+after the next decorator or handler. The framework does not define global risk
+levels; applications can write their own middleware.
 `BashApprovalMiddleware` is an approval gate, not a shell sandbox or security
 boundary. By default, commands outside a small safe allowlist require y/n
 approval:
@@ -340,7 +341,7 @@ BaseAgent(
     agent_id: str,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     handlers: Iterable[BaseHandler] | None = None,
-    middlewares: Iterable[Middleware] | None = None,
+    middlewares: Iterable[ToolMiddleware] | None = None,
     skills_dir: str | Path | None = None,
     context_builder: AgentContextBuilder | None = None,
     max_steps: int = 20,

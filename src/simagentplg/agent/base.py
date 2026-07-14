@@ -13,10 +13,9 @@ from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
 )
-from simagentplg.agent.orchestrator import (
-    AgentOrchestrator,
-    TOOL_COMPLETION_RETRY_PROMPT,
-)
+from simagentplg.agent.orchestrator import AgentOrchestrator
+from simagentplg.agent.result import AgentRunResult
+from simagentplg.agent.runtime_policy import RuntimePolicy
 from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import ToolRuntime
 from simagentplg.agent.types import StepOutcome
@@ -36,12 +35,13 @@ Tool protocol:
 - Use tool calls for actions that require a registered tool.
 - Wait for tool results before deciding the next action.
 - Do not repeat the same ineffective tool call.
-- In tool mode, plain text does not finish the task.
-- After completing all work, call the task's finishing tool.
 """.strip()
 
-DEFAULT_MAX_STEPS = 20
-
+EXPLICIT_FINISH_PROTOCOL_PROMPT = """
+This agent requires explicit tool completion.
+Plain text does not finish the task. After completing all work, call a tool
+that returns the completion control signal.
+""".strip()
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
@@ -107,18 +107,33 @@ class BaseAgent:
         middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
-        max_steps: int = DEFAULT_MAX_STEPS,
+        runtime_policy: RuntimePolicy | None = None,
+        max_steps: int | None = None,
         client: Any | None = None,
     ) -> None:
         self._agent_id = agent_id.strip()
         if not self._agent_id:
             raise ValueError("agent_id must not be empty")
-        if max_steps <= 0:
+        if max_steps is not None and max_steps <= 0:
             raise ValueError("max_steps must be greater than zero")
+
+        policy = runtime_policy or RuntimePolicy()
+        if max_steps is not None:
+            if runtime_policy is not None and max_steps != policy.max_steps:
+                raise ValueError(
+                    "max_steps conflicts with runtime_policy.max_steps"
+                )
+            policy = RuntimePolicy(
+                max_steps=max_steps,
+                max_no_tool_responses=policy.max_no_tool_responses,
+                max_repeated_tool_calls=policy.max_repeated_tool_calls,
+                require_explicit_finish=policy.require_explicit_finish,
+            )
 
         self.config = config or ModelConfig.from_env()
         self.system_prompt = system_prompt
-        self.max_steps = max_steps
+        self.runtime_policy = policy
+        self.max_steps = policy.max_steps
         self.client = client or AsyncOpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
@@ -139,6 +154,7 @@ class BaseAgent:
             self.middlewares,
             state=self.state,
             logger=self.logger,
+            max_repeated_tool_calls=policy.max_repeated_tool_calls,
         )
         self.orchestrator = AgentOrchestrator(
             agent_id=self.agent_id,
@@ -148,7 +164,7 @@ class BaseAgent:
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             has_handler_tools=self.has_handler_tools,
-            max_steps=self.max_steps,
+            policy=self.runtime_policy,
             logger=self.logger,
         )
         self.reset()
@@ -186,6 +202,13 @@ class BaseAgent:
         messages = [{"role": "system", "content": self.system_prompt}]
         if self.has_handler_tools:
             messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
+        if self.runtime_policy.require_explicit_finish:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": EXPLICIT_FINISH_PROTOCOL_PROMPT,
+                }
+            )
         if history:
             messages.extend(dict(message) for message in history)
         self.state.reset(messages)
@@ -275,12 +298,19 @@ class BaseAgent:
             raise RuntimeError(f"chat completion failed: {exc}") from exc
         return cast(ChatCompletionMessage, response.choices[0].message)
 
-    async def runtime(self, *, task: str) -> str | None:
-        """Run one task and keep the resulting conversation in memory."""
+    async def run(self, *, task: str) -> AgentRunResult:
+        """Run one task and return a structured terminal result."""
 
         async with self._operation_lock:
             await self._startup()
             return await self.orchestrator.run(task=task)
+
+    async def runtime(self, *, task: str) -> str | None:
+        """Compatibility wrapper returning completed output as text."""
+
+        result = await self.run(task=task)
+        result.raise_for_status()
+        return result.output
 
     async def _ensure_skills_discovered(self) -> None:
         if self._skill_manager is not None:

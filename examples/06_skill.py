@@ -1,10 +1,9 @@
 """Load a local release-note skill by explicit name."""
 
 import asyncio
-import json
 from pathlib import Path
 
-from simagentplg import BaseAgent, FinishHandler, ModelConfig
+from simagentplg import BaseAgent, ModelConfig
 
 SKILLS_DIR = Path(__file__).with_name("skills")
 
@@ -15,9 +14,8 @@ async def main() -> None:
         agent_id="release-writer",
         system_prompt=(
             "Use the explicitly loaded local skill to complete the task. "
-            "Return the final deliverable in the run_finish summary."
+            "Return the final deliverable directly."
         ),
-        handlers=[FinishHandler()],
         skills_dir=SKILLS_DIR,
     )
 
@@ -25,12 +23,11 @@ async def main() -> None:
         result = await agent.runtime(
             task=(
                 "$release_notes Write release notes for SimAgentPlg 0.2.4. Changes: "
-                "added FinishHandler and run_finish, added Git change "
-                "reporting, and added repeated tool-call protection."
+                "added an orchestrator, structured run results, and runtime "
+                "policy controls."
             )
         )
-        report = json.loads(result or "{}")
-        print(report.get("summary", result))
+        print(result)
     finally:
         await agent.shutdown()
 

@@ -14,6 +14,8 @@ class AgentStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
 
 @dataclass(slots=True)
@@ -82,6 +84,20 @@ class AgentState:
         self.status = AgentStatus.FAILED
         self.result = None
         self.error = str(error)
+
+    def cancel(self, result: str | None = None) -> None:
+        """Mark the current task as cancelled."""
+
+        self.status = AgentStatus.CANCELLED
+        self.result = result
+        self.error = None
+
+    def reject(self, result: str | None = None) -> None:
+        """Mark the current task as rejected by a tool or policy."""
+
+        self.status = AgentStatus.REJECTED
+        self.result = result
+        self.error = None
 
     def snapshot(self) -> "AgentState":
         """Return an independent copy suitable for observation or persistence."""

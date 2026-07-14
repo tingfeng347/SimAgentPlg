@@ -2,30 +2,35 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.4 is a lightweight framework for building stateful
-OpenAI-compatible agents with composable tool handlers, optional MCP tools,
-and local skill indexing.
+SimAgentPlg is a lightweight core for building stateful, extensible agents on
+OpenAI-compatible model APIs. It provides the runtime mechanism—state,
+orchestration, context construction, tool dispatch, middleware, MCP, and
+skills—while derived agents own concrete tools such as shell, file editing,
+Git, or explicit completion.
 
-## Features
+Requires Python 3.12 or newer.
 
-- Stateful `BaseAgent` with conversation memory and explicit `reset()`
-- Observable `AgentState` for persistent history and current task status
-- `AgentContextBuilder` for per-turn, non-mutating model context construction
-- Immutable, required `agent_id` owned by each agent
-- OpenAI-compatible model configuration through `.env` or direct construction
-- Handler-driven tool execution with no separate tool-mode switch
-- Built-in `BashHandler` for bounded Bash execution
-- Built-in `GitDiffHandler` for Git working-tree inspection
-- Built-in `FinishHandler` for explicit task completion
-- `MethodToolHandler` for small custom Python tools
-- Optional MCP integration through `McpToolHandler` and `McpServerManager`
-- Optional local skill discovery, indexing, and on-demand loading through `SkillManager`
+## Core capabilities
 
-Python 3.12 or newer is required.
+- Stateful `BaseAgent` with persistent conversation history and `reset()`
+- Public `AgentOrchestrator` for the provider-tool loop
+- Structured `AgentRunResult`, `RunStatus`, and `StopReason`
+- Explicit `RuntimePolicy` for loop and completion behavior
+- `AgentContextBuilder` for non-mutating per-turn context projection
+- Composable `BaseHandler` and `MethodToolHandler` tool contracts
+- `ToolRuntime` lifecycle, routing, middleware, and repeat-call protection
+- Generic `ToolMiddleware` interception
+- Optional MCP integration through `McpToolHandler`
+- Local skill discovery and on-demand loading through `SkillManager`
+
+The core intentionally does not provide Bash, Git, filesystem, approval UI, or
+finish tools. Those belong to a derived agent such as a CodeAgent.
+
+This core-boundary change removes the former `BashHandler`, `GitDiffHandler`,
+`FinishHandler`, `HumanApproval`, and `BashApprovalMiddleware` public exports.
+Derived agents should provide equivalent implementations when needed.
 
 ## Installation
-
-Install the local project and dependencies with `uv`:
 
 ```bash
 uv sync
@@ -33,7 +38,7 @@ uv sync
 
 ## Configuration
 
-Copy `.env.example` to `.env`, then fill in your model credentials:
+Copy `.env.example` to `.env` and provide model credentials:
 
 ```env
 MODEL_API_KEY=sk-xxxxxxxx
@@ -43,10 +48,7 @@ LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
 
-`ModelConfig.from_env()` reads `CHAT_MODEL`, `MODEL_API_KEY`, `MODEL_URL`,
-`LLM_TIMEOUT`, and `LLM_TEMPERATURE`.
-
-You can also construct a config directly:
+Configuration can also be supplied directly:
 
 ```python
 from simagentplg import ModelConfig
@@ -58,12 +60,9 @@ config = ModelConfig(
 )
 ```
 
-## Quick Start
+## Plain agent
 
-### Plain Chat
-
-Tool execution is disabled by default. A plain agent keeps conversation history
-between `runtime()` calls:
+Conversation history is preserved across calls:
 
 ```python
 from simagentplg import BaseAgent, ModelConfig
@@ -81,130 +80,60 @@ agent.reset()
 await agent.shutdown()
 ```
 
-Calls to the same agent are serialized to protect its conversation history.
+Calls on the same agent are serialized to protect conversation state.
 
-### Tool Mode
+## Structured runs
 
-Pass handlers explicitly to enable tool execution:
-
-```python
-import json
-
-from simagentplg import (
-    BaseAgent,
-    BashHandler,
-    FinishHandler,
-    GitDiffHandler,
-    ModelConfig,
-)
-
-agent = BaseAgent(
-    config=ModelConfig.from_env(),
-    agent_id="developer",
-    system_prompt="Complete coding tasks using the available tools.",
-    handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-)
-
-result = await agent.runtime(task="Create hello.py that prints 'hello'.")
-report = json.loads(result)
-print(report["summary"])
-
-await agent.shutdown()
-```
-
-Agents expose only the handlers passed to `BaseAgent`:
-
-```text
-BaseAgent
-  -> BashHandler
-       -> bash_run
-  -> GitDiffHandler
-       -> run_gitdiff
-  -> FinishHandler
-       -> run_finish
-  -> MethodToolHandler subclasses
-  -> McpToolHandler
-```
-
-In tool mode, ordinary text does not complete a task. The model must call a
-finishing tool, normally `run_finish`, or a custom tool must return
-`StepOutcome(..., should_exit=True)`.
-
-Tool mode stops with an error when:
-
-- no finishing tool is called within `max_steps`
-- the same tool and arguments are requested three consecutive times
-
-## Built-In Handlers
-
-`BashHandler` exposes `bash_run` and executes a bounded Bash command. It has a
-working directory, timeout, and output limit.
-
-`GitDiffHandler` exposes `run_gitdiff`. It inspects the current Git working
-tree and does not finish the task:
-
-```json
-{
-  "status": "success",
-  "mode": "status",
-  "command": "git status --short",
-  "output": "?? hello.py\n"
-}
-```
-
-Supported modes are `status` for `git status --short`, `stat` for
-`git diff --stat`, and `diff` for `git diff`.
-
-`FinishHandler` exposes `run_finish`. It returns a JSON result and exits the
-current `runtime()`:
-
-```json
-{
-  "summary": "Created hello.py"
-}
-```
-
-## Tool Middleware
-
-`ToolMiddleware` decorates one tool execution and can run code before and
-after the next decorator or handler. The framework does not define global risk
-levels; applications can write their own middleware.
-`BashApprovalMiddleware` is an approval gate, not a shell sandbox or security
-boundary. By default, commands outside a small safe allowlist require y/n
-approval:
+`run()` exposes the core result protocol:
 
 ```python
-from simagentplg import (
-    BaseAgent,
-    BashApprovalMiddleware,
-    BashHandler,
-    FinishHandler,
-    ModelConfig,
-)
+result = await agent.run(task="Explain the repository architecture.")
 
-agent = BaseAgent(
-    ModelConfig.from_env(),
-    agent_id="coder",
-    handlers=[BashHandler(), FinishHandler()],
-    middlewares=[BashApprovalMiddleware()],
+print(result.status)
+print(result.stop_reason)
+print(result.turns)
+print(result.output)
+```
+
+`runtime()` remains a compatibility wrapper. It returns `result.output` for a
+completed run and raises `AgentRunError` for failed, rejected, or cancelled
+runs.
+
+## Runtime policy
+
+Tool availability and completion policy are independent:
+
+```python
+from simagentplg import RuntimePolicy
+
+policy = RuntimePolicy(
+    max_steps=20,
+    max_no_tool_responses=3,
+    max_repeated_tool_calls=3,
+    require_explicit_finish=False,
 )
 ```
 
-The default `approval_policy="unless_safe"` skips approval only for simple
-read-only commands such as `pwd`, `ls`, `git status`, `git diff`, `git log`,
-`rg`, `sed -n`, `cat`, and Python unittest invocations. Use
-`approval_policy="always"` to review every `bash_run` command.
-`approval_policy="never"` disables this approval gate explicitly.
+By default, an agent may call tools and later complete with ordinary text. A
+derived autonomous agent can require a completion tool:
 
-## Custom Tool Handlers
+```python
+policy = RuntimePolicy(require_explicit_finish=True)
+```
 
-`MethodToolHandler` maps a tool named `add` to an async method named `do_add`:
+That agent must register one of its own tools that returns
+`ToolControl.COMPLETE`.
+
+## Custom tools
+
+Tools are grouped into handlers. `MethodToolHandler` maps a tool named `add` to
+an async `do_add()` method:
 
 ```python
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg import BaseAgent, MethodToolHandler, ModelConfig, StepOutcome
+from simagentplg import MethodToolHandler, StepOutcome
 
 ADD_TOOL = {
     "type": "function",
@@ -231,8 +160,11 @@ class MathHandler(MethodToolHandler):
         return StepOutcome(
             {"value": arguments["left"] + arguments["right"]}
         )
+```
 
+Register it explicitly:
 
+```python
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="calculator",
@@ -240,12 +172,51 @@ agent = BaseAgent(
 )
 ```
 
-Handler startup builds one routing table. Duplicate tool names are rejected
-instead of silently overriding another handler.
+Duplicate tool names fail during startup instead of being silently
+overwritten.
 
-## MCP Tools
+Tool authors should follow the versioned
+[SimAgentPlg Tool Protocol](TOOL_PROTOCOL.md).
 
-MCP is opt-in and follows the same handler contract:
+### Tool control signals
+
+Tool payload and runtime control are separate:
+
+```python
+from simagentplg import StepOutcome, ToolControl
+
+StepOutcome(data)  # continue the provider-tool loop
+StepOutcome(data, control=ToolControl.COMPLETE)
+StepOutcome(data, control=ToolControl.REJECT)
+StepOutcome(data, control=ToolControl.CANCEL)
+```
+
+This lets the runtime distinguish successful completion, policy rejection,
+and cancellation.
+
+## Tool middleware
+
+`ToolMiddleware` decorates a tool execution without owning concrete tool
+policy:
+
+```python
+from simagentplg import ToolMiddleware
+
+
+class AuditMiddleware(ToolMiddleware):
+    async def __call__(self, context, call_next):
+        print("before", context.tool_name)
+        result = await call_next(context)
+        print("after", context.tool_name)
+        return result
+```
+
+Approval UI and shell-specific risk policies should be implemented by the
+derived agent, not by the core.
+
+## MCP tools
+
+MCP uses the same handler contract:
 
 ```python
 from simagentplg import BaseAgent, McpToolHandler, ModelConfig
@@ -257,45 +228,30 @@ agent = BaseAgent(
 )
 ```
 
-Example MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest", "--headless"]
-    }
-  }
-}
-```
-
-`McpServerManager` loads configured services, exposes tools with service-name
-prefixes, and lets one failed service avoid blocking the rest.
+An MCP-enabled agent can execute MCP tools and then complete with plain text.
+It does not need a separate finish tool unless its `RuntimePolicy` explicitly
+requires one.
 
 ## Skills
 
-Skills are optional prompt extensions and remain separate from tool handlers:
+Skills are prompt and resource extensions independent of handler tools:
 
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, FinishHandler, ModelConfig
+from simagentplg import BaseAgent, ModelConfig
 
 agent = BaseAgent(
     config=ModelConfig.from_env(),
     agent_id="skilled-agent",
-    handlers=[FinishHandler()],
     skills_dir=Path("examples/skills"),
 )
 ```
 
-`SkillManager` scans each child directory containing `SKILL.md`, indexes the
-skill name and YAML front matter description, and injects compact skill
-metadata into the model context. The model can call the internal `load_skill`
-tool to load full `SKILL.md`, optional `template.md`, and optional
-`examples/sample.md` content on demand. Users can also force a skill with
-`$skill_name` or `skill:skill_name`.
+`SkillManager` discovers child folders containing `SKILL.md`, injects compact
+metadata, and exposes an internal `load_skill` tool for on-demand instruction
+loading. Users can explicitly select a skill with `$skill_name` or
+`skill:skill_name`.
 
 ```text
 examples/skills/
@@ -306,78 +262,50 @@ examples/skills/
       sample.md
 ```
 
-Skill context itself does not require handler tools. Register `FinishHandler`
-only when the task should finish with `run_finish`.
+## Core boundary
+
+SimAgentPlg core owns mechanisms:
+
+```text
+Orchestration + State + Context + Runtime Policy + Run Result
++ Tool Protocol + Middleware + MCP + Skills
+```
+
+Derived agents own concrete capabilities and policies:
+
+```text
+Shell + Filesystem + Git + Workspace + Approval UI
++ Sandbox + Completion Tool + Product Interface
+```
+
+See [the Pi Harness comparison](docs/pi-harness-gap-analysis.md) for the
+architecture analysis and future roadmap.
 
 ## Examples
-
-Runnable examples are available in [`examples/`](examples/README.md):
 
 ```bash
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
-uv run python examples/07_bash_approval.py
 ```
 
-## Testing
-
-Run the test suite from the repository root:
+## Tests
 
 ```bash
-uv run python -m unittest
+uv run python -m unittest discover -s tests -p 'test*.py' -q
 ```
-
-The current tests cover agents, custom handlers, tool middleware, finish
-behavior, and importable examples.
 
 ## Public API
 
-```python
-BaseAgent(
-    config: ModelConfig | None = None,
-    *,
-    agent_id: str,
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    handlers: Iterable[BaseHandler] | None = None,
-    middlewares: Iterable[ToolMiddleware] | None = None,
-    skills_dir: str | Path | None = None,
-    context_builder: AgentContextBuilder | None = None,
-    max_steps: int = 20,
-    client: Any | None = None,
-)
+The package root exports:
 
-await agent.runtime(*, task: str) -> str | None
-agent.reset(history=None)
-await agent.startup()
-await agent.shutdown()
-```
-
-`agent.state` holds the persistent conversation plus the current task's
-status, turn count, active skill, result, and error. `AgentContextBuilder`
-derives each complete model request, including structured tool definitions,
-from that state without mutating the history.
-
-Passing handlers puts `BaseAgent` in tool execution mode and injects the
-runtime's internal tool protocol system message. Without handlers, the agent is
-plain chat; `skills_dir` can still expose the internal `load_skill` context
-tool without requiring a finishing tool.
-
-The top-level package exports `BaseAgent`, `ModelConfig`, `AgentState`,
-`AgentStatus`, `AgentContextBuilder`, `ContextBuildResult`, `StepOutcome`,
-handler base classes, `MethodToolHandler`,
-`BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
-`McpServerManager`, `SkillManager`, and default resource paths.
-
-## Changes in 0.2.4
-
-- Added the sibling `FinishHandler` and built-in `run_finish` tool
-- Added the sibling `GitDiffHandler` and built-in `run_gitdiff` tool
-- Required explicit finishing-tool completion in tool mode
-- Added protection against three identical consecutive tool calls
-- Raised a clear error when tool mode exhausts `max_steps`
-- Kept `BashHandler` focused exclusively on `bash_run`
+- Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
+- Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
+- Context: `AgentContextBuilder`, `ContextBuildResult`
+- Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
+- Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
+- Extensions: `McpServerManager`, `SkillManager`
 
 ## License
 

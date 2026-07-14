@@ -9,6 +9,7 @@ from simagentplg import (
     MethodToolHandler,
     ModelConfig,
     StepOutcome,
+    ToolControl,
 )
 
 ADD_TOOL = {
@@ -46,7 +47,7 @@ class MathHandler(MethodToolHandler):
             )
         return StepOutcome(
             {"status": "success", "value": left + right},
-            should_exit=True,
+            control=ToolControl.COMPLETE,
         )
 
 

@@ -3,9 +3,14 @@
 from simagentplg.agent.base import BaseAgent, ModelConfig
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
 from simagentplg.agent.orchestrator import AgentOrchestrator
+from simagentplg.agent.result import (
+    AgentRunError,
+    AgentRunResult,
+    RunStatus,
+    StopReason,
+)
+from simagentplg.agent.runtime_policy import RuntimePolicy
 from simagentplg.middleware import (
-    BashApprovalMiddleware,
-    HumanApproval,
     Middleware,
     ToolCallContext,
     ToolMiddleware,
@@ -13,7 +18,7 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import StepOutcome
+from simagentplg.agent.types import StepOutcome, ToolControl
 from simagentplg.agent.state import AgentState, AgentStatus
 
 __all__ = [
@@ -24,13 +29,17 @@ __all__ = [
     "AgentContextBuilder",
     "ContextBuildResult",
     "AgentOrchestrator",
+    "RuntimePolicy",
+    "AgentRunResult",
+    "AgentRunError",
+    "RunStatus",
+    "StopReason",
     "StepOutcome",
+    "ToolControl",
     "Middleware",
     "ToolMiddleware",
     "ToolCallContext",
     "ToolNext",
     "compose_tool_middlewares",
-    "HumanApproval",
-    "BashApprovalMiddleware",
     "format_tool_call_preview",
 ]

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import StepOutcome
+from simagentplg.agent.types import StepOutcome, ToolControl
 from simagentplg.handlers.base import BaseHandler
 from simagentplg.middleware import (
     ToolCallContext,
@@ -14,13 +14,15 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
 )
 
-MAX_REPEATED_TOOL_CALLS = 3
-
-
 @dataclass(frozen=True, slots=True)
 class ToolCallResult:
     messages: tuple[dict[str, Any], ...]
-    exit_value: str | None = None
+    control: ToolControl = ToolControl.CONTINUE
+    output: str | None = None
+
+
+class RepeatedToolCallError(RuntimeError):
+    """Raised when an identical tool call reaches the configured limit."""
 
 
 class ToolRuntime:
@@ -33,11 +35,17 @@ class ToolRuntime:
         *,
         state: AgentState,
         logger: logging.Logger,
+        max_repeated_tool_calls: int = 3,
     ) -> None:
+        if max_repeated_tool_calls <= 0:
+            raise ValueError(
+                "max_repeated_tool_calls must be greater than zero"
+            )
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)
         self.state = state
         self.logger = logger
+        self.max_repeated_tool_calls = max_repeated_tool_calls
         self._tool_routes: dict[str, BaseHandler] = {}
         self._active_middlewares: list[ToolMiddleware] = []
         self._tool_chain: ToolNext | None = None
@@ -177,9 +185,9 @@ class ToolRuntime:
                 tool_call_id=tool_call.id,
             )
             self.logger.info(
-                "Tool %s completed exit=%s result=%s",
+                "Tool %s completed control=%s result=%s",
                 tool_name,
-                outcome.should_exit,
+                outcome.control,
                 summarize_for_log(outcome.data),
             )
         except Exception as exc:
@@ -203,8 +211,12 @@ class ToolRuntime:
             "tool_call_id": tool_call.id,
             "content": serialized,
         }
-        if outcome.should_exit:
-            return ToolCallResult((message,), exit_value=serialized)
+        if outcome.control is not ToolControl.CONTINUE:
+            return ToolCallResult(
+                (message,),
+                control=outcome.control,
+                output=serialized,
+            )
         return ToolCallResult((message,))
 
     def _build_tool_routes(self) -> dict[str, BaseHandler]:
@@ -256,10 +268,10 @@ class ToolRuntime:
             self._last_tool_signature = signature
             self._repeated_tool_calls = 1
 
-        if self._repeated_tool_calls >= MAX_REPEATED_TOOL_CALLS:
-            raise RuntimeError(
+        if self._repeated_tool_calls >= self.max_repeated_tool_calls:
+            raise RepeatedToolCallError(
                 f"tool {tool_name!r} was called with the same arguments "
-                f"{MAX_REPEATED_TOOL_CALLS} consecutive times"
+                f"{self.max_repeated_tool_calls} consecutive times"
             )
 
 

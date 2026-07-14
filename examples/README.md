@@ -18,19 +18,19 @@ Every `BaseAgent` declares its own immutable `agent_id`.
 - `02_custom_tool.py`: a custom atomic tool with `MethodToolHandler`
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `06_skill.py`: local skill discovery, indexing, template, and sample injection
-- `07_bash_approval.py`: deterministic `BashApprovalMiddleware` y/n approval
 
 Tool-enabled agents expose only the handlers explicitly passed to
-`BaseAgent`. `BashHandler` provides `bash_run`, while `FinishHandler` provides
-`run_finish`. A custom tool can also finish a task by returning
-`StepOutcome(..., should_exit=True)`. Plain text does not finish a tool task,
-and the third identical consecutive tool call is rejected before execution.
+`BaseAgent`. Tool availability does not force an explicit completion call;
+plain text completes a task by default. A derived agent can require explicit
+completion through `RuntimePolicy` and return
+`StepOutcome(..., control=ToolControl.COMPLETE)` from its own completion tool.
+The repeated-tool-call guard remains configurable through the same policy.
 
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
 through `npx`.
 
-The skill example loads `examples/skills/release_notes/`. Skill metadata is
-injected into the model context. The model can call the internal `load_skill`
-tool to load full `SKILL.md`, optional `template.md`, and optional
-`examples/sample.md` content, and the user can still name a skill explicitly.
+The skill example loads `examples/skills/release_notes/`. Skill metadata,
+including its file location, is injected into the model context. Naming the
+skill explicitly loads its full `SKILL.md`, optional `template.md`, and optional
+`examples/sample.md` content. The core does not register a special skill tool.

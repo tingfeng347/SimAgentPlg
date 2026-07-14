@@ -2,12 +2,12 @@
 
 import asyncio
 
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 
 async def main() -> None:
     agent = BaseAgent(
-        config=ModelConfig.from_env(),
+        OpenAIModelAdapter(ModelConfig.from_env()),
         agent_id="tutor",
         system_prompt="You are a concise Python tutor.",
     )

@@ -9,8 +9,6 @@ from fastmcp.mcp_config import MCPConfig
 from mcp.types import Tool
 
 from simagentplg.logger import get_logger
-from simagentplg.resources import DEFAULT_MCP_CONFIG
-
 logger = get_logger(name="MCP")
 
 
@@ -23,15 +21,13 @@ class _McpToolRoute:
 class McpServerManager:
     """Load, connect, and route tools across configured MCP services."""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: str | Path):
         """Initialize the manager.
 
         Args:
             path: MCP configuration JSON path.
         """
-        if path is None:
-            path = DEFAULT_MCP_CONFIG
-        self.path = path
+        self.path = Path(path)
         self._clients_by_service: dict[str, Client] = {}
         self._tool_routes: dict[str, _McpToolRoute] = {}
         self._openai_tools: list[dict[str, Any]] = []

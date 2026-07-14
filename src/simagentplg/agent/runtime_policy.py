@@ -1,0 +1,23 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePolicy:
+    """Policy controlling the provider-tool loop for one agent."""
+
+    max_steps: int = 20
+    max_no_tool_responses: int = 3
+    max_repeated_tool_calls: int = 3
+    require_explicit_finish: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_steps <= 0:
+            raise ValueError("max_steps must be greater than zero")
+        if self.max_no_tool_responses <= 0:
+            raise ValueError(
+                "max_no_tool_responses must be greater than zero"
+            )
+        if self.max_repeated_tool_calls <= 0:
+            raise ValueError(
+                "max_repeated_tool_calls must be greater than zero"
+            )

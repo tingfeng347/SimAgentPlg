@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import tempfile
 import unittest
@@ -10,28 +11,33 @@ from unittest.mock import patch
 
 from simagentplg import (
     AgentContextBuilder,
+    AgentOrchestrator,
+    AgentRunError,
+    AgentRunResult,
     AgentState,
     AgentStatus,
     BaseAgent,
-    BashApprovalMiddleware,
-    BashHandler,
-    FinishHandler,
-    HumanApproval,
     Middleware,
     McpToolHandler,
     MethodToolHandler,
+    ModelAdapter,
     ModelConfig,
+    OpenAIModelAdapter,
+    RunStatus,
+    RuntimePolicy,
     StepOutcome,
+    StopReason,
     ToolCallContext,
+    ToolControl,
     ToolMiddleware,
     ToolNext,
-    format_tool_call_preview,
 )
 from simagentplg.agent.base import (
     DEFAULT_SYSTEM_PROMPT,
-    TOOL_COMPLETION_RETRY_PROMPT,
+    EXPLICIT_FINISH_PROTOCOL_PROMPT,
     TOOL_PROTOCOL_PROMPT,
 )
+from simagentplg.agent.orchestrator import TOOL_COMPLETION_RETRY_PROMPT
 
 TEST_CONFIG = ModelConfig(
     model="test-model",
@@ -78,6 +84,24 @@ class FakeToolCall:
     function: FakeFunction
     type: str = "function"
 
+    @property
+    def name(self) -> str:
+        return self.function.name
+
+    @property
+    def arguments(self) -> str:
+        return self.function.arguments
+
+    def to_agent_message(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": {
+                "name": self.name,
+                "arguments": self.arguments,
+            },
+        }
+
 
 class FakeMessage:
     def __init__(
@@ -88,12 +112,17 @@ class FakeMessage:
         self.content = content
         self.tool_calls = tool_calls
 
-    def model_dump(self) -> dict[str, Any]:
-        return {
+    def to_agent_message(self) -> dict[str, Any]:
+        message: dict[str, Any] = {
             "role": "assistant",
             "content": self.content,
-            "tool_calls": self.tool_calls,
         }
+        if self.tool_calls:
+            message["tool_calls"] = [
+                tool_call.to_agent_message()
+                for tool_call in self.tool_calls
+            ]
+        return message
 
 
 class FakeCompletions:
@@ -101,16 +130,28 @@ class FakeCompletions:
         self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
-    async def create(self, **kwargs: Any) -> Any:
+    async def create(self, **kwargs: Any) -> FakeMessage:
         self.calls.append(kwargs)
-        message = self.responses.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return self.responses.pop(0)
 
 
-class FakeClient:
+class FakeModelAdapter(ModelAdapter):
     def __init__(self, responses: list[FakeMessage]) -> None:
         self.completions = FakeCompletions(responses)
-        self.chat = SimpleNamespace(completions=self.completions)
+        self.started = 0
+        self.stopped = 0
+
+    async def startup(self) -> None:
+        self.started += 1
+
+    async def shutdown(self) -> None:
+        self.stopped += 1
+
+    async def complete(self, context: Any) -> FakeMessage:
+        return await self.completions.create(
+            messages=context.llm_messages,
+            tools=context.tools or None,
+        )
 
 
 class EchoHandler(MethodToolHandler):
@@ -145,7 +186,7 @@ class DoneHandler(MethodToolHandler):
     async def do_done(self, arguments: dict[str, Any]) -> StepOutcome:
         return StepOutcome(
             {"summary": arguments.get("summary", "")},
-            should_exit=True,
+            control=ToolControl.COMPLETE,
         )
 
 
@@ -218,41 +259,59 @@ class RecordingToolMiddleware(ToolMiddleware):
         return await call_next(context)
 
 
-class ApprovalToolMiddleware(ToolMiddleware):
-    def __init__(self, approval: HumanApproval, *, high_risk: bool) -> None:
-        super().__init__()
-        self.approval = approval
-        self.high_risk = high_risk
+def make_agent(
+    *,
+    model: ModelAdapter | None = None,
+    **kwargs: Any,
+) -> BaseAgent:
+    """Build a core agent while keeping repetitive test setup compact."""
 
-    async def __call__(
-        self,
-        context: ToolCallContext,
-        call_next: ToolNext,
-    ) -> StepOutcome:
-        if not self.high_risk:
-            return await call_next(context)
-        approved = await self.approval.approve(
-            format_tool_call_preview(context.tool_name, context.arguments)
-        )
-        if approved:
-            return await call_next(context)
-        return StepOutcome(
-            {
-                "status": "rejected",
-                "tool": context.tool_name,
-                "reason": "human rejected tool execution",
-            },
-            should_exit=True,
-        )
+    return BaseAgent(
+        model or FakeModelAdapter([]),
+        **kwargs,
+    )
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_base_agent_composes_public_orchestrator(self) -> None:
+        agent = make_agent(
+            agent_id="orchestrated",
+            model=FakeModelAdapter([]),
+        )
+
+        self.assertIsInstance(agent.orchestrator, AgentOrchestrator)
+        self.assertIs(agent.orchestrator.state, agent.state)
+
     async def test_middleware_base_class_is_exported_with_standard_spelling(self) -> None:
         self.assertTrue(issubclass(ToolMiddleware, Middleware))
 
+    async def test_base_agent_public_api_uses_model_and_runtime_policy(self) -> None:
+        parameters = inspect.signature(BaseAgent).parameters
+
+        self.assertIn("model", parameters)
+        self.assertIn("runtime_policy", parameters)
+        self.assertNotIn("client", parameters)
+        self.assertNotIn("max_steps", parameters)
+        self.assertNotIn(
+            "has_handler_tools",
+            inspect.signature(AgentOrchestrator).parameters,
+        )
+
+    async def test_base_agent_owns_model_adapter_lifecycle(self) -> None:
+        model = FakeModelAdapter([])
+        agent = BaseAgent(model, agent_id="model-lifecycle")
+
+        await agent.startup()
+        await agent.startup()
+        await agent.shutdown()
+        await agent.shutdown()
+
+        self.assertEqual(model.started, 1)
+        self.assertEqual(model.stopped, 1)
+
     async def test_model_config_reads_chat_model_from_env(self) -> None:
         with (
-            patch("simagentplg.agent.base.load_dotenv"),
+            patch("simagentplg.providers.openai.load_dotenv"),
             patch.dict(
                 "os.environ",
                 {
@@ -273,24 +332,68 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.timeout, 12)
         self.assertEqual(config.temperature, 0.2)
 
-    async def test_agents_share_config_but_not_messages(self) -> None:
-        first_client = FakeClient([FakeMessage("first")])
-        second_client = FakeClient([FakeMessage("second")])
-        first = BaseAgent(
-            TEST_CONFIG,
-            agent_id="first",
-            client=first_client,
+    async def test_openai_adapter_converts_provider_response(self) -> None:
+        class OpenAICompletions:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            async def create(self, **kwargs: Any) -> Any:
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=FakeMessage(
+                                tool_calls=[
+                                    FakeToolCall(
+                                        id="call-1",
+                                        function=FakeFunction(
+                                            "lookup",
+                                            '{"query": "value"}',
+                                        ),
+                                    )
+                                ]
+                            )
+                        )
+                    ]
+                )
+
+        completions = OpenAICompletions()
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)
         )
-        second = BaseAgent(
+        adapter = OpenAIModelAdapter(
             TEST_CONFIG,
+            client=client,  # type: ignore[arg-type]
+        )
+        context = AgentContextBuilder().build(AgentState())
+
+        message = await adapter.complete(context)
+
+        self.assertIsNone(message.content)
+        self.assertEqual(message.tool_calls[0].id, "call-1")
+        self.assertEqual(message.tool_calls[0].name, "lookup")
+        self.assertEqual(
+            message.tool_calls[0].arguments,
+            '{"query": "value"}',
+        )
+        self.assertEqual(completions.calls[0]["model"], "test-model")
+
+    async def test_agents_use_independent_models_and_messages(self) -> None:
+        first_model = FakeModelAdapter([FakeMessage("first")])
+        second_model = FakeModelAdapter([FakeMessage("second")])
+        first = make_agent(
+            agent_id="first",
+            model=first_model,
+        )
+        second = make_agent(
             agent_id="second",
-            client=second_client,
+            model=second_model,
         )
 
         await first.runtime(task="only first sees this")
         await second.runtime(task="only second sees this")
 
-        self.assertIs(first.config, second.config)
+        self.assertIsNot(first.model, second.model)
         self.assertNotEqual(first.messages, second.messages)
         self.assertFalse(
             any(
@@ -300,11 +403,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_runtime_keeps_memory_and_reset_clears_it(self) -> None:
-        client = FakeClient([FakeMessage("one"), FakeMessage("two")])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("one"), FakeMessage("two")])
+        agent = make_agent(
             agent_id="memory",
-            client=client,
+            model=client,
         )
 
         await agent.runtime(task="first task")
@@ -325,25 +427,29 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_runtime_calls_are_serialized_per_agent(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="serialized-runtime",
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
         active = 0
         maximum = 0
 
-        async def run_loop() -> str:
+        async def run_loop() -> AgentRunResult:
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
             try:
                 await asyncio.sleep(0.01)
-                return "done"
+                return AgentRunResult(
+                    status=RunStatus.COMPLETED,
+                    stop_reason=StopReason.TEXT_RESPONSE,
+                    turns=1,
+                    output="done",
+                )
             finally:
                 active -= 1
 
-        agent._run_loop = run_loop  # type: ignore[method-assign]
+        agent.orchestrator._run_loop = run_loop  # type: ignore[method-assign]
 
         results = await asyncio.gather(
             agent.runtime(task="first"),
@@ -354,10 +460,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(maximum, 1)
 
     async def test_default_system_prompt_is_plain_chat_prompt(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="default-prompt",
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(agent.system_prompt, DEFAULT_SYSTEM_PROMPT)
@@ -367,12 +472,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tool_mode_injects_tool_protocol_explicitly(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="tool-protocol",
             system_prompt="You are a custom coding agent.",
             handlers=[DoneHandler()],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(
@@ -384,11 +488,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_plain_chat_has_no_tool_protocol_message(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="plain-protocol",
             system_prompt="You are a plain chat agent.",
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(
@@ -398,13 +501,49 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_explicit_finish_policy_injects_completion_protocol(self) -> None:
+        agent = make_agent(
+            agent_id="explicit-finish-protocol",
+            handlers=[DoneHandler()],
+            runtime_policy=RuntimePolicy(require_explicit_finish=True),
+            model=FakeModelAdapter([]),
+        )
+
+        self.assertEqual(
+            agent.messages[-1],
+            {"role": "system", "content": EXPLICIT_FINISH_PROTOCOL_PROMPT},
+        )
+
+    async def test_tools_do_not_require_explicit_finish_by_default(self) -> None:
+        agent = make_agent(
+            agent_id="tool-text-completion",
+            handlers=[EchoHandler()],
+            model=FakeModelAdapter([FakeMessage("completed with plain text")]),
+        )
+
+        result = await agent.runtime(task="answer after using tools if needed")
+
+        self.assertEqual(result, "completed with plain text")
+
+    async def test_run_returns_structured_result(self) -> None:
+        agent = make_agent(
+            agent_id="structured-run",
+            model=FakeModelAdapter([FakeMessage("done")]),
+        )
+
+        result = await agent.run(task="complete")
+
+        self.assertEqual(result.status, RunStatus.COMPLETED)
+        self.assertEqual(result.stop_reason, StopReason.TEXT_RESPONSE)
+        self.assertEqual(result.output, "done")
+        self.assertEqual(result.turns, 1)
+
     async def test_plain_chat_returns_text_without_retry_prompt(self) -> None:
-        client = FakeClient([FakeMessage("plain text")])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("plain text")])
+        agent = make_agent(
             agent_id="plain-retry",
-            max_steps=2,
-            client=client,
+            runtime_policy=RuntimePolicy(max_steps=2),
+            model=client,
         )
 
         result = await agent.runtime(task="plain chat")
@@ -418,11 +557,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_plain_chat_rejects_empty_completion(self) -> None:
-        client = FakeClient([FakeMessage(None)])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage(None)])
+        agent = make_agent(
             agent_id="plain-empty",
-            client=client,
+            model=client,
         )
 
         with self.assertRaisesRegex(RuntimeError, "empty content"):
@@ -433,20 +571,19 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             id="call-1",
             function=FakeFunction("unknown", "{}"),
         )
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(tool_calls=[unknown_call]),
                 FakeMessage(tool_calls=[unknown_call]),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="plain-step-limit",
-            max_steps=2,
-            client=client,
+            runtime_policy=RuntimePolicy(max_steps=2),
+            model=client,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "did not finish plain chat"):
+        with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
             await agent.runtime(task="plain chat")
 
     async def test_context_builder_can_filter_internal_context(self) -> None:
@@ -461,11 +598,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     if not message.get("exclude_from_llm")
                 ]
 
-        client = FakeClient([FakeMessage("visible")])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("visible")])
+        agent = make_agent(
             agent_id="context",
-            client=client,
+            model=client,
             context_builder=FilteringContextBuilder(),
         )
         agent.messages.append(
@@ -488,10 +624,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_agent_state_records_completed_task(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="state-complete",
-            client=FakeClient([FakeMessage("done")]),
+            model=FakeModelAdapter([FakeMessage("done")]),
         )
 
         result = await agent.runtime(task="finish task")
@@ -504,10 +639,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(agent.state.error)
 
     async def test_agent_state_records_failed_task(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="state-failed",
-            client=FakeClient([FakeMessage(None)]),
+            model=FakeModelAdapter([FakeMessage(None)]),
         )
 
         with self.assertRaisesRegex(RuntimeError, "empty content"):
@@ -573,12 +707,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            client = FakeClient([FakeMessage("ok")])
-            agent = BaseAgent(
-                TEST_CONFIG,
+            client = FakeModelAdapter([FakeMessage("ok")])
+            agent = make_agent(
                 agent_id="skills-index",
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
 
             with patch.dict("os.environ", {}, clear=True):
@@ -588,7 +721,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         sent_messages = client.completions.calls[0]["messages"]
         joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
         self.assertIn("Available skills:", joined)
-        self.assertIn("release_notes: Write user-facing release notes.", joined)
+        self.assertIn("name: release_notes", joined)
+        self.assertIn("description: Write user-facing release notes.", joined)
+        self.assertIn(
+            f"location: {(skill_dir / 'SKILL.md').resolve()}",
+            joined,
+        )
         self.assertNotIn("This full instruction should load only on demand.", joined)
 
     async def test_skill_discovery_is_not_repeated_between_runtime_calls(self) -> None:
@@ -607,12 +745,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            client = FakeClient([FakeMessage("first"), FakeMessage("second")])
-            agent = BaseAgent(
-                TEST_CONFIG,
+            client = FakeModelAdapter([FakeMessage("first"), FakeMessage("second")])
+            agent = make_agent(
                 agent_id="skills-once",
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
 
             await agent.runtime(task="first")
@@ -631,11 +768,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             await agent.runtime(task="second")
 
-        second_tools = client.completions.calls[1]["tools"]
-        skill_names = second_tools[0]["function"]["parameters"]["properties"][
-            "skill_name"
-        ]["enum"]
-        self.assertEqual(skill_names, ["release_notes"])
+        self.assertIsNone(client.completions.calls[1]["tools"])
+        second_messages = client.completions.calls[1]["messages"]
+        joined = "\n".join(
+            str(message.get("content", "")) for message in second_messages
+        )
+        self.assertIn("name: release_notes", joined)
+        self.assertNotIn("name: hot_loaded", joined)
 
     async def test_explicit_skill_name_loads_full_skill_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -660,12 +799,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
             (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
-            client = FakeClient([FakeMessage("ok")])
-            agent = BaseAgent(
-                TEST_CONFIG,
+            client = FakeModelAdapter([FakeMessage("ok")])
+            agent = make_agent(
                 agent_id="skills-load",
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
 
             await agent.runtime(task="$release_notes Write release notes")
@@ -677,7 +815,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TEMPLATE BODY", joined)
         self.assertIn("SAMPLE BODY", joined)
 
-    async def test_model_can_load_skill_with_internal_tool(self) -> None:
+    async def test_skills_do_not_register_an_internal_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             skills_dir = Path(temp_dir)
             skill_dir = skills_dir / "release_notes"
@@ -697,52 +835,21 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            client = FakeClient(
-                [
-                    FakeMessage(
-                        tool_calls=[
-                            FakeToolCall(
-                                id="skill-call",
-                                function=FakeFunction(
-                                    "load_skill",
-                                    '{"skill_name": "release_notes"}',
-                                ),
-                            )
-                        ]
-                    ),
-                    FakeMessage("release notes"),
-                ]
-            )
-            agent = BaseAgent(
-                TEST_CONFIG,
-                agent_id="skills-tool",
+            client = FakeModelAdapter([FakeMessage("release notes")])
+            agent = make_agent(
+                agent_id="skills-resource",
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
 
             result = await agent.runtime(task="Write release notes")
 
         self.assertEqual(result, "release notes")
-        first_tools = client.completions.calls[0]["tools"]
-        self.assertEqual(
-            [tool["function"]["name"] for tool in first_tools],
-            ["load_skill"],
+        self.assertEqual(agent.tools, [])
+        self.assertIsNone(client.completions.calls[0]["tools"])
+        self.assertFalse(
+            any(message.get("role") == "tool" for message in agent.messages)
         )
-        tool_message = next(
-            message
-            for message in agent.messages
-            if message.get("role") == "tool"
-        )
-        self.assertEqual(
-            json.loads(tool_message["content"])["skill_name"],
-            "release_notes",
-        )
-        second_messages = client.completions.calls[1]["messages"]
-        joined = "\n".join(
-            str(message.get("content", "")) for message in second_messages
-        )
-        self.assertIn('You are executing the local skill "release_notes".', joined)
-        self.assertIn("FULL SKILL RULES", joined)
 
     async def test_full_skill_context_file_reads_are_cached(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -767,27 +874,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
             (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
-            client = FakeClient(
-                [
-                    FakeMessage(
-                        tool_calls=[
-                            FakeToolCall(
-                                id="skill-call",
-                                function=FakeFunction(
-                                    "load_skill",
-                                    '{"skill_name": "release_notes"}',
-                                ),
-                            )
-                        ]
-                    ),
-                    FakeMessage("release notes"),
-                ]
-            )
-            agent = BaseAgent(
-                TEST_CONFIG,
+            client = FakeModelAdapter([FakeMessage("release notes")])
+            agent = make_agent(
                 agent_id="skills-cache",
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
             await agent.startup()
 
@@ -810,10 +901,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read_counts[examples_dir / "sample.md"], 1)
 
     async def test_agent_id_is_normalized_and_read_only(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="  assistant  ",
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(agent.agent_id, "assistant")
@@ -824,18 +914,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for agent_id in ("", "   "):
             with self.subTest(agent_id=agent_id):
                 with self.assertRaisesRegex(ValueError, "agent_id"):
-                    BaseAgent(
-                        TEST_CONFIG,
+                    make_agent(
                         agent_id=agent_id,
-                        client=FakeClient([]),
+                        model=FakeModelAdapter([]),
                     )
 
     async def test_agent_id_is_required(self) -> None:
         with self.assertRaisesRegex(TypeError, "agent_id"):
-            BaseAgent(  # type: ignore[call-arg]
-                TEST_CONFIG,
-                client=FakeClient([]),
-            )
+            BaseAgent(FakeModelAdapter([]))  # type: ignore[call-arg]
 
     async def test_method_handler_dispatches_atomic_tool(self) -> None:
         handler = EchoHandler()
@@ -847,11 +933,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_mode_uses_only_explicit_handlers(self) -> None:
         echo = EchoHandler()
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="tools",
             handlers=[echo],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(agent.handlers, [echo])
@@ -860,71 +945,41 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ["echo"],
         )
 
-    async def test_explicit_bash_handler_is_preserved_without_finish_injection(self) -> None:
-        bash = BashHandler()
-        echo = EchoHandler()
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="tools",
-            handlers=[bash, echo],
-            client=FakeClient([]),
-        )
-
-        self.assertEqual(agent.handlers, [bash, echo])
-        self.assertEqual(
-            [tool["function"]["name"] for tool in agent.tools],
-            ["bash_run", "echo"],
-        )
-
-    async def test_explicit_finish_handler_is_preserved(self) -> None:
-        finish = FinishHandler()
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="tools",
-            handlers=[finish],
-            client=FakeClient([]),
-        )
-
-        self.assertEqual(agent.handlers, [finish])
-        self.assertEqual(
-            [tool["function"]["name"] for tool in agent.tools],
-            ["run_finish"],
-        )
-
     async def test_tool_disabled_mode_does_not_add_bash_handler(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="chat",
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         self.assertEqual(agent.handlers, [])
         self.assertEqual(agent.tools, [])
 
     async def test_duplicate_tool_names_fail_during_startup(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        model = FakeModelAdapter([])
+        agent = make_agent(
             agent_id="duplicate-tools",
             handlers=[EchoHandler(), EchoHandler()],
-            client=FakeClient([]),
+            model=model,
         )
 
         with self.assertRaisesRegex(ValueError, "duplicate tool 'echo'"):
             await agent.startup()
 
+        self.assertEqual(model.started, 1)
+        self.assertEqual(model.stopped, 1)
+
     async def test_unknown_tool_has_explicit_error(self) -> None:
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="unknown-tool",
             handlers=[EchoHandler()],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         with self.assertRaisesRegex(KeyError, "unknown tool 'missing'"):
             await agent.dispatch("missing", {})
 
     async def test_invalid_json_tool_arguments_are_returned_to_model(self) -> None:
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(
                     tool_calls=[
@@ -947,11 +1002,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="invalid-json",
             handlers=[EchoHandler(), DoneHandler()],
-            client=client,
+            model=client,
         )
 
         result = await agent.runtime(task="use echo")
@@ -965,7 +1019,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("JSON object", payload["error"])
 
     async def test_tool_mode_corrects_plain_text_until_exit_tool(self) -> None:
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage("premature answer"),
                 FakeMessage(
@@ -981,11 +1035,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="finish-required",
             handlers=[DoneHandler()],
-            client=client,
+            runtime_policy=RuntimePolicy(require_explicit_finish=True),
+            model=client,
         )
 
         result = await agent.runtime(task="complete the task")
@@ -1001,22 +1055,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tool_mode_retries_plain_text_with_diagnostic_limit(self) -> None:
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage("first plain text"),
                 FakeMessage("second plain text"),
                 FakeMessage("third plain text"),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="tool-retry-limit",
             handlers=[DoneHandler()],
-            max_steps=5,
-            client=client,
+            runtime_policy=RuntimePolicy(
+                max_steps=5,
+                require_explicit_finish=True,
+            ),
+            model=client,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "without a finishing tool call"):
+        with self.assertRaisesRegex(RuntimeError, "without a completing tool call"):
             await agent.runtime(task="complete the task")
 
         retry_prompts = [
@@ -1025,7 +1081,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             for message in call["messages"]
             if message.get("role") == "system"
             and message.get("content", "").startswith(
-                "Tool mode requires a finishing tool call"
+                "Explicit-finish mode requires a completing tool call"
             )
         ]
         self.assertEqual(len(retry_prompts), 2)
@@ -1034,14 +1090,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(
                 message.get("content", "").startswith(
-                    "Tool mode requires a finishing tool call"
+                    "Explicit-finish mode requires a completing tool call"
                 )
                 for message in agent.state.messages
             )
         )
 
     async def test_tool_calls_are_logged(self) -> None:
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(
                     tool_calls=[
@@ -1067,11 +1123,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="log-tools",
             handlers=[EchoHandler(), DoneHandler()],
-            client=client,
+            model=client,
         )
 
         with self.assertLogs("log-tools", level="INFO") as captured:
@@ -1081,13 +1136,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         logs = "\n".join(captured.output)
         self.assertIn("Calling tool echo", logs)
         self.assertIn('arguments={"text": "hello"}', logs)
-        self.assertIn("Tool echo completed exit=False", logs)
+        self.assertIn("Tool echo completed control=continue", logs)
         self.assertIn("Calling tool done", logs)
-        self.assertIn("Tool done completed exit=True", logs)
+        self.assertIn("Tool done completed control=complete", logs)
 
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(
                     tool_calls=[
@@ -1113,11 +1168,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="task-hooks",
             handlers=[handler, DoneHandler()],
-            client=client,
+            model=client,
         )
 
         await agent.runtime(task="first")
@@ -1142,7 +1196,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
             handler = EchoHandler()
-            client = FakeClient(
+            client = FakeModelAdapter(
                 [
                     FakeMessage(
                         tool_calls=[
@@ -1157,12 +1211,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ]
             )
-            agent = BaseAgent(
-                TEST_CONFIG,
+            agent = make_agent(
                 agent_id="startup-once",
                 handlers=[handler, DoneHandler()],
                 skills_dir=skills_dir,
-                client=client,
+                model=client,
             )
 
             await agent.startup()
@@ -1175,12 +1228,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_middleware_lifecycle_and_low_risk_execution(self) -> None:
         handler = EchoHandler()
         middleware = RecordingToolMiddleware()
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-low-risk",
             handlers=[handler],
             middlewares=[middleware],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         outcome = await agent.dispatch("echo", {"text": "allowed"})
@@ -1194,7 +1246,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_middleware_task_start_hook_runs_for_each_task(self) -> None:
         middleware = RecordingToolMiddleware()
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(
                     tool_calls=[
@@ -1214,12 +1266,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-task-hooks",
             handlers=[DoneHandler()],
             middlewares=[middleware],
-            client=client,
+            model=client,
         )
 
         await agent.runtime(task="first")
@@ -1229,12 +1280,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_middlewares_do_not_run_without_handlers(self) -> None:
         middleware = RecordingToolMiddleware()
-        client = FakeClient([FakeMessage("plain chat")])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("plain chat")])
+        agent = make_agent(
             agent_id="middleware-disabled",
             middlewares=[middleware],
-            client=client,
+            model=client,
         )
 
         result = await agent.runtime(task="hello")
@@ -1244,7 +1294,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(middleware.task_starts, 0)
         self.assertEqual(middleware.calls, [])
 
-    async def test_tool_middleware_rejection_ends_runtime(self) -> None:
+    async def test_tool_middleware_rejection_has_distinct_run_status(self) -> None:
         handler = EchoHandler()
         middleware = RecordingToolMiddleware(
             StepOutcome(
@@ -1253,10 +1303,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     "tool": "echo",
                     "reason": "human rejected tool execution",
                 },
-                should_exit=True,
+                control=ToolControl.REJECT,
             )
         )
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(
                     tool_calls=[
@@ -1268,35 +1318,65 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-reject",
             handlers=[handler],
             middlewares=[middleware],
-            client=client,
+            model=client,
         )
 
-        result = await agent.runtime(task="try echo")
+        result = await agent.run(task="try echo")
 
-        payload = json.loads(result or "")
+        self.assertIsInstance(result, AgentRunResult)
+        self.assertEqual(result.status, RunStatus.REJECTED)
+        self.assertEqual(result.stop_reason, StopReason.TOOL_REJECTED)
+        payload = json.loads(result.output or "")
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["tool"], "echo")
         self.assertEqual(handler.calls, 0)
         self.assertEqual(middleware.contexts[0].tool_call_id, "call-1")
         self.assertIs(middleware.contexts[0].state, agent.state)
 
+    async def test_runtime_raises_structured_error_for_rejection(self) -> None:
+        middleware = RecordingToolMiddleware(
+            StepOutcome({"status": "rejected"}, control=ToolControl.REJECT)
+        )
+        agent = make_agent(
+            agent_id="middleware-reject-compatibility",
+            handlers=[EchoHandler()],
+            middlewares=[middleware],
+            model=FakeModelAdapter(
+                [
+                    FakeMessage(
+                        tool_calls=[
+                            FakeToolCall(
+                                id="call-1",
+                                function=FakeFunction(
+                                    "echo", '{"text": "blocked"}'
+                                ),
+                            )
+                        ]
+                    )
+                ]
+            ),
+        )
+
+        with self.assertRaises(AgentRunError) as raised:
+            await agent.runtime(task="try echo")
+
+        self.assertEqual(raised.exception.result.status, RunStatus.REJECTED)
+
     async def test_middlewares_short_circuit_in_order(self) -> None:
         first = RecordingToolMiddleware(
-            StepOutcome({"status": "blocked"}, should_exit=True)
+            StepOutcome({"status": "blocked"}, control=ToolControl.REJECT)
         )
         second = RecordingToolMiddleware()
         handler = EchoHandler()
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-chain",
             handlers=[handler],
             middlewares=[first, second],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         outcome = await agent.dispatch("echo", {"text": "blocked"})
@@ -1324,15 +1404,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     events.append(f"{self.name}:after")
 
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-wrap-order",
             handlers=[EchoHandler()],
             middlewares=[
                 TracingToolMiddleware("first"),
                 TracingToolMiddleware("second"),
             ],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         outcome = await agent.dispatch("echo", {"text": "wrapped"})
@@ -1343,14 +1422,82 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ["first:before", "second:before", "second:after", "first:after"],
         )
 
+    async def test_outer_tool_middleware_observes_inner_short_circuit(self) -> None:
+        events: list[str] = []
+
+        class ObservingToolMiddleware(ToolMiddleware):
+            async def __call__(
+                self,
+                context: ToolCallContext,
+                call_next: ToolNext,
+            ) -> StepOutcome:
+                events.append("outer:before")
+                try:
+                    return await call_next(context)
+                finally:
+                    events.append("outer:after")
+
+        handler = EchoHandler()
+        blocking = RecordingToolMiddleware(
+            StepOutcome({"status": "blocked"}, control=ToolControl.REJECT)
+        )
+        agent = make_agent(
+            agent_id="middleware-observe-short-circuit",
+            handlers=[handler],
+            middlewares=[ObservingToolMiddleware(), blocking],
+            model=FakeModelAdapter([]),
+        )
+
+        outcome = await agent.dispatch("echo", {"text": "blocked"})
+
+        self.assertEqual(outcome.data, {"status": "blocked"})
+        self.assertEqual(events, ["outer:before", "outer:after"])
+        self.assertEqual(handler.calls, 0)
+
+    async def test_outer_tool_middleware_observes_handler_exception(self) -> None:
+        events: list[str] = []
+
+        class FailingEchoHandler(EchoHandler):
+            async def do_echo(
+                self,
+                arguments: dict[str, Any],
+            ) -> StepOutcome:
+                self.calls += 1
+                raise RuntimeError("handler failed")
+
+        class ObservingToolMiddleware(ToolMiddleware):
+            async def __call__(
+                self,
+                context: ToolCallContext,
+                call_next: ToolNext,
+            ) -> StepOutcome:
+                events.append("outer:before")
+                try:
+                    return await call_next(context)
+                finally:
+                    events.append("outer:after")
+
+        handler = FailingEchoHandler()
+        agent = make_agent(
+            agent_id="middleware-observe-error",
+            handlers=[handler],
+            middlewares=[ObservingToolMiddleware()],
+            model=FakeModelAdapter([]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "handler failed"):
+            await agent.dispatch("echo", {"text": "fail"})
+
+        self.assertEqual(events, ["outer:before", "outer:after"])
+        self.assertEqual(handler.calls, 1)
+
     async def test_started_tool_middleware_still_shuts_down_if_disabled(self) -> None:
         middleware = RecordingToolMiddleware()
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="middleware-toggle",
             handlers=[EchoHandler()],
             middlewares=[middleware],
-            client=FakeClient([]),
+            model=FakeModelAdapter([]),
         )
 
         await agent.startup()
@@ -1360,246 +1507,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(middleware.started, 1)
         self.assertEqual(middleware.stopped, 1)
 
-    async def test_human_approval_accepts_y_after_invalid_input(self) -> None:
-        approval = HumanApproval(max_preview_chars=10)
-
-        with (
-            patch("builtins.input", side_effect=["maybe", "Y"]),
-            patch("builtins.print") as print_mock,
-        ):
-            approved = await approval.approve("0123456789abcdef")
-
-        self.assertTrue(approved)
-        first_print = print_mock.call_args_list[0].args[0]
-        self.assertIn("...<truncated 6 chars>", first_print)
-
-    async def test_human_approval_middleware_can_reject_high_risk_tool(self) -> None:
-        handler = EchoHandler()
-        middleware = ApprovalToolMiddleware(
-            HumanApproval(),
-            high_risk=True,
-        )
-        client = FakeClient(
-            [
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction("echo", '{"text": "blocked"}'),
-                        )
-                    ]
-                )
-            ]
-        )
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="human-approval-reject",
-            handlers=[handler],
-            middlewares=[middleware],
-            client=client,
-        )
-
-        with (
-            patch("builtins.input", return_value="n"),
-            patch("builtins.print"),
-        ):
-            result = await agent.runtime(task="try echo")
-
-        payload = json.loads(result or "")
-        self.assertEqual(payload["status"], "rejected")
-        self.assertEqual(handler.calls, 0)
-
-    async def test_human_approval_middleware_can_approve_high_risk_tool(self) -> None:
-        handler = EchoHandler()
-        middleware = ApprovalToolMiddleware(
-            HumanApproval(),
-            high_risk=True,
-        )
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="human-approval-allow",
-            handlers=[handler],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="y"),
-            patch("builtins.print"),
-        ):
-            outcome = await agent.dispatch("echo", {"text": "allowed"})
-
-        self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
-        self.assertEqual(handler.calls, 1)
-
-    async def test_bash_approval_middleware_reviews_unlisted_bash_run_by_default(self) -> None:
-        middleware = BashApprovalMiddleware()
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-default",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="y") as input_mock,
-            patch("builtins.print") as print_mock,
-        ):
-            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
-
-        input_mock.assert_called_once()
-        preview = print_mock.call_args_list[0].args[0]
-        self.assertIn("Review:", preview)
-        self.assertIn("safe command allowlist", preview)
-        self.assertFalse(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "success")
-        self.assertEqual(outcome.data["stdout"], "ok")
-
-    async def test_bash_approval_middleware_can_skip_review_explicitly(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="never")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-never",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with patch("builtins.input") as input_mock:
-            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
-
-        input_mock.assert_not_called()
-        self.assertFalse(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "success")
-        self.assertEqual(outcome.data["stdout"], "ok")
-
-    async def test_bash_approval_safe_policy_skips_allowlisted_command(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-safe",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with patch("builtins.input") as input_mock:
-            outcome = await agent.dispatch(
-                "bash_run",
-                {"code": "git status --short"},
-            )
-
-        input_mock.assert_not_called()
-        self.assertEqual(outcome.data["status"], "success")
-        self.assertEqual(outcome.data["exit_code"], 0)
-
-    async def test_bash_approval_safe_policy_reviews_unlisted_command(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-unlisted",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="n") as input_mock,
-            patch("builtins.print") as print_mock,
-        ):
-            outcome = await agent.dispatch("bash_run", {"code": "printf ok"})
-
-        input_mock.assert_called_once()
-        preview = print_mock.call_args_list[0].args[0]
-        self.assertIn("safe command allowlist", preview)
-        self.assertTrue(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "rejected")
-
-    async def test_bash_approval_safe_policy_reviews_shell_redirection(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-dev-null",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="n") as input_mock,
-            patch("builtins.print"),
-        ):
-            outcome = await agent.dispatch(
-                "bash_run",
-                {"code": "git status --short > /dev/null"},
-            )
-
-        input_mock.assert_called_once()
-        self.assertTrue(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "rejected")
-
-    async def test_bash_approval_middleware_approves_unlisted_safe_policy_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="unless_safe")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-approve",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="y") as input_mock,
-            patch("builtins.print"),
-        ):
-            outcome = await agent.dispatch(
-                "bash_run",
-                {"code": "rm -rf build"},
-            )
-
-        input_mock.assert_called_once()
-        self.assertFalse(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "success")
-        self.assertEqual(outcome.data["exit_code"], 0)
-
-    async def test_bash_approval_middleware_ignores_non_bash_tools(self) -> None:
-        handler = EchoHandler()
-        middleware = BashApprovalMiddleware()
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-ignore",
-            handlers=[handler],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with patch("builtins.input") as input_mock:
-            outcome = await agent.dispatch("echo", {"text": "allowed"})
-
-        input_mock.assert_not_called()
-        self.assertEqual(outcome.data, {"status": "success", "text": "allowed"})
-        self.assertEqual(handler.calls, 1)
-
     async def test_third_identical_tool_call_fails_before_execution(self) -> None:
         handler = EchoHandler()
         repeated_call = FakeToolCall(
             id="call",
             function=FakeFunction("echo", '{"text": "same"}'),
         )
-        client = FakeClient(
+        client = FakeModelAdapter(
             [
                 FakeMessage(tool_calls=[repeated_call]),
                 FakeMessage(tool_calls=[repeated_call]),
                 FakeMessage(tool_calls=[repeated_call]),
             ]
         )
-        agent = BaseAgent(
-            TEST_CONFIG,
+        agent = make_agent(
             agent_id="repeat-guard",
             handlers=[handler],
-            max_steps=3,
-            client=client,
+            runtime_policy=RuntimePolicy(max_steps=3),
+            model=client,
         )
 
         with self.assertRaisesRegex(RuntimeError, "consecutive times"):
@@ -1608,43 +1533,31 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls, 2)
 
     async def test_tool_mode_raises_when_finish_is_never_called(self) -> None:
-        client = FakeClient([FakeMessage("not finished"), FakeMessage(None)])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("not finished"), FakeMessage(None)])
+        agent = make_agent(
             agent_id="step-limit",
             handlers=[DoneHandler()],
-            max_steps=2,
-            client=client,
+            runtime_policy=RuntimePolicy(
+                max_steps=2,
+                require_explicit_finish=True,
+            ),
+            model=client,
         )
 
         with self.assertRaisesRegex(RuntimeError, "did not finish within 2"):
             await agent.runtime(task="never finish")
 
     async def test_plain_chat_mode_does_not_start_handlers(self) -> None:
-        client = FakeClient([FakeMessage("plain chat")])
-        agent = BaseAgent(
-            TEST_CONFIG,
+        client = FakeModelAdapter([FakeMessage("plain chat")])
+        agent = make_agent(
             agent_id="plain-chat",
-            client=client,
+            model=client,
         )
 
         result = await agent.runtime(task="hello")
 
         self.assertEqual(result, "plain chat")
         self.assertIsNone(client.completions.calls[0]["tools"])
-
-    async def test_bash_handler_rejects_invalid_arguments(self) -> None:
-        handler = BashHandler()
-
-        missing_code = await handler.dispatch("bash_run", {})
-        invalid_timeout = await handler.dispatch(
-            "bash_run",
-            {"code": "printf ok", "timeout": 0},
-        )
-
-        self.assertEqual(missing_code.data["status"], "error")
-        self.assertIn("non-empty string", missing_code.data["error"])
-        self.assertIn("positive integer", invalid_timeout.data["error"])
 
     async def test_mcp_handler_uses_the_same_handler_contract(self) -> None:
         manager = FakeMcpManager()
@@ -1661,6 +1574,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(manager.started)
         self.assertTrue(manager.stopped)
+
+    async def test_mcp_handler_requires_one_explicit_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "config_path is required"):
+            McpToolHandler()
+        with self.assertRaisesRegex(ValueError, "either config_path or manager"):
+            McpToolHandler("mcp.json", manager=FakeMcpManager())
 
 
 if __name__ == "__main__":

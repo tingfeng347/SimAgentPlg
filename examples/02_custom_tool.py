@@ -8,7 +8,9 @@ from simagentplg import (
     BaseAgent,
     MethodToolHandler,
     ModelConfig,
+    OpenAIModelAdapter,
     StepOutcome,
+    ToolControl,
 )
 
 ADD_TOOL = {
@@ -46,13 +48,13 @@ class MathHandler(MethodToolHandler):
             )
         return StepOutcome(
             {"status": "success", "value": left + right},
-            should_exit=True,
+            control=ToolControl.COMPLETE,
         )
 
 
 async def main() -> None:
     agent = BaseAgent(
-        config=ModelConfig.from_env(),
+        OpenAIModelAdapter(ModelConfig.from_env()),
         agent_id="calculator",
         handlers=[MathHandler()],
     )

@@ -2,30 +2,35 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.4 是一个轻量级框架，用于构建有状态的
-OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地 Skill
-发现、索引和按需加载。
-
-## 功能特性
-
-- 有状态的 `BaseAgent`，支持对话记忆和显式 `reset()`
-- 可观测的 `AgentState`，保存持久历史和当前任务状态
-- `AgentContextBuilder`，为每轮模型调用构建不修改历史的临时上下文
-- 每个 Agent 拥有必填且不可修改的 `agent_id`
-- 支持通过 `.env` 或直接构造使用 OpenAI 兼容模型配置
-- Handler 驱动的工具执行，不需要单独的工具模式开关
-- 内置 `BashHandler`，用于执行有边界的 Bash 命令
-- 内置 `GitDiffHandler`，用于查看 Git 工作区变化
-- 内置 `FinishHandler`，用于明确结束任务
-- `MethodToolHandler` 用于快速定义小型 Python 自定义工具
-- 可选 MCP 集成：`McpToolHandler` 和 `McpServerManager`
-- 可选本地 Skill 发现、索引和按需加载：`SkillManager`
+SimAgentPlg 是一个用于构建有状态、可扩展 Agent 的轻量级 Core，面向
+OpenAI-compatible 模型 API。Core 提供状态、编排、上下文、工具调度、
+Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批界面和完成工具
+由具体派生 Agent 自行实现。
 
 需要 Python 3.12 或更高版本。
 
-## 安装
+## 核心能力
 
-使用 `uv` 安装本地项目和依赖：
+- 有状态的 `BaseAgent`，支持持久对话历史和 `reset()`
+- Provider 无关的 `ModelAdapter` 边界，以及 OpenAI-compatible 适配器
+- 公开的 `AgentOrchestrator`，负责模型—工具运行循环
+- 结构化的 `AgentRunResult`、`RunStatus` 和 `StopReason`
+- 显式的 `RuntimePolicy`，控制循环和完成策略
+- `AgentContextBuilder`，构造不修改历史的每轮上下文
+- 可组合的 `BaseHandler` 和 `MethodToolHandler` 工具协议
+- `ToolRuntime` 生命周期、路由、Middleware 和重复调用保护
+- 通用 `ToolMiddleware` 拦截机制
+- 通过 `McpToolHandler` 提供可选 MCP 集成
+- 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
+
+Core 刻意不再内置 Bash、Git、文件系统、审批 UI 或 Finish 工具。这些能力属于
+CodeAgent 等派生 Agent。
+
+本次 Core 边界调整移除了原有的 `BashHandler`、`GitDiffHandler`、
+`FinishHandler`、`HumanApproval` 和 `BashApprovalMiddleware` 公共导出；需要
+这些能力的派生 Agent 应自行提供对应实现。
+
+## 安装
 
 ```bash
 uv sync
@@ -33,7 +38,7 @@ uv sync
 
 ## 配置
 
-复制 `.env.example` 为 `.env`，然后填写模型凭据：
+复制 `.env.example` 为 `.env` 并填写模型配置：
 
 ```env
 MODEL_API_KEY=sk-xxxxxxxx
@@ -43,10 +48,7 @@ LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
 ```
 
-`ModelConfig.from_env()` 会读取 `CHAT_MODEL`、`MODEL_API_KEY`、
-`MODEL_URL`、`LLM_TIMEOUT` 和 `LLM_TEMPERATURE`。
-
-也可以直接构造配置：
+`ModelConfig` 属于 `OpenAIModelAdapter`，不再属于 `BaseAgent`。也可以直接构造：
 
 ```python
 from simagentplg import ModelConfig
@@ -58,17 +60,19 @@ config = ModelConfig(
 )
 ```
 
-## 快速开始
+接入其他模型 Provider 时，只需实现 `ModelAdapter.complete()`。适配器负责 Provider
+Client 的创建、响应归一化以及可选的启动/关闭资源；`BaseAgent` 只消费归一化后的
+`AssistantMessage` 协议。
 
-### 普通对话
+## 普通 Agent
 
-默认不启用工具。普通 Agent 会在多次 `runtime()` 调用之间保留对话历史：
+多次调用之间会保留对话历史：
 
 ```python
-from simagentplg import BaseAgent, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="tutor",
     system_prompt="你是一名回答简洁的 Python 导师。",
 )
@@ -80,126 +84,58 @@ agent.reset()
 await agent.shutdown()
 ```
 
-同一 Agent 的调用会串行执行，以保护其对话历史。
+同一个 Agent 的调用会串行执行，以保护对话状态。
 
-### 工具模式
+## 结构化运行结果
 
-显式传入 Handler 即可启用工具执行：
-
-```python
-import json
-
-from simagentplg import (
-    BaseAgent,
-    BashHandler,
-    FinishHandler,
-    GitDiffHandler,
-    ModelConfig,
-)
-
-agent = BaseAgent(
-    config=ModelConfig.from_env(),
-    agent_id="developer",
-    system_prompt="使用可用工具完成编程任务。",
-    handlers=[BashHandler(), GitDiffHandler(), FinishHandler()],
-)
-
-result = await agent.runtime(task="创建 hello.py，并输出 'hello'。")
-report = json.loads(result)
-print(report["summary"])
-
-await agent.shutdown()
-```
-
-Agent 只会暴露显式传给 `BaseAgent` 的 Handler：
-
-```text
-BaseAgent
-  -> BashHandler
-       -> bash_run
-  -> GitDiffHandler
-       -> run_gitdiff
-  -> FinishHandler
-       -> run_finish
-  -> MethodToolHandler 子类
-  -> McpToolHandler
-```
-
-在工具模式下，普通文本不会结束任务。模型必须调用一个完成工具，通常是
-`run_finish`；自定义工具也可以返回
-`StepOutcome(..., should_exit=True)` 来结束任务。
-
-以下情况会导致工具模式报错：
-
-- 在 `max_steps` 内没有调用任何完成工具
-- 相同工具和参数连续出现三次
-
-## 内置 Handler
-
-`BashHandler` 暴露 `bash_run`，用于执行有边界的 Bash 命令。它支持工作目录、
-超时和输出长度限制。
-
-`GitDiffHandler` 暴露 `run_gitdiff`。它查看当前 Git 工作区变化，不会结束任务：
-
-```json
-{
-  "status": "success",
-  "mode": "status",
-  "command": "git status --short",
-  "output": "?? hello.py\n"
-}
-```
-
-支持的模式包括：`status` 对应 `git status --short`，`stat` 对应
-`git diff --stat`，`diff` 对应 `git diff`。
-
-`FinishHandler` 暴露 `run_finish`。它返回 JSON 结果，并立即结束当前
-`runtime()`：
-
-```json
-{
-  "summary": "已创建 hello.py"
-}
-```
-
-## Tool Middleware
-
-`ToolMiddleware` 会装饰一次工具执行，可在下一层装饰器或 Handler 前后运行
-逻辑。框架不内置高低风险规则，业务可以继承 middleware 自行分类。`BashApprovalMiddleware` 是人工审批门，
-不是 shell 沙箱或安全边界。默认情况下，safe allowlist 之外的命令需要 y/n
-审批：
+`run()` 暴露 Core 的运行结果协议：
 
 ```python
-from simagentplg import (
-    BaseAgent,
-    BashApprovalMiddleware,
-    BashHandler,
-    FinishHandler,
-    ModelConfig,
-)
+result = await agent.run(task="解释这个仓库的架构。")
 
-agent = BaseAgent(
-    ModelConfig.from_env(),
-    agent_id="coder",
-    handlers=[BashHandler(), FinishHandler()],
-    middlewares=[BashApprovalMiddleware()],
+print(result.status)
+print(result.stop_reason)
+print(result.turns)
+print(result.output)
+```
+
+`runtime()` 继续作为兼容接口。任务完成时返回 `result.output`；运行失败、被拒绝或
+取消时抛出 `AgentRunError`。
+
+## RuntimePolicy
+
+工具是否存在和任务是否必须显式完成已经解耦：
+
+```python
+from simagentplg import RuntimePolicy
+
+policy = RuntimePolicy(
+    max_steps=20,
+    max_no_tool_responses=3,
+    max_repeated_tool_calls=3,
+    require_explicit_finish=False,
 )
 ```
 
-默认的 `approval_policy="unless_safe"` 只会让少量明确的只读命令跳过审批，
-例如 `pwd`、`ls`、`git status`、`git diff`、`git log`、`rg`、`sed -n`、
-`cat` 和 Python unittest 调用。设置 `approval_policy="always"` 可以审批
-每个 `bash_run` 命令；`approval_policy="never"` 会显式关闭这一审批门。
+默认情况下，Agent 可以调用工具，之后用普通文本完成任务。自主型派生 Agent 可以要求
+必须调用完成工具：
 
-## 自定义工具 Handler
+```python
+policy = RuntimePolicy(require_explicit_finish=True)
+```
 
-`MethodToolHandler` 会把名为 `add` 的工具映射到异步方法 `do_add`：
+此时派生 Agent 必须自行注册一个返回 `ToolControl.COMPLETE` 的工具。
+
+## 自定义工具
+
+工具通过 Handler 组织。`MethodToolHandler` 会把名为 `add` 的工具映射到异步
+`do_add()` 方法：
 
 ```python
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg import BaseAgent, MethodToolHandler, ModelConfig, StepOutcome
+from simagentplg import MethodToolHandler, StepOutcome
 
 ADD_TOOL = {
     "type": "function",
@@ -226,69 +162,95 @@ class MathHandler(MethodToolHandler):
         return StepOutcome(
             {"value": arguments["left"] + arguments["right"]}
         )
+```
 
+显式注册到 Agent：
 
+```python
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="calculator",
     handlers=[MathHandler()],
 )
 ```
 
-Handler 启动时会创建统一的工具路由表。重复工具名会立即报错，不会静默覆盖。
+重复工具名会在启动阶段报错，不会静默覆盖。
+
+### 工具控制信号
+
+工具结果数据与运行控制已经分离：
+
+```python
+from simagentplg import StepOutcome, ToolControl
+
+StepOutcome(data)  # 继续模型—工具循环
+StepOutcome(data, control=ToolControl.COMPLETE)
+StepOutcome(data, control=ToolControl.REJECT)
+StepOutcome(data, control=ToolControl.CANCEL)
+```
+
+运行时由此可以区分正常完成、策略拒绝和取消。
+
+## Tool Middleware
+
+`ToolMiddleware` 用于装饰工具执行，但 Core 不包含具体工具策略：
+
+```python
+from simagentplg import ToolMiddleware
+
+
+class AuditMiddleware(ToolMiddleware):
+    async def __call__(self, context, call_next):
+        print("before", context.tool_name)
+        result = await call_next(context)
+        print("after", context.tool_name)
+        return result
+```
+
+审批 UI 和 Shell 风险规则应由派生 Agent 实现，而不是放在 Core 中。
 
 ## MCP 工具
 
-MCP 是可选功能，并使用相同的 Handler 接口：
+MCP 使用相同的 Handler 协议：
 
 ```python
-from simagentplg import BaseAgent, McpToolHandler, ModelConfig
+from simagentplg import (
+    BaseAgent,
+    McpToolHandler,
+    ModelConfig,
+    OpenAIModelAdapter,
+)
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="browser",
     handlers=[McpToolHandler("examples/mcp_config.json")],
 )
 ```
 
-MCP 配置示例：
-
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest", "--headless"]
-    }
-  }
-}
-```
-
-`McpServerManager` 会加载配置的服务，用服务名前缀暴露工具，并允许单个服务
-启动失败时不阻塞其他服务。
+启用 MCP 的 Agent 可以执行 MCP 工具，然后直接用普通文本完成任务。只有
+`RuntimePolicy` 明确要求时，才需要额外的完成工具。
 
 ## Skill
 
-Skill 是可选的提示词扩展，与工具 Handler 相互独立：
+Skill 是独立于 Handler 工具的提示词和资源扩展：
 
 ```python
 from pathlib import Path
 
-from simagentplg import BaseAgent, FinishHandler, ModelConfig
+from simagentplg import BaseAgent, ModelConfig, OpenAIModelAdapter
 
 agent = BaseAgent(
-    config=ModelConfig.from_env(),
+    OpenAIModelAdapter(ModelConfig.from_env()),
     agent_id="skilled-agent",
-    handlers=[FinishHandler()],
     skills_dir=Path("examples/skills"),
 )
 ```
 
-`SkillManager` 会扫描每个包含 `SKILL.md` 的子目录，索引 Skill 名称和
-YAML front matter 中的描述，并把紧凑 metadata 注入模型上下文。完整
-`SKILL.md`、可选 `template.md` 和可选 `examples/sample.md` 会在模型调用
-内置 `load_skill` 工具时按需加载。用户也可以用 `$skill_name` 或
-`skill:skill_name` 强制指定 Skill。
+`SkillManager` 会发现包含 `SKILL.md` 的子目录，并注入包含名称、描述和文件位置的
+紧凑 metadata。用户可以用 `$skill_name` 或 `skill:skill_name` 显式选择 Skill，
+将其完整指令注入当前上下文。Core 不注册特殊的 Skill 工具；未来带文件读取工具的
+派生 Agent 可以根据 metadata 中的位置渐进加载 Skill。
 
 ```text
 examples/skills/
@@ -299,77 +261,52 @@ examples/skills/
       sample.md
 ```
 
-Skill 上下文本身不要求 Handler 工具。只有当任务需要通过 `run_finish`
-结束时，才需要注册 `FinishHandler`。
+## Core 边界
+
+SimAgentPlg Core 负责机制：
+
+```text
+Orchestration + State + Context + Runtime Policy + Run Result
++ Model Adapter + Tool Protocol + Middleware + MCP + Skills
+```
+
+派生 Agent 负责具体能力与策略：
+
+```text
+Shell + Filesystem + Git + Workspace + Approval UI
++ Sandbox + Completion Tool + Product Interface
+```
+
+架构分析和后续路线参见
+[Pi Harness 对照分析](docs/pi-harness-gap-analysis.md)。
 
 ## 示例
-
-可运行案例位于 [`examples/`](examples/README.md)：
 
 ```bash
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
-uv run python examples/07_bash_approval.py
 ```
 
 ## 测试
 
-在仓库根目录运行测试：
-
 ```bash
-uv run python -m unittest
+uv run python -m unittest discover -s tests -p 'test*.py' -q
 ```
-
-当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为，以及示例
-文件是否可导入。
 
 ## 公共 API
 
-```python
-BaseAgent(
-    config: ModelConfig | None = None,
-    *,
-    agent_id: str,
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    handlers: Iterable[BaseHandler] | None = None,
-    middlewares: Iterable[ToolMiddleware] | None = None,
-    skills_dir: str | Path | None = None,
-    context_builder: AgentContextBuilder | None = None,
-    max_steps: int = 20,
-    client: Any | None = None,
-)
+包根目录导出：
 
-await agent.runtime(*, task: str) -> str | None
-agent.reset(history=None)
-await agent.startup()
-await agent.shutdown()
-```
+- Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
+- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`
+- Runtime：`RuntimePolicy`、`AgentRunResult`、`AgentRunError`、`RunStatus`、`StopReason`
+- Context：`AgentContextBuilder`、`ContextBuildResult`
+- Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
+- Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
+- 扩展：`McpServerManager`、`SkillManager`
 
-`agent.state` 保存持久对话，以及当前任务的状态、轮数、激活 Skill、结果和错误。
-`AgentContextBuilder` 会从该状态派生每轮完整模型请求（包括结构化工具定义），
-不会修改历史消息。
-
-传入 Handler 后，`BaseAgent` 会进入工具执行模式，并注入 runtime 内部工具
-协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可
-暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
-
-顶层包导出了 `BaseAgent`、`ModelConfig`、`AgentState`、`AgentStatus`、
-`AgentContextBuilder`、`ContextBuildResult`、`StepOutcome`、Handler 基类、
-`MethodToolHandler`、`BashHandler`、
-`GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
-`McpServerManager`、`SkillManager` 以及默认资源路径。
-
-## 0.2.4 版本变化
-
-- 新增与 `BashHandler` 同级的 `FinishHandler` 和内置 `run_finish` 工具
-- 新增与 `BashHandler` 同级的 `GitDiffHandler` 和内置 `run_gitdiff` 工具
-- 工具模式必须显式调用完成工具才算完成
-- 连续三次调用相同工具和参数时提前终止
-- 工具模式耗尽 `max_steps` 时抛出明确错误
-- `BashHandler` 只负责提供 `bash_run`
-
-## 许可证
+## License
 
 MIT

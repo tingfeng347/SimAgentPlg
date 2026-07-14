@@ -21,7 +21,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - `ToolRuntime` 生命周期、路由、Middleware 和重复调用保护
 - 通用 `ToolMiddleware` 拦截机制
 - 通过 `McpToolHandler` 提供可选 MCP 集成
-- 通过 `SkillManager` 发现并按需加载本地 Skill
+- 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
 Core 刻意不再内置 Bash、Git、文件系统、审批 UI 或 Finish 工具。这些能力属于
 CodeAgent 等派生 Agent。
@@ -247,9 +247,10 @@ agent = BaseAgent(
 )
 ```
 
-`SkillManager` 会发现包含 `SKILL.md` 的子目录，注入紧凑 metadata，并提供内部
-`load_skill` 工具按需加载完整指令。用户也可以用 `$skill_name` 或
-`skill:skill_name` 显式选择 Skill。
+`SkillManager` 会发现包含 `SKILL.md` 的子目录，并注入包含名称、描述和文件位置的
+紧凑 metadata。用户可以用 `$skill_name` 或 `skill:skill_name` 显式选择 Skill，
+将其完整指令注入当前上下文。Core 不注册特殊的 Skill 工具；未来带文件读取工具的
+派生 Agent 可以根据 metadata 中的位置渐进加载 Skill。
 
 ```text
 examples/skills/

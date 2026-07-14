@@ -30,7 +30,7 @@ The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server
 through `npx`.
 
-The skill example loads `examples/skills/release_notes/`. Skill metadata is
-injected into the model context. The model can call the internal `load_skill`
-tool to load full `SKILL.md`, optional `template.md`, and optional
-`examples/sample.md` content, and the user can still name a skill explicitly.
+The skill example loads `examples/skills/release_notes/`. Skill metadata,
+including its file location, is injected into the model context. Naming the
+skill explicitly loads its full `SKILL.md`, optional `template.md`, and optional
+`examples/sample.md` content. The core does not register a special skill tool.

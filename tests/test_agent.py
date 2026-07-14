@@ -292,6 +292,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("runtime_policy", parameters)
         self.assertNotIn("client", parameters)
         self.assertNotIn("max_steps", parameters)
+        self.assertNotIn(
+            "has_handler_tools",
+            inspect.signature(AgentOrchestrator).parameters,
+        )
 
     async def test_base_agent_owns_model_adapter_lifecycle(self) -> None:
         model = FakeModelAdapter([])
@@ -717,7 +721,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         sent_messages = client.completions.calls[0]["messages"]
         joined = "\n".join(str(message.get("content", "")) for message in sent_messages)
         self.assertIn("Available skills:", joined)
-        self.assertIn("release_notes: Write user-facing release notes.", joined)
+        self.assertIn("name: release_notes", joined)
+        self.assertIn("description: Write user-facing release notes.", joined)
+        self.assertIn(
+            f"location: {(skill_dir / 'SKILL.md').resolve()}",
+            joined,
+        )
         self.assertNotIn("This full instruction should load only on demand.", joined)
 
     async def test_skill_discovery_is_not_repeated_between_runtime_calls(self) -> None:
@@ -759,11 +768,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             await agent.runtime(task="second")
 
-        second_tools = client.completions.calls[1]["tools"]
-        skill_names = second_tools[0]["function"]["parameters"]["properties"][
-            "skill_name"
-        ]["enum"]
-        self.assertEqual(skill_names, ["release_notes"])
+        self.assertIsNone(client.completions.calls[1]["tools"])
+        second_messages = client.completions.calls[1]["messages"]
+        joined = "\n".join(
+            str(message.get("content", "")) for message in second_messages
+        )
+        self.assertIn("name: release_notes", joined)
+        self.assertNotIn("name: hot_loaded", joined)
 
     async def test_explicit_skill_name_loads_full_skill_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -804,7 +815,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TEMPLATE BODY", joined)
         self.assertIn("SAMPLE BODY", joined)
 
-    async def test_model_can_load_skill_with_internal_tool(self) -> None:
+    async def test_skills_do_not_register_an_internal_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             skills_dir = Path(temp_dir)
             skill_dir = skills_dir / "release_notes"
@@ -824,24 +835,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            client = FakeModelAdapter(
-                [
-                    FakeMessage(
-                        tool_calls=[
-                            FakeToolCall(
-                                id="skill-call",
-                                function=FakeFunction(
-                                    "load_skill",
-                                    '{"skill_name": "release_notes"}',
-                                ),
-                            )
-                        ]
-                    ),
-                    FakeMessage("release notes"),
-                ]
-            )
+            client = FakeModelAdapter([FakeMessage("release notes")])
             agent = make_agent(
-                agent_id="skills-tool",
+                agent_id="skills-resource",
                 skills_dir=skills_dir,
                 model=client,
             )
@@ -849,26 +845,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             result = await agent.runtime(task="Write release notes")
 
         self.assertEqual(result, "release notes")
-        first_tools = client.completions.calls[0]["tools"]
-        self.assertEqual(
-            [tool["function"]["name"] for tool in first_tools],
-            ["load_skill"],
+        self.assertEqual(agent.tools, [])
+        self.assertIsNone(client.completions.calls[0]["tools"])
+        self.assertFalse(
+            any(message.get("role") == "tool" for message in agent.messages)
         )
-        tool_message = next(
-            message
-            for message in agent.messages
-            if message.get("role") == "tool"
-        )
-        self.assertEqual(
-            json.loads(tool_message["content"])["skill_name"],
-            "release_notes",
-        )
-        second_messages = client.completions.calls[1]["messages"]
-        joined = "\n".join(
-            str(message.get("content", "")) for message in second_messages
-        )
-        self.assertIn('You are executing the local skill "release_notes".', joined)
-        self.assertIn("FULL SKILL RULES", joined)
 
     async def test_full_skill_context_file_reads_are_cached(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -893,22 +874,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             (skill_dir / "template.md").write_text("TEMPLATE BODY", encoding="utf-8")
             (examples_dir / "sample.md").write_text("SAMPLE BODY", encoding="utf-8")
-            client = FakeModelAdapter(
-                [
-                    FakeMessage(
-                        tool_calls=[
-                            FakeToolCall(
-                                id="skill-call",
-                                function=FakeFunction(
-                                    "load_skill",
-                                    '{"skill_name": "release_notes"}',
-                                ),
-                            )
-                        ]
-                    ),
-                    FakeMessage("release notes"),
-                ]
-            )
+            client = FakeModelAdapter([FakeMessage("release notes")])
             agent = make_agent(
                 agent_id="skills-cache",
                 skills_dir=skills_dir,

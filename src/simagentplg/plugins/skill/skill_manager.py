@@ -11,7 +11,6 @@ from simagentplg.resources import DEFAULT_SKILLS_DIR
 logger = get_logger("skill")
 
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
-LOAD_SKILL_TOOL_NAME = "load_skill"
 
 
 @dataclass(frozen=True)
@@ -24,7 +23,7 @@ class Skill:
 
 
 class SkillManager:
-    """Local skill index with deterministic discovery and on-demand loading."""
+    """Discover local skills and build explicit context projections."""
 
     def __init__(self, skills_root: str | Path | None = None):
         """
@@ -109,63 +108,27 @@ class SkillManager:
 
         lines = [
             "Local skills are available. Use a skill when its description matches",
-            "the user's task. If the user names a skill as $skill_name or",
-            "skill:skill_name, its full instructions are loaded separately.",
+            "the user's task. An agent with a file-reading tool can read the full",
+            "instructions from the listed location. If the user names a skill as",
+            "$skill_name or skill:skill_name, its full instructions are injected",
+            "into the current model context.",
             "",
             "Available skills:",
         ]
         for skill in self._skills.values():
             description = skill.description or "No description provided."
-            lines.append(f"- {skill.name}: {description}")
+            lines.extend(
+                [
+                    f"- name: {skill.name}",
+                    f"  description: {description}",
+                    f"  location: {skill.skill_md.resolve()}",
+                ]
+            )
         self._index_message = {
             "role": "system",
             "content": "\n".join(lines),
         }
         return dict(self._index_message)
-
-    def build_load_skill_tool(self) -> dict[str, Any] | None:
-        """Return the internal tool schema used for on-demand skill loading."""
-
-        if not self._skills:
-            return None
-
-        return {
-            "type": "function",
-            "function": {
-                "name": LOAD_SKILL_TOOL_NAME,
-                "description": (
-                    "Load the full instructions for a local skill after its "
-                    "metadata indicates that it is useful for the current task."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "skill_name": {
-                            "type": "string",
-                            "enum": list(self._skills.keys()),
-                            "description": "The local skill to load.",
-                        },
-                    },
-                    "required": ["skill_name"],
-                    "additionalProperties": False,
-                },
-            },
-        }
-
-    def load_skill(self, skill_name: str) -> dict[str, str]:
-        """Validate and report that a skill has been loaded."""
-
-        skill = self.get(skill_name)
-        description = skill.description or "No description provided."
-        return {
-            "status": "success",
-            "skill_name": skill.name,
-            "description": description,
-            "message": (
-                f"Loaded local skill {skill.name!r}. The next model turn "
-                "will include its full instructions."
-            ),
-        }
 
     def build_skill_context_message(
         self,

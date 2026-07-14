@@ -74,11 +74,15 @@ class ToolRuntime:
                 await handler.startup()
                 started_handlers.append(handler)
             self._tool_routes = self._build_tool_routes()
-            self._active_middlewares = [
-                middleware
-                for middleware in self.middlewares
-                if middleware.enabled
-            ]
+            self._active_middlewares = (
+                [
+                    middleware
+                    for middleware in self.middlewares
+                    if middleware.enabled
+                ]
+                if self._tool_routes
+                else []
+            )
             for middleware in self._active_middlewares:
                 await middleware.startup()
                 started_middlewares.append(middleware)

@@ -22,7 +22,7 @@ Requires Python 3.12 or newer.
 - `ToolRuntime` lifecycle, routing, middleware, and repeat-call protection
 - Generic `ToolMiddleware` interception
 - Optional MCP integration through `McpToolHandler`
-- Local skill discovery and on-demand loading through `SkillManager`
+- Local skill discovery, metadata projection, and explicit context activation
 
 The core intentionally does not provide Bash, Git, filesystem, approval UI, or
 finish tools. Those belong to a derived agent such as a CodeAgent.
@@ -257,10 +257,12 @@ agent = BaseAgent(
 )
 ```
 
-`SkillManager` discovers child folders containing `SKILL.md`, injects compact
-metadata, and exposes an internal `load_skill` tool for on-demand instruction
-loading. Users can explicitly select a skill with `$skill_name` or
-`skill:skill_name`.
+`SkillManager` discovers child folders containing `SKILL.md` and injects compact
+metadata containing each skill's name, description, and file location. Users
+can explicitly select a skill with `$skill_name` or `skill:skill_name`, which
+injects its full instructions into the current context. The core does not
+register a special skill tool; a derived agent with a file-reading tool can use
+the advertised location for progressive loading.
 
 ```text
 examples/skills/

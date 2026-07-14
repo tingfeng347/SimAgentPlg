@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -18,11 +17,8 @@ from simagentplg.agent.tool_runtime import (
     ToolRuntime,
 )
 from simagentplg.agent.types import ToolControl
-from simagentplg.plugins.skill.skill_manager import (
-    LOAD_SKILL_TOOL_NAME,
-    SkillManager,
-)
-from simagentplg.providers.base import AssistantMessage, ModelToolCall
+from simagentplg.plugins.skill.skill_manager import SkillManager
+from simagentplg.providers.base import AssistantMessage
 
 TOOL_COMPLETION_RETRY_PROMPT = """
 Explicit-finish mode requires a completing tool call to finish the task.
@@ -45,7 +41,6 @@ class AgentOrchestrator:
         model_call: ModelCall,
         tool_runtime: ToolRuntime,
         skill_manager: SkillManager | None,
-        has_handler_tools: bool,
         policy: RuntimePolicy,
         logger: logging.Logger,
     ) -> None:
@@ -55,7 +50,6 @@ class AgentOrchestrator:
         self.model_call = model_call
         self.tool_runtime = tool_runtime
         self.skill_manager = skill_manager
-        self.has_handler_tools = has_handler_tools
         self.policy = policy
         self.logger = logger
 
@@ -63,14 +57,7 @@ class AgentOrchestrator:
     def tools(self) -> list[dict[str, Any]]:
         """Return every tool definition available to the model."""
 
-        tools: list[dict[str, Any]] = []
-        if self.has_handler_tools:
-            tools.extend(self.tool_runtime.tools)
-        if self.skill_manager is not None:
-            load_skill_tool = self.skill_manager.build_load_skill_tool()
-            if load_skill_tool is not None:
-                tools.append(load_skill_tool)
-        return tools
+        return self.tool_runtime.tools
 
     async def run(self, *, task: str) -> AgentRunResult:
         """Run one task and return its structured terminal result."""
@@ -87,8 +74,7 @@ class AgentOrchestrator:
 
     async def _prepare_task(self, task: str) -> None:
         self.state.begin_task(task)
-        if self.has_handler_tools:
-            await self.tool_runtime.on_task_start()
+        await self.tool_runtime.on_task_start()
         self._activate_explicit_skill()
 
     async def _run_loop(self) -> AgentRunResult:
@@ -191,20 +177,6 @@ class AgentOrchestrator:
         result_messages: list[dict[str, Any]] = []
 
         for tool_call in message.tool_calls or []:
-            if tool_call.name == LOAD_SKILL_TOOL_NAME:
-                result_messages.append(self._execute_load_skill_call(tool_call))
-                continue
-
-            if not self.has_handler_tools:
-                result_messages.append(
-                    self._tool_error_message(
-                        tool_call.id,
-                        tool_call.name,
-                        "tool execution is disabled for this agent",
-                    )
-                )
-                continue
-
             tool_result = await self.tool_runtime.execute_tool_call(tool_call)
             result_messages.extend(tool_result.messages)
             if tool_result.control is not ToolControl.CONTINUE:
@@ -266,57 +238,3 @@ class AgentOrchestrator:
             self.state.cancel(result.output)
         else:
             self.state.fail(result.error or result.stop_reason.value)
-
-    def _execute_load_skill_call(
-        self,
-        tool_call: ModelToolCall,
-    ) -> dict[str, str]:
-        if self.skill_manager is None:
-            return self._tool_error_message(
-                tool_call.id,
-                LOAD_SKILL_TOOL_NAME,
-                "skill loading is disabled for this agent",
-            )
-
-        try:
-            arguments = json.loads(tool_call.arguments)
-            if not isinstance(arguments, dict):
-                raise TypeError("tool arguments must be a JSON object")
-            skill_name = arguments.get("skill_name")
-            if not isinstance(skill_name, str) or not skill_name.strip():
-                raise TypeError("skill_name must be a non-empty string")
-            result = self.skill_manager.load_skill(skill_name.strip())
-            self.state.active_skill_name = result["skill_name"]
-        except Exception as exc:
-            payload: dict[str, Any] = {
-                "status": "error",
-                "tool": LOAD_SKILL_TOOL_NAME,
-                "error": str(exc),
-            }
-        else:
-            payload = result
-
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": json.dumps(payload, ensure_ascii=False, default=str),
-        }
-
-    @staticmethod
-    def _tool_error_message(
-        tool_call_id: str,
-        tool_name: str,
-        error: str,
-    ) -> dict[str, str]:
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": json.dumps(
-                {
-                    "status": "error",
-                    "tool": tool_name,
-                    "error": error,
-                },
-                ensure_ascii=False,
-            ),
-        }

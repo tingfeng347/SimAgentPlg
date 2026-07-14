@@ -8,6 +8,10 @@
 > `ToolControl`；工具可用性与显式完成策略已经解耦；Bash、GitDiff、Finish
 > 以及具体审批实现已移出 Core。下文第 3—6 节保留为改造前的分析快照，当前公共
 > API 以项目 README 为准。
+>
+> 后续更新（2026-07-15）：Core 已增加 `ModelAdapter` Provider 边界；Skill
+> 定位为上下文资源，不再注册内部 `load_skill` 工具；Orchestrator 也不再接收
+> `has_handler_tools`，所有模型工具调用统一进入 `ToolRuntime`。
 
 ## 1. 结论
 
@@ -105,7 +109,7 @@ BaseAgent
 | `ToolRuntime` | 工具注册、路由、中间件、执行和错误包装 |
 | `BaseHandler` | 可复用工具组接口 |
 | `ToolMiddleware` | 工具调用装饰与审批扩展点 |
-| `SkillManager` | Skill 发现、索引、显式选择和按需加载 |
+| `SkillManager` | Skill 发现、索引、显式选择和上下文投影 |
 
 ## 4. 能力映射矩阵
 

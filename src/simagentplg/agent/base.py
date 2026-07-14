@@ -82,7 +82,6 @@ class BaseAgent:
             model_call=self.model.complete,
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
-            has_handler_tools=self.has_handler_tools,
             policy=self.runtime_policy,
             logger=self.logger,
         )
@@ -106,12 +105,6 @@ class BaseAgent:
 
         return self.state.messages
 
-    @property
-    def has_handler_tools(self) -> bool:
-        """Return whether this agent has executable handler tools."""
-
-        return bool(self.handlers)
-
     def reset(
         self,
         history: Sequence[Mapping[str, Any]] | None = None,
@@ -119,7 +112,7 @@ class BaseAgent:
         """Reset conversation memory while preserving the agent identity."""
 
         messages = [{"role": "system", "content": self.system_prompt}]
-        if self.has_handler_tools:
+        if self.handlers:
             messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
         if self.runtime_policy.require_explicit_finish:
             messages.append(
@@ -146,8 +139,8 @@ class BaseAgent:
 
         try:
             await self.model.startup()
-            if self.has_handler_tools:
-                await self._tool_runtime.startup()
+            await self._tool_runtime.startup()
+            if self._tool_runtime.tools:
                 self.logger.info(
                     "Loaded %d handler(s); registered tools: %s",
                     len(self.handlers),
@@ -159,14 +152,13 @@ class BaseAgent:
                     ),
                 )
         except Exception:
-            if self.has_handler_tools:
-                try:
-                    await self._tool_runtime.shutdown()
-                except Exception as shutdown_error:
-                    self.logger.warning(
-                        "Tool runtime rollback shutdown failed: %s",
-                        shutdown_error,
-                    )
+            try:
+                await self._tool_runtime.shutdown()
+            except Exception as shutdown_error:
+                self.logger.warning(
+                    "Tool runtime rollback shutdown failed: %s",
+                    shutdown_error,
+                )
             try:
                 await self.model.shutdown()
             except Exception as shutdown_error:
@@ -189,11 +181,10 @@ class BaseAgent:
             return
 
         errors: list[Exception] = []
-        if self.has_handler_tools:
-            try:
-                await self._tool_runtime.shutdown()
-            except Exception as exc:
-                errors.append(exc)
+        try:
+            await self._tool_runtime.shutdown()
+        except Exception as exc:
+            errors.append(exc)
         try:
             await self.model.shutdown()
         except Exception as exc:
@@ -210,9 +201,6 @@ class BaseAgent:
         arguments: Mapping[str, Any],
     ) -> StepOutcome:
         """Dispatch a tool call to its explicitly registered handler."""
-
-        if not self.has_handler_tools:
-            raise RuntimeError("tool execution is disabled for this agent")
 
         async with self._operation_lock:
             await self._startup()

@@ -36,10 +36,6 @@ class ToolRuntime:
         self._repeated_tool_calls = 0
 
     @property
-    def started(self) -> bool:
-        return self._started
-
-    @property
     def tools(self) -> list[dict[str, Any]]:
         return [
             tool
@@ -143,24 +139,6 @@ class ToolRuntime:
             return middleware_outcome
 
         return await handler.dispatch(tool_name, arguments)
-
-    async def execute_tool_calls(self, message: Any) -> ToolCallResult:
-        result_messages: list[dict[str, Any]] = []
-        function_calls = [
-            tool_call
-            for tool_call in message.tool_calls or []
-            if tool_call.type == "function"
-        ]
-
-        for tool_call in function_calls:
-            result = await self.execute_tool_call(tool_call)
-            result_messages.extend(result.messages)
-            if result.exit_value is not None:
-                return ToolCallResult(
-                    tuple(result_messages),
-                    exit_value=result.exit_value,
-                )
-        return ToolCallResult(tuple(result_messages))
 
     async def execute_tool_call(self, tool_call: Any) -> ToolCallResult:
         tool_name = tool_call.function.name

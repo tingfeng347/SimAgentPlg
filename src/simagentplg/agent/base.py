@@ -71,17 +71,16 @@ class ModelConfig:
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
-        """Build a config from the environment used by SimAgentPlg 0.1.x."""
+        """Build a config from the configured model environment variables."""
 
         load_dotenv()
-        model = os.getenv("CHAT_MODEL") or os.getenv("BASE_MODEL")
+        model = os.getenv("CHAT_MODEL")
         api_key = os.getenv("MODEL_API_KEY")
         base_url = os.getenv("MODEL_URL")
 
         if not model or not api_key or not base_url:
             raise ValueError(
                 "CHAT_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
-                " (BASE_MODEL is accepted as a legacy fallback)"
             )
 
         try:
@@ -246,7 +245,6 @@ class BaseAgent:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None,
-        response_format: dict[str, Any] | None = None,
     ) -> ChatCompletionMessage:
         """Call the configured model and return its first message."""
 
@@ -257,37 +255,12 @@ class BaseAgent:
                 "temperature": self.config.temperature,
                 "tools": cast(Any, tools)
             }
-            if response_format is not None:
-                kwargs["response_format"] = response_format
             response = await self.client.chat.completions.create(
                 **kwargs,
             )
         except Exception as exc:
             raise RuntimeError(f"chat completion failed: {exc}") from exc
         return cast(ChatCompletionMessage, response.choices[0].message)
-
-    async def chat_json(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Call the configured model and parse a JSON object response."""
-
-        message = await self.chat_text(
-            messages,
-            tools=tools,
-            response_format={"type": "json_object"},
-        )
-        if not message.content:
-            raise RuntimeError("chat json completion returned empty content")
-        try:
-            payload = json.loads(message.content)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("chat json completion returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError("chat json completion must return a JSON object")
-        return payload
 
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
@@ -296,9 +269,7 @@ class BaseAgent:
             await self._startup()
             await self._prepare_task(task)
 
-            if self.has_handler_tools:
-                return await self._run_react_loop()
-            return await self._run_plain_chat()
+            return await self._run_loop()
 
     def transform_context(
         self,
@@ -350,27 +321,7 @@ class BaseAgent:
         self.messages.append({"role": "user", "content": task})
         self._activate_explicit_skill()
 
-    async def _run_plain_chat(self) -> str:
-        for turn in range(self.max_steps):
-            message = await self._chat_next_turn(turn)
-            self.messages.append(message.model_dump())
-
-            if not message.tool_calls:
-                if message.content:
-                    return message.content
-                raise RuntimeError("plain chat completion returned empty content")
-
-            tool_result = await self._execute_tool_calls(message)
-            self.messages.extend(tool_result.messages)
-            if tool_result.exit_value is not None:
-                return tool_result.exit_value
-
-        raise RuntimeError(
-            f"agent {self.agent_id!r} did not finish plain chat within "
-            f"{self.max_steps} steps"
-        )
-
-    async def _run_react_loop(self) -> str:
+    async def _run_loop(self) -> str:
         no_tool_response_count = 0
 
         for turn in range(self.max_steps):
@@ -378,6 +329,11 @@ class BaseAgent:
             self.messages.append(message.model_dump())
 
             if not message.tool_calls:
+                if not self.has_handler_tools:
+                    if message.content:
+                        return message.content
+                    raise RuntimeError("plain chat completion returned empty content")
+
                 no_tool_response_count += 1
                 if no_tool_response_count >= MAX_NO_TOOL_RESPONSES:
                     raise RuntimeError(
@@ -400,6 +356,11 @@ class BaseAgent:
             if tool_result.exit_value is not None:
                 return tool_result.exit_value
 
+        if not self.has_handler_tools:
+            raise RuntimeError(
+                f"agent {self.agent_id!r} did not finish plain chat within "
+                f"{self.max_steps} steps"
+            )
         raise RuntimeError(
             f"agent {self.agent_id!r} did not finish within "
             f"{self.max_steps} steps"

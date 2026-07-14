@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +17,8 @@ LOAD_SKILL_TOOL_NAME = "load_skill"
 @dataclass(frozen=True)
 class Skill:
     name: str
-    root: Path
     skill_md: Path
     description: str = ""
-    frontmatter: dict[str, Any] = field(default_factory=dict)
     template_md: Path | None = None
     sample_md: Path | None = None
 
@@ -79,10 +77,8 @@ class SkillManager:
 
             skills[name] = Skill(
                 name=name,
-                root=child,
                 skill_md=skill_md,
                 description=str(frontmatter.get("description", "")),
-                frontmatter=frontmatter,
                 template_md=template_md if template_md.exists() else None,
                 sample_md=sample_md if sample_md.exists() else None,
             )

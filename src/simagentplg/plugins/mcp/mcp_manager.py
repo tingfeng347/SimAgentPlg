@@ -16,7 +16,6 @@ logger = get_logger(name="MCP")
 
 @dataclass(frozen=True, slots=True)
 class _McpToolRoute:
-    service_name: str
     raw_name: str
     client: Any
 
@@ -34,7 +33,6 @@ class McpServerManager:
             path = DEFAULT_MCP_CONFIG
         self.path = path
         self._clients_by_service: dict[str, Client] = {}
-        self._tools_by_service: dict[str, list[Tool]] = {}
         self._tool_routes: dict[str, _McpToolRoute] = {}
         self._openai_tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
@@ -82,7 +80,6 @@ class McpServerManager:
         for service_name in self._clients_by_service:
             logger.info("MCP service %s disconnected", service_name)
         self._clients_by_service.clear()
-        self._tools_by_service.clear()
         self._tool_routes.clear()
         self._openai_tools.clear()
         logger.info("MCP server manager stopped")
@@ -134,7 +131,6 @@ class McpServerManager:
             if prefixed_name in self._tool_routes or prefixed_name in routes:
                 raise ValueError(f"duplicate MCP tool {prefixed_name!r}")
             routes[prefixed_name] = _McpToolRoute(
-                service_name=service_name,
                 raw_name=tool.name,
                 client=client,
             )
@@ -150,6 +146,5 @@ class McpServerManager:
             )
 
         self._clients_by_service[service_name] = client
-        self._tools_by_service[service_name] = tools
         self._tool_routes.update(routes)
         self._openai_tools.extend(openai_tools)

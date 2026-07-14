@@ -264,23 +264,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.timeout, 12)
         self.assertEqual(config.temperature, 0.2)
 
-    async def test_model_config_accepts_legacy_base_model(self) -> None:
-        with (
-            patch("simagentplg.agent.base.load_dotenv"),
-            patch.dict(
-                "os.environ",
-                {
-                    "BASE_MODEL": "legacy-model",
-                    "MODEL_API_KEY": "key",
-                    "MODEL_URL": "https://model.example",
-                },
-                clear=True,
-            ),
-        ):
-            config = ModelConfig.from_env()
-
-        self.assertEqual(config.model, "legacy-model")
-
     async def test_agents_share_config_but_not_messages(self) -> None:
         first_client = FakeClient([FakeMessage("first")])
         second_client = FakeClient([FakeMessage("second")])
@@ -341,7 +324,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         active = 0
         maximum = 0
 
-        async def run_plain_chat() -> str:
+        async def run_loop() -> str:
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
@@ -351,7 +334,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 active -= 1
 
-        agent._run_plain_chat = run_plain_chat  # type: ignore[method-assign]
+        agent._run_loop = run_loop  # type: ignore[method-assign]
 
         results = await asyncio.gather(
             agent.runtime(task="first"),
@@ -749,35 +732,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read_counts[skill_dir / "SKILL.md"], 1)
         self.assertEqual(read_counts[skill_dir / "template.md"], 1)
         self.assertEqual(read_counts[examples_dir / "sample.md"], 1)
-
-    async def test_chat_json_requests_and_parses_json_object(self) -> None:
-        client = FakeClient([FakeMessage('{"ok": true, "count": 2}')])
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="json",
-            client=client,
-        )
-
-        payload = await agent.chat_json(
-            [{"role": "user", "content": "return json"}],
-        )
-
-        self.assertEqual(payload, {"ok": True, "count": 2})
-        self.assertEqual(
-            client.completions.calls[0]["response_format"],
-            {"type": "json_object"},
-        )
-
-    async def test_chat_json_rejects_invalid_json_content(self) -> None:
-        client = FakeClient([FakeMessage("not json")])
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bad-json",
-            client=client,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
-            await agent.chat_json([{"role": "user", "content": "return json"}])
 
     async def test_agent_id_is_normalized_and_read_only(self) -> None:
         agent = BaseAgent(
@@ -1443,30 +1397,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         input_mock.assert_called_once()
         self.assertTrue(outcome.should_exit)
         self.assertEqual(outcome.data["status"], "rejected")
-
-    async def test_bash_approval_middleware_rejects_legacy_hint_policy_bash_run(self) -> None:
-        middleware = BashApprovalMiddleware(approval_policy="on_review_hint")
-        agent = BaseAgent(
-            TEST_CONFIG,
-            agent_id="bash-approval-reject",
-            handlers=[BashHandler()],
-            middlewares=[middleware],
-            client=FakeClient([]),
-        )
-
-        with (
-            patch("builtins.input", return_value="n") as input_mock,
-            patch("builtins.print"),
-        ):
-            outcome = await agent.dispatch(
-                "bash_run",
-                {"code": "rm -rf build"},
-            )
-
-        input_mock.assert_called_once()
-        self.assertTrue(outcome.should_exit)
-        self.assertEqual(outcome.data["status"], "rejected")
-        self.assertEqual(outcome.data["tool"], "bash_run")
 
     async def test_bash_approval_middleware_approves_unlisted_safe_policy_bash_run(self) -> None:
         middleware = BashApprovalMiddleware(approval_policy="unless_safe")

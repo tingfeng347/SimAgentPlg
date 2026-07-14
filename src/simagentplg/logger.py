@@ -4,7 +4,6 @@ import logging
 def setup_logger(
     name: str = "SimAgentPlg",
     level: str = "INFO",
-    log_file: str = "./logs/app.log",
     fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 ):
     """Create and configure a console logger.
@@ -12,7 +11,6 @@ def setup_logger(
     Args:
         name: Logger name.
         level: Minimum log level.
-        log_file: Reserved for future file logging.
         fmt: Log format string.
 
     Returns:

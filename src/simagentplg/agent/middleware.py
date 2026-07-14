@@ -9,7 +9,7 @@ from simagentplg.agent.types import StepOutcome
 
 
 DEFAULT_APPROVAL_PREVIEW_CHARS = 2_000
-BashApprovalPolicy = Literal["always", "unless_safe", "on_review_hint", "never"]
+BashApprovalPolicy = Literal["always", "unless_safe", "never"]
 BASH_SAFE_COMMAND_PREFIXES = (
     ("pwd",),
     ("ls",),
@@ -103,8 +103,6 @@ class BashApprovalMiddleware(ToolMiddleware):
         enabled: bool = True,
     ) -> None:
         super().__init__(name=name, enabled=enabled)
-        if approval_policy == "on_review_hint":
-            approval_policy = "unless_safe"
         if approval_policy not in ("always", "unless_safe", "never"):
             raise ValueError(
                 "approval_policy must be one of: always, unless_safe, never"

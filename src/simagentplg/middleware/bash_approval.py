@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import shlex
 from collections.abc import Mapping
 from typing import Any, Literal
 
 from simagentplg.agent.types import StepOutcome
+from simagentplg.middleware.approval import HumanApproval
+from simagentplg.middleware.base import ToolMiddleware, format_tool_call_preview
 
-
-DEFAULT_APPROVAL_PREVIEW_CHARS = 2_000
 BashApprovalPolicy = Literal["always", "unless_safe", "never"]
 BASH_SAFE_COMMAND_PREFIXES = (
     ("pwd",),
@@ -24,66 +23,6 @@ BASH_SAFE_COMMAND_PREFIXES = (
     ("uv", "run", "python", "-m", "unittest"),
 )
 BASH_UNSAFE_SHELL_TOKENS = frozenset("|&;<>()`$")
-
-
-class Middleware:
-    """Base class for reusable agent middleware."""
-
-    def __init__(self, *, name: str | None = None, enabled: bool = True) -> None:
-        self.name = name or type(self).__name__
-        self.enabled = enabled
-
-    async def startup(self) -> None:
-        """Initialize optional middleware resources."""
-
-    async def shutdown(self) -> None:
-        """Release optional middleware resources."""
-
-    async def on_task_start(self) -> None:
-        """Prepare middleware state for one new agent task."""
-
-
-class ToolMiddleware(Middleware):
-    """Middleware hook that runs before a tool handler is dispatched."""
-
-    async def before_tool_call(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-    ) -> StepOutcome | None:
-        """Return None to allow execution, or StepOutcome to short-circuit."""
-
-        return None
-
-
-class HumanApproval:
-    """Console based y/n approval helper reusable by middleware."""
-
-    def __init__(
-        self,
-        *,
-        max_preview_chars: int = DEFAULT_APPROVAL_PREVIEW_CHARS,
-    ) -> None:
-        if max_preview_chars <= 0:
-            raise ValueError("max_preview_chars must be greater than zero")
-        self.max_preview_chars = max_preview_chars
-
-    async def approve(self, text: str) -> bool:
-        preview = self.truncate(text)
-        print(preview)
-        while True:
-            answer = input("Approve tool execution? [y/n]: ").strip().lower()
-            if answer == "y":
-                return True
-            if answer == "n":
-                return False
-            print("Please enter 'y' or 'n'.")
-
-    def truncate(self, text: str) -> str:
-        if len(text) <= self.max_preview_chars:
-            return text
-        omitted = len(text) - self.max_preview_chars
-        return f"{text[:self.max_preview_chars]}...<truncated {omitted} chars>"
 
 
 class BashApprovalMiddleware(ToolMiddleware):
@@ -176,28 +115,3 @@ def _is_safe_bash_command(code: str) -> bool:
 
 def _starts_with(parts: list[str], prefix: tuple[str, ...]) -> bool:
     return len(parts) >= len(prefix) and tuple(parts[: len(prefix)]) == prefix
-
-
-def format_tool_call_preview(
-    tool_name: str,
-    arguments: Mapping[str, Any],
-    *,
-    risk: str | None = None,
-    review: str | None = None,
-) -> str:
-    """Build a readable approval preview from one tool call."""
-
-    try:
-        payload = json.dumps(
-            dict(arguments),
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            default=str,
-        )
-    except TypeError:
-        payload = repr(dict(arguments))
-    review_text = review or risk
-    if review_text:
-        return f"Tool: {tool_name}\nReview: {review_text}\nArguments:\n{payload}"
-    return f"Tool: {tool_name}\nArguments:\n{payload}"

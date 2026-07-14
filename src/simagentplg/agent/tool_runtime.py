@@ -4,9 +4,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from simagentplg.agent.middleware import Middleware
 from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import BaseHandler
+from simagentplg.middleware import Middleware
 
 MAX_REPEATED_TOOL_CALLS = 3
 

@@ -2,7 +2,7 @@
 
 from simagentplg.agent.base import BaseAgent, ModelConfig
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
-from simagentplg.agent.middleware import (
+from simagentplg.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
     Middleware,

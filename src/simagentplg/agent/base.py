@@ -14,11 +14,11 @@ from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
 )
-from simagentplg.agent.middleware import Middleware
 from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
 from simagentplg.agent.types import StepOutcome
 from simagentplg.logger import get_logger
+from simagentplg.middleware import Middleware
 from simagentplg.plugins.skill.skill_manager import (
     LOAD_SKILL_TOOL_NAME,
     SkillManager,

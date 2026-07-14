@@ -9,6 +9,9 @@ from typing import Any
 from unittest.mock import patch
 
 from simagentplg import (
+    AgentContextBuilder,
+    AgentState,
+    AgentStatus,
     BaseAgent,
     BashApprovalMiddleware,
     BashHandler,
@@ -440,8 +443,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not finish plain chat"):
             await agent.runtime(task="plain chat")
 
-    async def test_convert_to_llm_messages_can_filter_internal_context(self) -> None:
-        class FilteringAgent(BaseAgent):
+    async def test_context_builder_can_filter_internal_context(self) -> None:
+        class FilteringContextBuilder(AgentContextBuilder):
             def convert_to_llm_messages(
                 self,
                 messages: list[dict[str, Any]],
@@ -453,10 +456,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 ]
 
         client = FakeClient([FakeMessage("visible")])
-        agent = FilteringAgent(
+        agent = BaseAgent(
             TEST_CONFIG,
             agent_id="context",
             client=client,
+            context_builder=FilteringContextBuilder(),
         )
         agent.messages.append(
             {
@@ -475,6 +479,57 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             any(message.get("content") == "real task" for message in sent_messages)
+        )
+
+    async def test_agent_state_records_completed_task(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="state-complete",
+            client=FakeClient([FakeMessage("done")]),
+        )
+
+        result = await agent.runtime(task="finish task")
+
+        self.assertEqual(result, "done")
+        self.assertEqual(agent.state.task, "finish task")
+        self.assertEqual(agent.state.status, AgentStatus.COMPLETED)
+        self.assertEqual(agent.state.turn, 1)
+        self.assertEqual(agent.state.result, "done")
+        self.assertIsNone(agent.state.error)
+
+    async def test_agent_state_records_failed_task(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="state-failed",
+            client=FakeClient([FakeMessage(None)]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "empty content"):
+            await agent.runtime(task="fail task")
+
+        self.assertEqual(agent.state.task, "fail task")
+        self.assertEqual(agent.state.status, AgentStatus.FAILED)
+        self.assertIsNone(agent.state.result)
+        self.assertIn("empty content", agent.state.error or "")
+
+    async def test_context_builder_does_not_mutate_agent_state(self) -> None:
+        state = AgentState(messages=[{"role": "user", "content": "saved"}])
+
+        result = AgentContextBuilder().build(
+            state,
+            transient_messages=[{"role": "system", "content": "temporary"}],
+        )
+
+        self.assertEqual(
+            state.messages,
+            [{"role": "user", "content": "saved"}],
+        )
+        self.assertEqual(
+            result.llm_messages,
+            (
+                {"role": "user", "content": "saved"},
+                {"role": "system", "content": "temporary"},
+            ),
         )
 
     async def test_skill_metadata_is_injected_without_llm_router(self) -> None:
@@ -945,7 +1000,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         retry_prompts = [
             message["content"]
-            for message in agent.messages
+            for call in client.completions.calls[1:]
+            for message in call["messages"]
             if message.get("role") == "system"
             and message.get("content", "").startswith(
                 "Tool mode requires a finishing tool call"
@@ -954,6 +1010,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(retry_prompts), 2)
         self.assertEqual(len(set(retry_prompts)), 2)
         self.assertIn("Retry 2/3", retry_prompts[1])
+        self.assertFalse(
+            any(
+                message.get("content", "").startswith(
+                    "Tool mode requires a finishing tool call"
+                )
+                for message in agent.state.messages
+            )
+        )
 
     async def test_tool_calls_are_logged(self) -> None:
         client = FakeClient(

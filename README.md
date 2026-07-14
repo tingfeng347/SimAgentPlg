@@ -9,6 +9,8 @@ and local skill indexing.
 ## Features
 
 - Stateful `BaseAgent` with conversation memory and explicit `reset()`
+- Observable `AgentState` for persistent history and current task status
+- `AgentContextBuilder` for per-turn, non-mutating model context construction
 - Immutable, required `agent_id` owned by each agent
 - OpenAI-compatible model configuration through `.env` or direct construction
 - Handler-driven tool execution with no separate tool-mode switch
@@ -340,6 +342,7 @@ BaseAgent(
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[Middleware] | None = None,
     skills_dir: str | Path | None = None,
+    context_builder: AgentContextBuilder | None = None,
     max_steps: int = 20,
     client: Any | None = None,
 )
@@ -350,12 +353,17 @@ await agent.startup()
 await agent.shutdown()
 ```
 
+`agent.state` holds the persistent conversation plus the current task's
+status, turn count, active skill, result, and error. `AgentContextBuilder`
+derives each model request from that state without mutating the history.
+
 Passing handlers puts `BaseAgent` in tool execution mode and injects the
 runtime's internal tool protocol system message. Without handlers, the agent is
 plain chat; `skills_dir` can still expose the internal `load_skill` context
 tool without requiring a finishing tool.
 
-The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
+The top-level package exports `BaseAgent`, `ModelConfig`, `AgentState`,
+`AgentStatus`, `AgentContextBuilder`, `ContextBuildResult`, `StepOutcome`,
 handler base classes, `MethodToolHandler`,
 `BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
 `McpServerManager`, `SkillManager`, and default resource paths.

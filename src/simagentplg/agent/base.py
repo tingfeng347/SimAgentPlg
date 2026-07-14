@@ -10,13 +10,11 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
 
-from simagentplg.agent.context import (
-    convert_to_llm_messages,
-    transform_context,
-)
+from simagentplg.agent.context_builder import AgentContextBuilder
 from simagentplg.agent.middleware import Middleware
+from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import ToolCallResult, ToolRuntime
-from simagentplg.agent.types import AgentMessage, StepOutcome
+from simagentplg.agent.types import StepOutcome
 from simagentplg.logger import get_logger
 from simagentplg.plugins.skill.skill_manager import (
     LOAD_SKILL_TOOL_NAME,
@@ -112,6 +110,7 @@ class BaseAgent:
         handlers: Iterable["BaseHandler"] | None = None,
         middlewares: Iterable[Middleware] | None = None,
         skills_dir: str | Path | None = None,
+        context_builder: AgentContextBuilder | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         client: Any | None = None,
     ) -> None:
@@ -131,11 +130,13 @@ class BaseAgent:
         )
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
-        self.messages: list[dict[str, Any]] = []
         self._operation_lock = asyncio.Lock()
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
-        self._active_skill_name: str | None = None
+        self.state = AgentState()
+        self._context_builder = context_builder or AgentContextBuilder(
+            skill_manager=self._skill_manager,
+        )
         self.logger = get_logger(f"{self.agent_id}")
         self._tool_runtime = ToolRuntime(
             self.handlers,
@@ -157,6 +158,12 @@ class BaseAgent:
         return self._llm_tools()
 
     @property
+    def messages(self) -> list[dict[str, Any]]:
+        """Return the agent's persistent conversation history."""
+
+        return self.state.messages
+
+    @property
     def has_handler_tools(self) -> bool:
         """Return whether this agent has executable handler tools."""
 
@@ -168,12 +175,12 @@ class BaseAgent:
     ) -> None:
         """Reset conversation memory while preserving the agent identity."""
 
-        self.messages = [{"role": "system", "content": self.system_prompt}]
+        messages = [{"role": "system", "content": self.system_prompt}]
         if self.has_handler_tools:
-            self.messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
+            messages.append({"role": "system", "content": TOOL_PROTOCOL_PROMPT})
         if history:
-            self.messages.extend(dict(message) for message in history)
-        self._active_skill_name = None
+            messages.extend(dict(message) for message in history)
+        self.state.reset(messages)
 
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
@@ -268,65 +275,29 @@ class BaseAgent:
         async with self._operation_lock:
             await self._startup()
             await self._prepare_task(task)
-
-            return await self._run_loop()
-
-    def transform_context(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-    ) -> list[AgentMessage]:
-        """Transform internal messages before provider conversion."""
-
-        context = transform_context(messages)
-        if self._skill_manager is None:
-            return context
-
-        skill_messages: list[dict[str, str]] = []
-        skill_index_message = self._skill_manager.build_index_message()
-        if skill_index_message is not None:
-            skill_messages.append(skill_index_message)
-        if self._active_skill_name is not None:
-            skill_messages.append(
-                self._skill_manager.build_skill_context_message(
-                    self._active_skill_name
-                )
-            )
-        if skill_messages:
-            insert_at = 0
-            while (
-                insert_at < len(context)
-                and context[insert_at].get("role") == "system"
-            ):
-                insert_at += 1
-            context[insert_at:insert_at] = skill_messages
-        return context
-
-    def convert_to_llm_messages(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-    ) -> list[AgentMessage]:
-        """Convert agent context messages into model provider messages."""
-
-        return convert_to_llm_messages(messages)
+            try:
+                result = await self._run_loop()
+            except Exception as exc:
+                self.state.fail(exc)
+                raise
+            self.state.complete(result)
+            return result
 
     async def _ensure_skills_discovered(self) -> None:
         if self._skill_manager is not None:
             await self._skill_manager.discover()
 
     async def _prepare_task(self, task: str) -> None:
+        self.state.begin_task(task)
         if self.has_handler_tools:
             await self._tool_runtime.on_task_start()
 
-        self._active_skill_name = None
-        self.messages.append({"role": "user", "content": task})
         self._activate_explicit_skill()
 
     async def _run_loop(self) -> str:
-        no_tool_response_count = 0
-
-        for turn in range(self.max_steps):
-            message = await self._chat_next_turn(turn)
-            self.messages.append(message.model_dump())
+        for _ in range(self.max_steps):
+            message = await self._chat_next_turn()
+            self.state.add_message(message.model_dump())
 
             if not message.tool_calls:
                 if not self.has_handler_tools:
@@ -334,25 +305,18 @@ class BaseAgent:
                         return message.content
                     raise RuntimeError("plain chat completion returned empty content")
 
-                no_tool_response_count += 1
-                if no_tool_response_count >= MAX_NO_TOOL_RESPONSES:
+                self.state.no_tool_response_count += 1
+                if self.state.no_tool_response_count >= MAX_NO_TOOL_RESPONSES:
                     raise RuntimeError(
                         "tool mode produced plain text without a finishing "
-                        f"tool call {no_tool_response_count} consecutive times"
+                        "tool call "
+                        f"{self.state.no_tool_response_count} consecutive times"
                     )
-                self.messages.append(
-                    {
-                        "role": "system",
-                        "content": self._tool_completion_retry_prompt(
-                            no_tool_response_count
-                        ),
-                    }
-                )
                 continue
 
-            no_tool_response_count = 0
+            self.state.no_tool_response_count = 0
             tool_result = await self._execute_tool_calls(message)
-            self.messages.extend(tool_result.messages)
+            self.state.add_messages(list(tool_result.messages))
             if tool_result.exit_value is not None:
                 return tool_result.exit_value
 
@@ -366,14 +330,29 @@ class BaseAgent:
             f"{self.max_steps} steps"
         )
 
-    async def _chat_next_turn(self, turn: int) -> ChatCompletionMessage:
-        self.logger.info("Turn %d/%d", turn + 1, self.max_steps)
-        context_messages = self.transform_context(self.messages)
-        llm_messages = self.convert_to_llm_messages(context_messages)
+    async def _chat_next_turn(self) -> ChatCompletionMessage:
+        turn = self.state.advance_turn()
+        self.logger.info("Turn %d/%d", turn, self.max_steps)
+        context = self._context_builder.build(
+            self.state,
+            transient_messages=self._runtime_context_messages(),
+        )
         return await self.chat_text(
-            llm_messages,
+            list(context.llm_messages),
             tools=self._llm_tools() or None,
         )
+
+    def _runtime_context_messages(self) -> list[dict[str, str]]:
+        if self.state.no_tool_response_count == 0:
+            return []
+        return [
+            {
+                "role": "system",
+                "content": self._tool_completion_retry_prompt(
+                    self.state.no_tool_response_count
+                ),
+            }
+        ]
 
     @staticmethod
     def _tool_completion_retry_prompt(no_tool_response_count: int) -> str:
@@ -392,9 +371,9 @@ class BaseAgent:
         if self._skill_manager is None:
             return
 
-        skill_name = self._skill_manager.select_explicit_skill(self.messages)
+        skill_name = self._skill_manager.select_explicit_skill(self.state.messages)
         if skill_name is not None:
-            self._active_skill_name = skill_name
+            self.state.active_skill_name = skill_name
 
     def _llm_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -455,7 +434,7 @@ class BaseAgent:
             if not isinstance(skill_name, str) or not skill_name.strip():
                 raise TypeError("skill_name must be a non-empty string")
             result = self._skill_manager.load_skill(skill_name.strip())
-            self._active_skill_name = result["skill_name"]
+            self.state.active_skill_name = result["skill_name"]
         except Exception as exc:
             payload: dict[str, Any] = {
                 "status": "error",

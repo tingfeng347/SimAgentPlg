@@ -1,6 +1,7 @@
 """Composable stateful agents with tool handlers and MCP integration."""
 
 from simagentplg.agent.base import BaseAgent, ModelConfig
+from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
@@ -9,6 +10,7 @@ from simagentplg.agent.middleware import (
     format_tool_call_preview,
 )
 from simagentplg.agent.types import StepOutcome
+from simagentplg.agent.state import AgentState, AgentStatus
 from simagentplg.handlers import (
     BaseHandler,
     BashHandler,
@@ -26,6 +28,10 @@ from simagentplg.resources import DEFAULT_MCP_CONFIG, DEFAULT_SKILLS_DIR
 __all__ = [
     "BaseAgent",
     "ModelConfig",
+    "AgentState",
+    "AgentStatus",
+    "AgentContextBuilder",
+    "ContextBuildResult",
     "StepOutcome",
     "Middleware",
     "ToolMiddleware",

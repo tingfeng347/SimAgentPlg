@@ -9,6 +9,8 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地
 ## 功能特性
 
 - 有状态的 `BaseAgent`，支持对话记忆和显式 `reset()`
+- 可观测的 `AgentState`，保存持久历史和当前任务状态
+- `AgentContextBuilder`，为每轮模型调用构建不修改历史的临时上下文
 - 每个 Agent 拥有必填且不可修改的 `agent_id`
 - 支持通过 `.env` 或直接构造使用 OpenAI 兼容模型配置
 - Handler 驱动的工具执行，不需要单独的工具模式开关
@@ -334,6 +336,7 @@ BaseAgent(
     handlers: Iterable[BaseHandler] | None = None,
     middlewares: Iterable[Middleware] | None = None,
     skills_dir: str | Path | None = None,
+    context_builder: AgentContextBuilder | None = None,
     max_steps: int = 20,
     client: Any | None = None,
 )
@@ -344,11 +347,15 @@ await agent.startup()
 await agent.shutdown()
 ```
 
+`agent.state` 保存持久对话，以及当前任务的状态、轮数、激活 Skill、结果和错误。
+`AgentContextBuilder` 会从该状态派生每轮模型请求上下文，不会修改历史消息。
+
 传入 Handler 后，`BaseAgent` 会进入工具执行模式，并注入 runtime 内部工具
 协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可
 暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
 
-顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、Handler 基类、
+顶层包导出了 `BaseAgent`、`ModelConfig`、`AgentState`、`AgentStatus`、
+`AgentContextBuilder`、`ContextBuildResult`、`StepOutcome`、Handler 基类、
 `MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。

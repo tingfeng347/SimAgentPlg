@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -330,6 +331,35 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "seed"},
             ],
         )
+
+    async def test_runtime_calls_are_serialized_per_agent(self) -> None:
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="serialized-runtime",
+            client=FakeClient([]),
+        )
+        active = 0
+        maximum = 0
+
+        async def run_plain_chat() -> str:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                await asyncio.sleep(0.01)
+                return "done"
+            finally:
+                active -= 1
+
+        agent._run_plain_chat = run_plain_chat  # type: ignore[method-assign]
+
+        results = await asyncio.gather(
+            agent.runtime(task="first"),
+            agent.runtime(task="second"),
+        )
+
+        self.assertEqual(results, ["done", "done"])
+        self.assertEqual(maximum, 1)
 
     async def test_default_system_prompt_is_plain_chat_prompt(self) -> None:
         agent = BaseAgent(

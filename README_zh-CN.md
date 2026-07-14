@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README_zh-CN.md)
 
-SimAgentPlg 0.2.4 是一个轻量级多智能体框架，用于构建有状态的
+SimAgentPlg 0.2.4 是一个轻量级框架，用于构建有状态的
 OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地 Skill
 发现、索引和按需加载。
 
@@ -16,7 +16,6 @@ OpenAI 兼容 Agent、可组合工具 Handler、可选 MCP 工具，以及本地
 - 内置 `GitDiffHandler`，用于查看 Git 工作区变化
 - 内置 `FinishHandler`，用于明确结束任务
 - `MethodToolHandler` 用于快速定义小型 Python 自定义工具
-- `AgentManager` 支持同一 Agent 串行、不同 Agent 并发
 - 可选 MCP 集成：`McpToolHandler` 和 `McpServerManager`
 - 可选本地 Skill 发现、索引和按需加载：`SkillManager`
 
@@ -78,6 +77,8 @@ second = await agent.runtime(task="我更喜欢哪种编程语言？")
 agent.reset()
 await agent.shutdown()
 ```
+
+同一 Agent 的调用会串行执行，以保护其对话历史。
 
 ### 工具模式
 
@@ -234,45 +235,6 @@ agent = BaseAgent(
 
 Handler 启动时会创建统一的工具路由表。重复工具名会立即报错，不会静默覆盖。
 
-## Agent Manager
-
-每个 Agent 自己持有身份，因此注册时不需要再次传入 ID：
-
-```python
-from simagentplg import AgentManager, BaseAgent, ModelConfig
-
-config = ModelConfig.from_env()
-manager = AgentManager()
-
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="writer",
-        system_prompt="你负责编写简洁的版本说明。",
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="reviewer",
-        system_prompt="你负责审查软件改动中的风险。",
-    )
-)
-
-results = await manager.run_many(
-    {
-        "writer": "编写 0.2.4 版本说明。",
-        "reviewer": "审查本次发布的兼容性风险。",
-    }
-)
-
-await manager.shutdown()
-```
-
-同一个 Agent 的调用会串行执行，因为它们共享同一份消息历史。不同 Agent
-之间可以并发执行。`run_many()` 会将异常作为对应任务的结果返回，因此一个
-Agent 失败不会取消其他 Agent。
-
 ## MCP 工具
 
 MCP 是可选功能，并使用相同的 Handler 接口：
@@ -345,7 +307,6 @@ Skill 上下文本身不要求 Handler 工具。只有当任务需要通过 `run
 ```bash
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
-uv run python examples/03_multi_agent.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
 uv run python examples/07_bash_approval.py
@@ -359,8 +320,8 @@ uv run python examples/07_bash_approval.py
 uv run python -m unittest
 ```
 
-当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为、Manager
-锁和并发，以及示例文件是否可导入。
+当前测试覆盖 Agent、Custom Handler、Tool Middleware、Finish 行为，以及示例
+文件是否可导入。
 
 ## 公共 API
 
@@ -387,8 +348,8 @@ await agent.shutdown()
 协议 system message。没有 Handler 时，Agent 是普通聊天；`skills_dir` 仍可
 暴露内部 `load_skill` 上下文工具，但不会要求完成工具。
 
-顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、`AgentManager`、
-Handler 基类、`MethodToolHandler`、`BashHandler`、
+顶层包导出了 `BaseAgent`、`ModelConfig`、`StepOutcome`、Handler 基类、
+`MethodToolHandler`、`BashHandler`、
 `GitDiffHandler`、`FinishHandler`、`McpToolHandler`、Handler 错误类型、
 `McpServerManager`、`SkillManager` 以及默认资源路径。
 

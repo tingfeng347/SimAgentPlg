@@ -10,14 +10,12 @@ Run an example from the repository root:
 uv run python examples/01_stateful_chat.py
 ```
 
-Every `BaseAgent` declares its own immutable `agent_id`. Manager examples
-register the agent object directly with `manager.register(agent)`.
+Every `BaseAgent` declares its own immutable `agent_id`.
 
 ## Examples
 
 - `01_stateful_chat.py`: plain chat, conversation memory, and `reset()`
 - `02_custom_tool.py`: a custom atomic tool with `MethodToolHandler`
-- `03_multi_agent.py`: concurrent tasks coordinated by `AgentManager`
 - `04_mcp_tools.py`: opt-in MCP integration with a custom config file
 - `06_skill.py`: local skill discovery, indexing, template, and sample injection
 - `07_bash_approval.py`: deterministic `BashApprovalMiddleware` y/n approval

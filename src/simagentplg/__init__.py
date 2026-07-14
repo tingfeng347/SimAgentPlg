@@ -1,12 +1,6 @@
 """Composable stateful agents with tool handlers and MCP integration."""
 
 from simagentplg.agent.base import BaseAgent, ModelConfig
-from simagentplg.agent.manager import (
-    AgentAlreadyExistsError,
-    AgentManager,
-    AgentManagerError,
-    AgentNotFoundError,
-)
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
@@ -33,10 +27,6 @@ __all__ = [
     "BaseAgent",
     "ModelConfig",
     "StepOutcome",
-    "AgentManager",
-    "AgentManagerError",
-    "AgentAlreadyExistsError",
-    "AgentNotFoundError",
     "Middleware",
     "ToolMiddleware",
     "HumanApproval",

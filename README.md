@@ -16,7 +16,6 @@ and local skill indexing.
 - Built-in `GitDiffHandler` for Git working-tree inspection
 - Built-in `FinishHandler` for explicit task completion
 - `MethodToolHandler` for small custom Python tools
-- `AgentManager` with per-agent serialization and cross-agent concurrency
 - Optional MCP integration through `McpToolHandler` and `McpServerManager`
 - Optional local skill discovery, indexing, and on-demand loading through `SkillManager`
 
@@ -79,6 +78,8 @@ second = await agent.runtime(task="Which language do I prefer?")
 agent.reset()
 await agent.shutdown()
 ```
+
+Calls to the same agent are serialized to protect its conversation history.
 
 ### Tool Mode
 
@@ -239,45 +240,6 @@ agent = BaseAgent(
 Handler startup builds one routing table. Duplicate tool names are rejected
 instead of silently overriding another handler.
 
-## Agent Manager
-
-Each agent owns its identity, so registration does not repeat the ID:
-
-```python
-from simagentplg import AgentManager, BaseAgent, ModelConfig
-
-config = ModelConfig.from_env()
-manager = AgentManager()
-
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="writer",
-        system_prompt="You write concise release notes.",
-    )
-)
-manager.register(
-    BaseAgent(
-        config=config,
-        agent_id="reviewer",
-        system_prompt="You review software changes for risk.",
-    )
-)
-
-results = await manager.run_many(
-    {
-        "writer": "Write release notes for version 0.2.4.",
-        "reviewer": "Review the release for compatibility risks.",
-    }
-)
-
-await manager.shutdown()
-```
-
-Calls to the same agent are serialized because they share message history.
-Calls to different agents can run concurrently. `run_many()` returns failures
-as values so one failed agent does not cancel the others.
-
 ## MCP Tools
 
 MCP is opt-in and follows the same handler contract:
@@ -351,7 +313,6 @@ Runnable examples are available in [`examples/`](examples/README.md):
 ```bash
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
-uv run python examples/03_multi_agent.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
 uv run python examples/07_bash_approval.py
@@ -366,7 +327,7 @@ uv run python -m unittest
 ```
 
 The current tests cover agents, custom handlers, tool middleware, finish
-behavior, manager locking/concurrency, and importable examples.
+behavior, and importable examples.
 
 ## Public API
 
@@ -395,7 +356,7 @@ plain chat; `skills_dir` can still expose the internal `load_skill` context
 tool without requiring a finishing tool.
 
 The top-level package exports `BaseAgent`, `ModelConfig`, `StepOutcome`,
-`AgentManager`, handler base classes, `MethodToolHandler`,
+handler base classes, `MethodToolHandler`,
 `BashHandler`, `GitDiffHandler`, `FinishHandler`, `McpToolHandler`, handler errors,
 `McpServerManager`, `SkillManager`, and default resource paths.
 

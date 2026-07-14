@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from collections.abc import Iterable, Mapping, Sequence
@@ -132,6 +133,7 @@ class BaseAgent:
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
         self.messages: list[dict[str, Any]] = []
+        self._operation_lock = asyncio.Lock()
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
         self._active_skill_name: str | None = None
@@ -145,7 +147,7 @@ class BaseAgent:
 
     @property
     def agent_id(self) -> str:
-        """Return the immutable identity used by AgentManager."""
+        """Return the immutable identity of this agent."""
 
         return self._agent_id
 
@@ -177,6 +179,10 @@ class BaseAgent:
     async def startup(self) -> None:
         """Start handlers and build an unambiguous tool routing table."""
 
+        async with self._operation_lock:
+            await self._startup()
+
+    async def _startup(self) -> None:
         await self._ensure_skills_discovered()
 
         if self._started or not self.has_handler_tools:
@@ -209,6 +215,10 @@ class BaseAgent:
     async def shutdown(self) -> None:
         """Release resources owned by all started handlers."""
 
+        async with self._operation_lock:
+            await self._shutdown()
+
+    async def _shutdown(self) -> None:
         if not self._started:
             return
 
@@ -226,10 +236,10 @@ class BaseAgent:
 
         if not self.has_handler_tools:
             raise RuntimeError("tool execution is disabled for this agent")
-        if not self._started:
-            await self.startup()
 
-        return await self._tool_runtime.dispatch(tool_name, arguments)
+        async with self._operation_lock:
+            await self._startup()
+            return await self._tool_runtime.dispatch(tool_name, arguments)
 
     async def chat_text(
         self,
@@ -282,12 +292,13 @@ class BaseAgent:
     async def runtime(self, *, task: str) -> str | None:
         """Run one task and keep the resulting conversation in memory."""
 
-        await self._ensure_ready()
-        await self._prepare_task(task)
+        async with self._operation_lock:
+            await self._startup()
+            await self._prepare_task(task)
 
-        if self.has_handler_tools:
-            return await self._run_react_loop()
-        return await self._run_plain_chat()
+            if self.has_handler_tools:
+                return await self._run_react_loop()
+            return await self._run_plain_chat()
 
     def transform_context(
         self,
@@ -326,9 +337,6 @@ class BaseAgent:
         """Convert agent context messages into model provider messages."""
 
         return convert_to_llm_messages(messages)
-
-    async def _ensure_ready(self) -> None:
-        await self.startup()
 
     async def _ensure_skills_discovered(self) -> None:
         if self._skill_manager is not None:

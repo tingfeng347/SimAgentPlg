@@ -1,7 +1,6 @@
-"""Agent runtime and multi-agent coordination."""
+"""Agent runtime primitives."""
 
 from simagentplg.agent.base import BaseAgent, ModelConfig
-from simagentplg.agent.manager import AgentManager
 from simagentplg.agent.middleware import (
     BashApprovalMiddleware,
     HumanApproval,
@@ -15,7 +14,6 @@ __all__ = [
     "BaseAgent",
     "ModelConfig",
     "StepOutcome",
-    "AgentManager",
     "Middleware",
     "ToolMiddleware",
     "HumanApproval",

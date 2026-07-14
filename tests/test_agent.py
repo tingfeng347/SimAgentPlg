@@ -1343,6 +1343,77 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ["first:before", "second:before", "second:after", "first:after"],
         )
 
+    async def test_outer_tool_middleware_observes_inner_short_circuit(self) -> None:
+        events: list[str] = []
+
+        class ObservingToolMiddleware(ToolMiddleware):
+            async def __call__(
+                self,
+                context: ToolCallContext,
+                call_next: ToolNext,
+            ) -> StepOutcome:
+                events.append("outer:before")
+                try:
+                    return await call_next(context)
+                finally:
+                    events.append("outer:after")
+
+        handler = EchoHandler()
+        blocking = RecordingToolMiddleware(
+            StepOutcome({"status": "blocked"}, should_exit=True)
+        )
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-observe-short-circuit",
+            handlers=[handler],
+            middlewares=[ObservingToolMiddleware(), blocking],
+            client=FakeClient([]),
+        )
+
+        outcome = await agent.dispatch("echo", {"text": "blocked"})
+
+        self.assertEqual(outcome.data, {"status": "blocked"})
+        self.assertEqual(events, ["outer:before", "outer:after"])
+        self.assertEqual(handler.calls, 0)
+
+    async def test_outer_tool_middleware_observes_handler_exception(self) -> None:
+        events: list[str] = []
+
+        class FailingEchoHandler(EchoHandler):
+            async def do_echo(
+                self,
+                arguments: dict[str, Any],
+            ) -> StepOutcome:
+                self.calls += 1
+                raise RuntimeError("handler failed")
+
+        class ObservingToolMiddleware(ToolMiddleware):
+            async def __call__(
+                self,
+                context: ToolCallContext,
+                call_next: ToolNext,
+            ) -> StepOutcome:
+                events.append("outer:before")
+                try:
+                    return await call_next(context)
+                finally:
+                    events.append("outer:after")
+
+        handler = FailingEchoHandler()
+        agent = BaseAgent(
+            TEST_CONFIG,
+            agent_id="middleware-observe-error",
+            handlers=[handler],
+            middlewares=[ObservingToolMiddleware()],
+            client=FakeClient([]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "handler failed"):
+            await agent.dispatch("echo", {"text": "fail"})
+
+        self.assertEqual(events, ["outer:before", "outer:after"])
+        self.assertEqual(handler.calls, 1)
+
     async def test_started_tool_middleware_still_shuts_down_if_disabled(self) -> None:
         middleware = RecordingToolMiddleware()
         agent = BaseAgent(

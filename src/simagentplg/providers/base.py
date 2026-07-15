@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from simagentplg.agent.cancellation import CancellationToken
     from simagentplg.agent.context_builder import ContextBuildResult
 
 
@@ -64,5 +65,7 @@ class ModelAdapter(ABC):
     async def complete(
         self,
         context: "ContextBuildResult",
+        *,
+        cancellation: "CancellationToken | None" = None,
     ) -> AssistantMessage:
-        """Return one complete assistant response for the supplied context."""
+        """Return one complete response and honor the per-run cancellation."""

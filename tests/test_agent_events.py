@@ -8,6 +8,7 @@ from simagentplg import (
     AgentStarted,
     AssistantMessage,
     BaseAgent,
+    CancellationToken,
     MessageCompleted,
     MethodToolHandler,
     ModelAdapter,
@@ -75,7 +76,12 @@ class SequenceModel(ModelAdapter):
     ) -> None:
         self.responses = list(responses)
 
-    async def complete(self, context: Any) -> AssistantMessage:
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AssistantMessage:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -87,7 +93,12 @@ class EchoHandler(MethodToolHandler):
         super().__init__((ECHO_TOOL,))
         self.calls = 0
 
-    async def do_echo(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_echo(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         self.calls += 1
         return StepOutcome({"text": arguments.get("text")})
 
@@ -97,7 +108,12 @@ class FinishHandler(MethodToolHandler):
         super().__init__((FINISH_TOOL,))
         self.control = control
 
-    async def do_finish(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_finish(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome(
             {"summary": arguments.get("summary")},
             control=self.control,

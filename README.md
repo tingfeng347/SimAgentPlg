@@ -106,6 +106,28 @@ print(result.output)
 completed run and raises `AgentRunError` for failed, rejected, or cancelled
 runs.
 
+### Cancelling a run
+
+Each run owns an independent cancellation token. `abort()` requests
+cancellation without waiting, while `wait_for_idle()` settles only after the
+terminal event and all awaited event sinks have completed:
+
+```python
+import asyncio
+
+run = asyncio.create_task(agent.run(task="Perform a long operation."))
+
+agent.abort("stopped by user")
+await agent.wait_for_idle()
+result = await run
+```
+
+An externally aborted run returns `RunStatus.CANCELLED` with
+`StopReason.EXTERNAL_ABORT`. The same agent can be reused for another run.
+Model adapters, tool middleware, and tool handlers receive the run's
+`CancellationToken`; long-running handlers should also use `try/finally` to
+release resources such as subprocesses.
+
 ## Runtime policy
 
 Tool availability and completion policy are independent:
@@ -140,7 +162,7 @@ an async `do_add()` method:
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg import MethodToolHandler, StepOutcome
+from simagentplg import CancellationToken, MethodToolHandler, StepOutcome
 
 ADD_TOOL = {
     "type": "function",
@@ -163,7 +185,12 @@ class MathHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((ADD_TOOL,))
 
-    async def do_add(self, arguments: Mapping[str, Any]) -> StepOutcome:
+    async def do_add(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome(
             {"value": arguments["left"] + arguments["right"]}
         )
@@ -196,7 +223,9 @@ StepOutcome(data, control=ToolControl.CANCEL)
 ```
 
 This lets the runtime distinguish successful completion, policy rejection,
-and cancellation.
+and tool-requested cancellation. `ToolControl.CANCEL` is a tool's business
+decision; external `agent.abort()` uses the separate run cancellation
+protocol.
 
 ## Tool middleware
 

@@ -20,6 +20,7 @@ class StopReason(StrEnum):
     TOOL_COMPLETION = "tool_completion"
     TOOL_REJECTED = "tool_rejected"
     TOOL_CANCELLED = "tool_cancelled"
+    EXTERNAL_ABORT = "external_abort"
     EMPTY_RESPONSE = "empty_response"
     MAX_STEPS = "max_steps"
     MAX_NO_TOOL_RESPONSES = "max_no_tool_responses"

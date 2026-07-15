@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -7,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+from simagentplg.agent.cancellation import AgentCancelledError
 from simagentplg.providers.base import (
     AssistantMessage,
     ModelAdapter,
@@ -14,6 +16,7 @@ from simagentplg.providers.base import (
 )
 
 if TYPE_CHECKING:
+    from simagentplg.agent.cancellation import CancellationToken
     from simagentplg.agent.context_builder import ContextBuildResult
 
 
@@ -97,6 +100,8 @@ class OpenAIModelAdapter(ModelAdapter):
     async def complete(
         self,
         context: "ContextBuildResult",
+        *,
+        cancellation: "CancellationToken | None" = None,
     ) -> AssistantMessage:
         await self.startup()
         client = self._client
@@ -104,12 +109,21 @@ class OpenAIModelAdapter(ModelAdapter):
             raise RuntimeError("OpenAI model client is not initialized")
 
         try:
-            response = await client.chat.completions.create(
+            request = client.chat.completions.create(
                 model=self.config.model,
                 messages=cast(Any, context.llm_messages),
                 temperature=self.config.temperature,
                 tools=cast(Any, context.tools) or None,
             )
+            response = (
+                await cancellation.run(request)
+                if cancellation is not None
+                else await request
+            )
+        except asyncio.CancelledError:
+            raise
+        except AgentCancelledError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"chat completion failed: {exc}") from exc
 

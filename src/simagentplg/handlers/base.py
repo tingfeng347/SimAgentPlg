@@ -2,6 +2,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from simagentplg.agent.cancellation import (
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.types import StepOutcome
 
 ToolSchema = dict[str, Any]
@@ -44,8 +48,10 @@ class BaseHandler(ABC):
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
     ) -> StepOutcome:
-        """Execute a registered tool."""
+        """Execute a registered tool with optional run cancellation."""
 
     @staticmethod
     def _tool_name(tool: ToolSchema) -> str:
@@ -82,6 +88,8 @@ class MethodToolHandler(BaseHandler):
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
     ) -> StepOutcome:
         if not self.can_handle(tool_name):
             raise UnknownToolError(f"unknown tool {tool_name!r}")
@@ -92,7 +100,11 @@ class MethodToolHandler(BaseHandler):
                 f"{type(self).__name__} must define do_{tool_name}()"
             )
 
-        outcome = await method(dict(arguments))
+        token = cancellation or CancellationSource().token
+        outcome = await method(
+            dict(arguments),
+            cancellation=token,
+        )
         if not isinstance(outcome, StepOutcome):
             raise TypeError(
                 f"do_{tool_name}() must return StepOutcome, "

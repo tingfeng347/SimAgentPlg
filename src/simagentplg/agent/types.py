@@ -31,3 +31,4 @@ class ToolCallResult:
     control: ToolControl = ToolControl.CONTINUE
     output: str | None = None
     error: str | None = None
+    cancelled: bool = False

@@ -2,6 +2,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from simagentplg.agent.cancellation import (
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.types import StepOutcome
 from simagentplg.handlers.base import BaseHandler, ToolSchema, UnknownToolError
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
@@ -52,8 +56,13 @@ class McpToolHandler(BaseHandler):
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
     ) -> StepOutcome:
         if not self.can_handle(tool_name):
             raise UnknownToolError(f"unknown MCP tool {tool_name!r}")
-        result = await self.manager.call_tool(tool_name, dict(arguments))
+        token = cancellation or CancellationSource().token
+        result = await token.run(
+            self.manager.call_tool(tool_name, dict(arguments))
+        )
         return StepOutcome(result)

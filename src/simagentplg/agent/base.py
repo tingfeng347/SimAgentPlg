@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from simagentplg.agent.cancellation import CancellationSource
 from simagentplg.agent.context_builder import AgentContextBuilder
 from simagentplg.agent.events import AgentEventEmitter, AgentEventSink
 from simagentplg.agent.orchestrator import AgentOrchestrator
@@ -37,6 +39,11 @@ that returns the completion control signal.
 """.strip()
 
 
+@dataclass(slots=True)
+class _ActiveRun:
+    cancellation: CancellationSource
+
+
 class BaseAgent:
     """Stateful agent core composed with a model adapter and tool handlers."""
 
@@ -64,6 +71,10 @@ class BaseAgent:
         self.middlewares = list(middlewares or ())
         self.event_sink = event_sink
         self._operation_lock = asyncio.Lock()
+        self._active_run: _ActiveRun | None = None
+        self._pending_runs = 0
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
         self.state = AgentState()
@@ -218,9 +229,39 @@ class BaseAgent:
     async def run(self, *, task: str) -> AgentRunResult:
         """Run one task and return a structured terminal result."""
 
-        async with self._operation_lock:
-            await self._startup()
-            return await self.orchestrator.run(task=task)
+        self._pending_runs += 1
+        self._idle_event.clear()
+        try:
+            async with self._operation_lock:
+                source = CancellationSource()
+                active_run = _ActiveRun(source)
+                self._active_run = active_run
+                try:
+                    await self._startup()
+                    return await self.orchestrator.run(
+                        task=task,
+                        cancellation=source.token,
+                    )
+                finally:
+                    if self._active_run is active_run:
+                        self._active_run = None
+        finally:
+            self._pending_runs -= 1
+            if self._pending_runs == 0:
+                self._idle_event.set()
+
+    def abort(self, reason: str | None = None) -> bool:
+        """Request cancellation of the active run without waiting for it."""
+
+        active_run = self._active_run
+        if active_run is None:
+            return False
+        return active_run.cancellation.cancel(reason)
+
+    async def wait_for_idle(self) -> None:
+        """Wait for all requested runs and their event sinks to settle."""
+
+        await self._idle_event.wait()
 
     async def runtime(self, *, task: str) -> str | None:
         """Compatibility wrapper returning completed output as text."""

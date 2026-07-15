@@ -1,6 +1,11 @@
 """Agent runtime primitives."""
 
 from simagentplg.agent.base import BaseAgent
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
 from simagentplg.agent.events import (
     AgentEvent,
@@ -37,6 +42,9 @@ from simagentplg.agent.types import StepOutcome, ToolCallResult, ToolControl
 from simagentplg.agent.state import AgentState, AgentStatus
 __all__ = [
     "BaseAgent",
+    "AgentCancelledError",
+    "CancellationSource",
+    "CancellationToken",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",

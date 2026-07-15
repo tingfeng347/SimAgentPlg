@@ -8,17 +8,19 @@ from typing import TYPE_CHECKING, Any
 from simagentplg.agent.types import StepOutcome
 
 if TYPE_CHECKING:
+    from simagentplg.agent.cancellation import CancellationToken
     from simagentplg.agent.state import AgentState
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCallContext:
-    """Metadata for one tool execution."""
+    """Metadata and cancellation signal for one tool execution."""
 
     state: "AgentState"
     tool_name: str
     arguments: dict[str, Any]
     tool_call_id: str | None = None
+    cancellation: "CancellationToken | None" = None
 
 
 ToolNext = Callable[[ToolCallContext], Awaitable[StepOutcome]]

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import Any
+import asyncio
+from collections.abc import Awaitable
+from typing import Any, Protocol
 
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
@@ -32,7 +38,16 @@ If the work is complete, call a tool that returns completion control now.
 Do not end with plain text.
 """.strip()
 
-ModelCall = Callable[[ContextBuildResult], Awaitable[AssistantMessage]]
+
+class ModelCall(Protocol):
+    """Provider call shape consumed by the orchestrator."""
+
+    def __call__(
+        self,
+        context: ContextBuildResult,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> Awaitable[AssistantMessage]: ...
 
 
 class AgentOrchestrator:
@@ -65,25 +80,39 @@ class AgentOrchestrator:
 
         return self.tool_runtime.tools
 
-    async def run(self, *, task: str) -> AgentRunResult:
+    async def run(
+        self,
+        *,
+        task: str,
+        cancellation: CancellationToken | None = None,
+    ) -> AgentRunResult:
         """Run one task and return its structured terminal result."""
 
+        token = cancellation or CancellationSource().token
         run_id = self.event_emitter.begin_run()
         try:
+            caller_cancellation: asyncio.CancelledError | None = None
             try:
                 self.state.begin_task(task)
                 await self.event_emitter.emit(AgentStarted(task))
-                await self._prepare_task()
-                result = await self._run_loop()
+                await token.run(self._prepare_task())
+                result = await self._run_loop(token)
+            except AgentCancelledError as exc:
+                result = self._cancelled(str(exc))
             except RepeatedToolCallError as exc:
                 result = self._failure(
                     StopReason.REPEATED_TOOL_CALL,
                     str(exc),
                 )
+            except asyncio.CancelledError as exc:
+                caller_cancellation = exc
+                result = self._cancelled("agent run coroutine was cancelled")
             except Exception as exc:
                 result = self._failure(StopReason.RUNTIME_ERROR, str(exc))
             self._commit_result(result)
             await self.event_emitter.emit(AgentFinished(result))
+            if caller_cancellation is not None:
+                raise caller_cancellation
             return result
         finally:
             self.event_emitter.end_run(run_id)
@@ -92,16 +121,21 @@ class AgentOrchestrator:
         await self.tool_runtime.on_task_start()
         self._activate_explicit_skill()
 
-    async def _run_loop(self) -> AgentRunResult:
+    async def _run_loop(
+        self,
+        cancellation: CancellationToken,
+    ) -> AgentRunResult:
         for _ in range(self.policy.max_steps):
+            cancellation.raise_if_cancelled()
             turn = self.state.advance_turn()
             await self.event_emitter.emit(TurnStarted(turn))
             try:
-                message = await self._chat_next_turn()
+                message = await self._chat_next_turn(cancellation)
                 self.state.add_message(message.to_agent_message())
                 await self.event_emitter.emit(
                     MessageCompleted(turn, message)
                 )
+                cancellation.raise_if_cancelled()
 
                 if not message.tool_calls:
                     if not self.policy.require_explicit_finish:
@@ -132,8 +166,17 @@ class AgentOrchestrator:
                     continue
 
                 self.state.no_tool_response_count = 0
-                tool_result = await self._execute_tool_calls(message)
+                tool_result = await self._execute_tool_calls(
+                    message,
+                    cancellation,
+                )
                 self.state.add_messages(list(tool_result.messages))
+                if tool_result.cancelled:
+                    raise AgentCancelledError(
+                        tool_result.error
+                        or cancellation.reason
+                        or "agent run was aborted"
+                    )
                 terminal_result = self._terminal_tool_result(tool_result)
                 if terminal_result is not None:
                     return terminal_result
@@ -146,13 +189,18 @@ class AgentOrchestrator:
             f"{self.policy.max_steps} steps",
         )
 
-    async def _chat_next_turn(self) -> AssistantMessage:
+    async def _chat_next_turn(
+        self,
+        cancellation: CancellationToken,
+    ) -> AssistantMessage:
         context = self.context_builder.build(
             self.state,
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
-        return await self.model_call(context)
+        return await cancellation.run(
+            self.model_call(context, cancellation=cancellation)
+        )
 
     def _runtime_context_messages(self) -> list[dict[str, str]]:
         if self.state.no_tool_response_count == 0:
@@ -195,12 +243,34 @@ class AgentOrchestrator:
     async def _execute_tool_calls(
         self,
         message: AssistantMessage,
+        cancellation: CancellationToken,
     ) -> ToolCallResult:
         result_messages: list[dict[str, Any]] = []
 
-        for tool_call in message.tool_calls or []:
-            tool_result = await self.tool_runtime.execute_tool_call(tool_call)
+        tool_calls = message.tool_calls or ()
+        for index, tool_call in enumerate(tool_calls):
+            tool_result = await self.tool_runtime.execute_tool_call(
+                tool_call,
+                cancellation=cancellation,
+            )
             result_messages.extend(tool_result.messages)
+            if tool_result.cancelled:
+                reason = (
+                    tool_result.error
+                    or cancellation.reason
+                    or "agent run was aborted"
+                )
+                for pending_call in tool_calls[index + 1 :]:
+                    pending_result = await self.tool_runtime.cancel_tool_call(
+                        pending_call,
+                        reason=reason,
+                    )
+                    result_messages.extend(pending_result.messages)
+                return ToolCallResult(
+                    tuple(result_messages),
+                    error=reason,
+                    cancelled=True,
+                )
             if tool_result.control is not ToolControl.CONTINUE:
                 return ToolCallResult(
                     tuple(result_messages),
@@ -209,6 +279,14 @@ class AgentOrchestrator:
                 )
 
         return ToolCallResult(tuple(result_messages))
+
+    def _cancelled(self, error: str) -> AgentRunResult:
+        return AgentRunResult(
+            status=RunStatus.CANCELLED,
+            stop_reason=StopReason.EXTERNAL_ABORT,
+            turns=self.state.turn,
+            error=error,
+        )
 
     def _terminal_tool_result(
         self,

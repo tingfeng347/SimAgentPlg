@@ -3,6 +3,11 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.events import (
     AgentEventEmitter,
     ToolCompleted,
@@ -155,6 +160,7 @@ class ToolRuntime:
         arguments: Mapping[str, Any],
         *,
         tool_call_id: str | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> StepOutcome:
         if not self._started:
             await self.startup()
@@ -162,17 +168,21 @@ class ToolRuntime:
         self._get_handler(tool_name)
         if self._tool_chain is None:
             raise RuntimeError("tool middleware chain is not initialized")
+        token = cancellation or CancellationSource().token
         context = ToolCallContext(
             state=self.state,
             tool_name=tool_name,
             arguments=dict(arguments),
             tool_call_id=tool_call_id,
+            cancellation=token,
         )
-        return await self._tool_chain(context)
+        return await token.run(self._tool_chain(context))
 
     async def execute_tool_call(
         self,
         tool_call: ModelToolCall,
+        *,
+        cancellation: CancellationToken,
     ) -> ToolCallResult:
         tool_name = tool_call.name
         raw_arguments = tool_call.arguments
@@ -189,7 +199,14 @@ class ToolRuntime:
                 tool_name,
                 arguments,
                 tool_call_id=tool_call.id,
+                cancellation=cancellation,
             )
+        except AgentCancelledError as exc:
+            result = self._cancelled_tool_result(tool_call, str(exc))
+            await self.event_emitter.emit(
+                ToolCompleted(self.state.turn, tool_call, result)
+            )
+            return result
         except RepeatedToolCallError as exc:
             result = ToolCallResult((), error=str(exc))
             await self.event_emitter.emit(
@@ -226,6 +243,23 @@ class ToolRuntime:
         )
         return result
 
+    async def cancel_tool_call(
+        self,
+        tool_call: ModelToolCall,
+        *,
+        reason: str,
+    ) -> ToolCallResult:
+        """Settle an unstarted call skipped after run cancellation."""
+
+        await self.event_emitter.emit(
+            ToolStarted(self.state.turn, tool_call)
+        )
+        result = self._cancelled_tool_result(tool_call, reason)
+        await self.event_emitter.emit(
+            ToolCompleted(self.state.turn, tool_call, result)
+        )
+        return result
+
     def _build_tool_routes(self) -> dict[str, BaseHandler]:
         routes: dict[str, BaseHandler] = {}
         for handler in self.handlers:
@@ -250,7 +284,33 @@ class ToolRuntime:
 
     async def _dispatch_handler(self, context: ToolCallContext) -> StepOutcome:
         handler = self._get_handler(context.tool_name)
-        return await handler.dispatch(context.tool_name, context.arguments)
+        return await handler.dispatch(
+            context.tool_name,
+            context.arguments,
+            cancellation=context.cancellation,
+        )
+
+    def _cancelled_tool_result(
+        self,
+        tool_call: ModelToolCall,
+        reason: str,
+    ) -> ToolCallResult:
+        message = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": serialize_tool_result(
+                {
+                    "status": "cancelled",
+                    "tool": tool_call.name,
+                    "error": reason,
+                }
+            ),
+        }
+        return ToolCallResult(
+            (message,),
+            error=reason,
+            cancelled=True,
+        )
 
     def _check_repeated_tool_call(
         self,

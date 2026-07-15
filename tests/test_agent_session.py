@@ -7,6 +7,7 @@ from simagentplg import (
     AgentSession,
     AssistantMessage,
     BaseAgent,
+    CancellationToken,
     CompositeAgentEventSink,
     MemorySessionStorage,
     MethodToolHandler,
@@ -37,7 +38,12 @@ class SequenceModel(ModelAdapter):
         self.responses = list(responses)
         self.contexts: list[tuple[dict[str, Any], ...]] = []
 
-    async def complete(self, context: Any) -> AssistantMessage:
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AssistantMessage:
         self.contexts.append(context.agent_messages)
         return self.responses.pop(0)
 
@@ -46,7 +52,12 @@ class EchoHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((ECHO_TOOL,))
 
-    async def do_echo(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_echo(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome({"text": arguments.get("text")})
 
 

@@ -17,6 +17,7 @@ from simagentplg import (
     AgentState,
     AgentStatus,
     BaseAgent,
+    CancellationToken,
     Middleware,
     McpToolHandler,
     MethodToolHandler,
@@ -147,7 +148,12 @@ class FakeModelAdapter(ModelAdapter):
     async def shutdown(self) -> None:
         self.stopped += 1
 
-    async def complete(self, context: Any) -> FakeMessage:
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> FakeMessage:
         return await self.completions.create(
             messages=context.llm_messages,
             tools=context.tools or None,
@@ -171,7 +177,12 @@ class EchoHandler(MethodToolHandler):
     async def on_task_start(self) -> None:
         self.task_starts += 1
 
-    async def do_echo(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_echo(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         self.calls += 1
         text = arguments.get("text")
         if not isinstance(text, str):
@@ -183,7 +194,12 @@ class DoneHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((DONE_TOOL,))
 
-    async def do_done(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_done(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome(
             {"summary": arguments.get("summary", "")},
             control=ToolControl.COMPLETE,
@@ -434,7 +450,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         active = 0
         maximum = 0
 
-        async def run_loop() -> AgentRunResult:
+        async def run_loop(
+            cancellation: CancellationToken,
+        ) -> AgentRunResult:
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
@@ -1460,6 +1478,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             async def do_echo(
                 self,
                 arguments: dict[str, Any],
+                *,
+                cancellation: CancellationToken | None = None,
             ) -> StepOutcome:
                 self.calls += 1
                 raise RuntimeError("handler failed")

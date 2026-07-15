@@ -2,6 +2,19 @@
 
 from simagentplg.agent.base import BaseAgent
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
+from simagentplg.agent.events import (
+    AgentEvent,
+    AgentEventKind,
+    AgentEventPayload,
+    AgentEventSink,
+    AgentFinished,
+    AgentStarted,
+    MessageCompleted,
+    ToolCompleted,
+    ToolStarted,
+    TurnCompleted,
+    TurnStarted,
+)
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import (
     AgentRunError,
@@ -18,7 +31,7 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import StepOutcome, ToolControl
+from simagentplg.agent.types import StepOutcome, ToolCallResult, ToolControl
 from simagentplg.agent.state import AgentState, AgentStatus
 from simagentplg.handlers import (
     BaseHandler,
@@ -48,6 +61,17 @@ __all__ = [
     "AgentStatus",
     "AgentContextBuilder",
     "ContextBuildResult",
+    "AgentEvent",
+    "AgentEventKind",
+    "AgentEventPayload",
+    "AgentEventSink",
+    "AgentStarted",
+    "TurnStarted",
+    "MessageCompleted",
+    "ToolStarted",
+    "ToolCompleted",
+    "TurnCompleted",
+    "AgentFinished",
     "AgentOrchestrator",
     "RuntimePolicy",
     "AgentRunResult",
@@ -55,6 +79,7 @@ __all__ = [
     "RunStatus",
     "StopReason",
     "StepOutcome",
+    "ToolCallResult",
     "ToolControl",
     "Middleware",
     "ToolMiddleware",

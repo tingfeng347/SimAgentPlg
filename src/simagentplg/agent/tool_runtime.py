@@ -1,11 +1,15 @@
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from typing import Any
 
+from simagentplg.agent.events import (
+    AgentEventEmitter,
+    ToolCompleted,
+    ToolStarted,
+)
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import StepOutcome, ToolControl
+from simagentplg.agent.types import StepOutcome, ToolCallResult, ToolControl
 from simagentplg.handlers.base import BaseHandler
 from simagentplg.middleware import (
     ToolCallContext,
@@ -14,14 +18,6 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
 )
 from simagentplg.providers.base import ModelToolCall
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCallResult:
-    messages: tuple[dict[str, Any], ...]
-    control: ToolControl = ToolControl.CONTINUE
-    output: str | None = None
-
 
 class RepeatedToolCallError(RuntimeError):
     """Raised when an identical tool call reaches the configured limit."""
@@ -37,6 +33,7 @@ class ToolRuntime:
         *,
         state: AgentState,
         logger: logging.Logger,
+        event_emitter: AgentEventEmitter,
         max_repeated_tool_calls: int = 3,
     ) -> None:
         if max_repeated_tool_calls <= 0:
@@ -47,6 +44,7 @@ class ToolRuntime:
         self.middlewares = list(middlewares)
         self.state = state
         self.logger = logger
+        self.event_emitter = event_emitter
         self.max_repeated_tool_calls = max_repeated_tool_calls
         self._tool_routes: dict[str, BaseHandler] = {}
         self._active_middlewares: list[ToolMiddleware] = []
@@ -178,13 +176,12 @@ class ToolRuntime:
     ) -> ToolCallResult:
         tool_name = tool_call.name
         raw_arguments = tool_call.arguments
-        self._check_repeated_tool_call(tool_name, raw_arguments)
-        self.logger.info(
-            "Calling tool %s arguments=%s",
-            tool_name,
-            summarize_for_log(raw_arguments),
+        await self.event_emitter.emit(
+            ToolStarted(self.state.turn, tool_call)
         )
+        error: str | None = None
         try:
+            self._check_repeated_tool_call(tool_name, raw_arguments)
             arguments = json.loads(raw_arguments)
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
@@ -193,24 +190,19 @@ class ToolRuntime:
                 arguments,
                 tool_call_id=tool_call.id,
             )
-            self.logger.info(
-                "Tool %s completed control=%s result=%s",
-                tool_name,
-                outcome.control,
-                summarize_for_log(outcome.data),
+        except RepeatedToolCallError as exc:
+            result = ToolCallResult((), error=str(exc))
+            await self.event_emitter.emit(
+                ToolCompleted(self.state.turn, tool_call, result)
             )
+            raise
         except Exception as exc:
-            self.logger.warning(
-                "Tool %s failed: %s arguments=%s",
-                tool_name,
-                exc,
-                summarize_for_log(raw_arguments),
-            )
+            error = str(exc)
             outcome = StepOutcome(
                 {
                     "status": "error",
                     "tool": tool_name,
-                    "error": str(exc),
+                    "error": error,
                 }
             )
 
@@ -221,12 +213,18 @@ class ToolRuntime:
             "content": serialized,
         }
         if outcome.control is not ToolControl.CONTINUE:
-            return ToolCallResult(
+            result = ToolCallResult(
                 (message,),
                 control=outcome.control,
                 output=serialized,
+                error=error,
             )
-        return ToolCallResult((message,))
+        else:
+            result = ToolCallResult((message,), error=error)
+        await self.event_emitter.emit(
+            ToolCompleted(self.state.turn, tool_call, result)
+        )
+        return result
 
     def _build_tool_routes(self) -> dict[str, BaseHandler]:
         routes: dict[str, BaseHandler] = {}
@@ -288,13 +286,3 @@ def serialize_tool_result(data: Any) -> str:
     if isinstance(data, str):
         return data
     return json.dumps(data, ensure_ascii=False, default=str)
-
-
-def summarize_for_log(data: Any, *, limit: int = 600) -> str:
-    if isinstance(data, str):
-        text = data
-    else:
-        text = json.dumps(data, ensure_ascii=False, default=str)
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}...<truncated {len(text) - limit} chars>"

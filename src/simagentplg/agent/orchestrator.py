@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -8,15 +7,22 @@ from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
 )
+from simagentplg.agent.events import (
+    AgentEventEmitter,
+    AgentFinished,
+    AgentStarted,
+    MessageCompleted,
+    TurnCompleted,
+    TurnStarted,
+)
 from simagentplg.agent.result import AgentRunResult, RunStatus, StopReason
 from simagentplg.agent.runtime_policy import RuntimePolicy
 from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import (
     RepeatedToolCallError,
-    ToolCallResult,
     ToolRuntime,
 )
-from simagentplg.agent.types import ToolControl
+from simagentplg.agent.types import ToolCallResult, ToolControl
 from simagentplg.plugins.skill.skill_manager import SkillManager
 from simagentplg.providers.base import AssistantMessage
 
@@ -42,7 +48,7 @@ class AgentOrchestrator:
         tool_runtime: ToolRuntime,
         skill_manager: SkillManager | None,
         policy: RuntimePolicy,
-        logger: logging.Logger,
+        event_emitter: AgentEventEmitter,
     ) -> None:
         self.agent_id = agent_id
         self.state = state
@@ -51,7 +57,7 @@ class AgentOrchestrator:
         self.tool_runtime = tool_runtime
         self.skill_manager = skill_manager
         self.policy = policy
-        self.logger = logger
+        self.event_emitter = event_emitter
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -62,59 +68,77 @@ class AgentOrchestrator:
     async def run(self, *, task: str) -> AgentRunResult:
         """Run one task and return its structured terminal result."""
 
+        run_id = self.event_emitter.begin_run()
         try:
-            await self._prepare_task(task)
-            result = await self._run_loop()
-        except RepeatedToolCallError as exc:
-            result = self._failure(StopReason.REPEATED_TOOL_CALL, str(exc))
-        except Exception as exc:
-            result = self._failure(StopReason.RUNTIME_ERROR, str(exc))
-        self._commit_result(result)
-        return result
+            try:
+                self.state.begin_task(task)
+                await self.event_emitter.emit(AgentStarted(task))
+                await self._prepare_task()
+                result = await self._run_loop()
+            except RepeatedToolCallError as exc:
+                result = self._failure(
+                    StopReason.REPEATED_TOOL_CALL,
+                    str(exc),
+                )
+            except Exception as exc:
+                result = self._failure(StopReason.RUNTIME_ERROR, str(exc))
+            self._commit_result(result)
+            await self.event_emitter.emit(AgentFinished(result))
+            return result
+        finally:
+            self.event_emitter.end_run(run_id)
 
-    async def _prepare_task(self, task: str) -> None:
-        self.state.begin_task(task)
+    async def _prepare_task(self) -> None:
         await self.tool_runtime.on_task_start()
         self._activate_explicit_skill()
 
     async def _run_loop(self) -> AgentRunResult:
         for _ in range(self.policy.max_steps):
-            message = await self._chat_next_turn()
-            self.state.add_message(message.to_agent_message())
+            turn = self.state.advance_turn()
+            await self.event_emitter.emit(TurnStarted(turn))
+            try:
+                message = await self._chat_next_turn()
+                self.state.add_message(message.to_agent_message())
+                await self.event_emitter.emit(
+                    MessageCompleted(turn, message)
+                )
 
-            if not message.tool_calls:
-                if not self.policy.require_explicit_finish:
-                    if message.content:
-                        return AgentRunResult(
-                            status=RunStatus.COMPLETED,
-                            stop_reason=StopReason.TEXT_RESPONSE,
-                            turns=self.state.turn,
-                            output=message.content,
+                if not message.tool_calls:
+                    if not self.policy.require_explicit_finish:
+                        if message.content:
+                            return AgentRunResult(
+                                status=RunStatus.COMPLETED,
+                                stop_reason=StopReason.TEXT_RESPONSE,
+                                turns=self.state.turn,
+                                output=message.content,
+                            )
+                        return self._failure(
+                            StopReason.EMPTY_RESPONSE,
+                            "chat completion returned empty content",
                         )
-                    return self._failure(
-                        StopReason.EMPTY_RESPONSE,
-                        "chat completion returned empty content",
-                    )
 
-                self.state.no_tool_response_count += 1
-                if (
-                    self.state.no_tool_response_count
-                    >= self.policy.max_no_tool_responses
-                ):
-                    return self._failure(
-                        StopReason.MAX_NO_TOOL_RESPONSES,
-                        "explicit-finish mode produced plain text without a "
-                        "completing tool call "
-                        f"{self.state.no_tool_response_count} consecutive times",
-                    )
-                continue
+                    self.state.no_tool_response_count += 1
+                    if (
+                        self.state.no_tool_response_count
+                        >= self.policy.max_no_tool_responses
+                    ):
+                        return self._failure(
+                            StopReason.MAX_NO_TOOL_RESPONSES,
+                            "explicit-finish mode produced plain text without a "
+                            "completing tool call "
+                            f"{self.state.no_tool_response_count} "
+                            "consecutive times",
+                        )
+                    continue
 
-            self.state.no_tool_response_count = 0
-            tool_result = await self._execute_tool_calls(message)
-            self.state.add_messages(list(tool_result.messages))
-            terminal_result = self._terminal_tool_result(tool_result)
-            if terminal_result is not None:
-                return terminal_result
+                self.state.no_tool_response_count = 0
+                tool_result = await self._execute_tool_calls(message)
+                self.state.add_messages(list(tool_result.messages))
+                terminal_result = self._terminal_tool_result(tool_result)
+                if terminal_result is not None:
+                    return terminal_result
+            finally:
+                await self.event_emitter.emit(TurnCompleted(turn))
 
         return self._failure(
             StopReason.MAX_STEPS,
@@ -123,8 +147,6 @@ class AgentOrchestrator:
         )
 
     async def _chat_next_turn(self) -> AssistantMessage:
-        turn = self.state.advance_turn()
-        self.logger.info("Turn %d/%d", turn, self.policy.max_steps)
         context = self.context_builder.build(
             self.state,
             tools=self.tools,

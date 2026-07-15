@@ -21,3 +21,13 @@ class StepOutcome:
 
     data: Any
     control: ToolControl = ToolControl.CONTINUE
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallResult:
+    """Normalized result of one model-requested tool execution."""
+
+    messages: tuple[AgentMessage, ...]
+    control: ToolControl = ToolControl.CONTINUE
+    output: str | None = None
+    error: str | None = None

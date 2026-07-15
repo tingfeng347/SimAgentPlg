@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from simagentplg.agent.context_builder import AgentContextBuilder
+from simagentplg.agent.events import AgentEventEmitter, AgentEventSink
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.runtime_policy import RuntimePolicy
@@ -50,6 +51,7 @@ class BaseAgent:
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
         runtime_policy: RuntimePolicy | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> None:
         self._agent_id = agent_id.strip()
         if not self._agent_id:
@@ -60,6 +62,7 @@ class BaseAgent:
         self.runtime_policy = policy
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
+        self.event_sink = event_sink
         self._operation_lock = asyncio.Lock()
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
@@ -68,11 +71,17 @@ class BaseAgent:
             skill_manager=self._skill_manager,
         )
         self.logger = get_logger(f"{self.agent_id}")
+        self._event_emitter = AgentEventEmitter(
+            agent_id=self.agent_id,
+            sink=self.event_sink,
+            logger=self.logger,
+        )
         self._tool_runtime = ToolRuntime(
             self.handlers,
             self.middlewares,
             state=self.state,
             logger=self.logger,
+            event_emitter=self._event_emitter,
             max_repeated_tool_calls=policy.max_repeated_tool_calls,
         )
         self.orchestrator = AgentOrchestrator(
@@ -83,7 +92,7 @@ class BaseAgent:
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
-            logger=self.logger,
+            event_emitter=self._event_emitter,
         )
         self.reset()
 

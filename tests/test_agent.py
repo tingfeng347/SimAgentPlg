@@ -1096,7 +1096,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_tool_calls_are_logged(self) -> None:
+    async def test_tool_lifecycle_is_not_duplicated_in_logs(self) -> None:
         client = FakeModelAdapter(
             [
                 FakeMessage(
@@ -1134,11 +1134,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(json.loads(result or "")["summary"], "logged")
         logs = "\n".join(captured.output)
-        self.assertIn("Calling tool echo", logs)
-        self.assertIn('arguments={"text": "hello"}', logs)
-        self.assertIn("Tool echo completed control=continue", logs)
-        self.assertIn("Calling tool done", logs)
-        self.assertIn("Tool done completed control=complete", logs)
+        self.assertIn("registered tools: done, echo", logs)
+        self.assertNotIn("Calling tool", logs)
+        self.assertNotIn("Tool echo completed", logs)
+        self.assertNotIn("Tool done completed", logs)
 
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()

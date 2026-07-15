@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar, Protocol, TypeAlias
@@ -113,6 +114,29 @@ class AgentEventSink(Protocol):
 
     async def emit(self, event: AgentEvent) -> None:
         """Observe an event without changing agent behavior."""
+
+
+class AgentEventSinkError(RuntimeError):
+    """Raised after one or more sinks fail during event fan-out."""
+
+
+class CompositeAgentEventSink:
+    """Forward each event to multiple ordered read-only observers."""
+
+    def __init__(self, sinks: Iterable[AgentEventSink]) -> None:
+        self.sinks = tuple(sinks)
+
+    async def emit(self, event: AgentEvent) -> None:
+        errors: list[Exception] = []
+        for sink in self.sinks:
+            try:
+                await sink.emit(event)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise AgentEventSinkError(
+                f"{len(errors)} agent event sink(s) failed"
+            ) from errors[0]
 
 
 class AgentEventEmitter:

@@ -7,8 +7,10 @@ from simagentplg.agent.events import (
     AgentEventKind,
     AgentEventPayload,
     AgentEventSink,
+    AgentEventSinkError,
     AgentFinished,
     AgentStarted,
+    CompositeAgentEventSink,
     MessageCompleted,
     ToolCompleted,
     ToolStarted,
@@ -49,6 +51,14 @@ from simagentplg.providers import (
     ModelToolCall,
     OpenAIModelAdapter,
 )
+from simagentplg.session import (
+    AgentSession,
+    MemorySessionStorage,
+    SessionMessage,
+    SessionRecorder,
+    SessionRun,
+    SessionStorage,
+)
 
 __all__ = [
     "BaseAgent",
@@ -65,6 +75,8 @@ __all__ = [
     "AgentEventKind",
     "AgentEventPayload",
     "AgentEventSink",
+    "AgentEventSinkError",
+    "CompositeAgentEventSink",
     "AgentStarted",
     "TurnStarted",
     "MessageCompleted",
@@ -94,4 +106,10 @@ __all__ = [
     "UnknownToolError",
     "McpServerManager",
     "SkillManager",
+    "AgentSession",
+    "SessionMessage",
+    "SessionRun",
+    "SessionStorage",
+    "MemorySessionStorage",
+    "SessionRecorder",
 ]

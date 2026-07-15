@@ -5,16 +5,16 @@
 
 ## 1. 当前结论
 
-SimAgentPlg 已完成通用 Agent Core 的执行内核和只读事件协议。目前已经具备稳定的
-模型—工具循环、结构化运行结果、工具运行时、Provider 适配层、MCP 适配、Skill
-上下文资源，以及可供 UI、Session 和遥测消费的统一生命周期事件。
+SimAgentPlg 已完成通用 Agent Core 的执行内核、只读事件协议和线性内存 Session。
+目前已经具备稳定的模型—工具循环、结构化运行结果、工具运行时、Provider 适配层、
+MCP 适配、Skill 上下文资源、统一生命周期事件，以及基于事件保存和恢复对话的能力。
 
 它还不是完整的 Agent Harness。与 Pi 相比，主要缺少的是执行内核之上的控制面：
 
 - 行为型 Hook
 - 流式模型输出和工具进度
 - 外部取消与等待空闲
-- Session 持久化、恢复和分支
+- 持久化 Session 后端和 Session 分支
 - Steering、Follow-up 等消息队列
 - Context Budget 与 Compaction
 - ExecutionEnv 与 Workspace 抽象
@@ -30,7 +30,9 @@ BaseAgent
   │     └── OpenAIModelAdapter
   ├── AgentOrchestrator
   ├── AgentEventEmitter
-  │     └── AgentEventSink（可选）
+  │     └── AgentEventSink / CompositeAgentEventSink（可选）
+  │           └── SessionRecorder
+  │                 └── SessionStorage
   ├── AgentState
   ├── AgentContextBuilder
   ├── ToolRuntime
@@ -50,6 +52,8 @@ BaseAgent
 | `AgentContextBuilder` | 投影每轮上下文，注入 Skill 和临时控制消息 |
 | `AgentEventEmitter` | 生成 run id 和事件序号，发布只读事件并隔离 Sink 异常 |
 | `AgentEventSink` | 观察 Agent、Turn、Message 和 Tool 生命周期 |
+| `SessionRecorder` | 将事件投影为线性 Session，不侵入 Agent Loop |
+| `SessionStorage` | 保存和加载隔离的 Session 快照 |
 | `ModelAdapter` | 隔离 Provider Client、请求调用和响应归一化 |
 | `ToolRuntime` | 工具生命周期、路由、Middleware、执行与重复调用保护 |
 | `BaseHandler` | 一组可执行工具的最小协议 |
@@ -200,6 +204,26 @@ AgentStarted
 warning，不改变 Agent 结果。Turn、Message 和 Tool 的正常流程日志已由结构化事件
 取代；资源启动、连接、回滚和 Sink 自身错误仍使用 Logger 诊断。
 
+### 3.7 线性内存 Session
+
+`SessionRecorder` 实现 `AgentEventSink`，将运行事实投影为 `AgentSession`：
+
+```text
+AgentStarted       → user message + SessionRun
+MessageCompleted   → assistant message
+ToolCompleted      → tool result message
+AgentFinished      → AgentRunResult
+```
+
+Session 只保存真实的 user、assistant 和 tool 对话，不保存 System Prompt、Skill 注入、
+显式完成重试提示或其他临时 Context Projection。`AgentSession.messages` 返回独立副本，
+可以直接传给 `BaseAgent.reset()` 恢复历史。
+
+当前提供 `SessionStorage` 协议和 `MemorySessionStorage`。内存实现对保存值和加载值均
+进行快照隔离；一个 Session 可以关联多次 run，并保存各自的 `run_id`、事件序号边界
+和 `AgentRunResult`。`CompositeAgentEventSink` 支持 Session、UI 和 Metrics 等多个
+观察者同时消费事件，单个普通 Sink 失败不会阻止其他 Sink 接收同一事件。
+
 ## 4. 与 Pi 的关键差异
 
 ### 4.1 Pi 的分层
@@ -272,8 +296,9 @@ SimAgentPlg 的工具集合主要由构造时 Handler 决定，MCP Schema 在启
 | Streaming Output | 无 | 未实现 |
 | External Abort | 无；仅有 Tool `CANCEL` | 未实现 |
 | Wait for Idle | 无 | 未实现 |
-| Session Storage | 无 | 未实现 |
-| Resume / Fork / Tree | 无 | 未实现 |
+| Session Storage | `SessionStorage` + Memory 实现 | 基础版已具备 |
+| Resume | `AgentSession.messages` + `BaseAgent.reset()` | 线性恢复已具备 |
+| Fork / Tree | 无 | 未实现 |
 | Steering / Follow-up | 无 | 未实现 |
 | Context Compaction | 无 | 未实现 |
 | Token / Usage Budget | 无 | 未实现 |
@@ -351,18 +376,20 @@ class AgentEventSink(Protocol):
 不允许 Hook 修改行为；测试已覆盖文本完成、工具调用、终态控制、Provider 异常、
 重复工具调用和 Sink 异常隔离。
 
-### 阶段三：Session——下一步
+### 阶段三：Session——已完成基础版
 
 ```text
-Session
+AgentSession
 SessionStorage
 MemorySessionStorage
-JsonlSessionStorage
+SessionRecorder
+CompositeAgentEventSink
 ```
 
-先实现线性 Session、保存和恢复，再考虑 Fork、Tree 和 Branch Summary。
+已实现线性 Session、内存保存和恢复。`JsonlSessionStorage` 属于可选持久化 Adapter，
+Fork、Tree 和 Branch Summary 留待线性语义稳定后再建设。
 
-### 阶段四：取消与流式输出
+### 阶段四：取消与流式输出——下一步
 
 - Cancellation Token
 - `abort()`
@@ -395,24 +422,24 @@ CodeAgent
 
 ## 8. 下一步任务建议
 
-下一步应基于只读事件协议实现线性 Session，暂时不增加流式输出、分支树或
-CodeAgent 文件工具。
+下一步应先实现外部取消和运行空闲协议，再接 Provider Streaming。取消必须先具备
+稳定的状态与传播边界，否则流式模型和长时间工具会各自形成不兼容的停止逻辑。
 
 推荐第一轮改动范围：
 
 ```text
-src/simagentplg/session/types.py
-src/simagentplg/session/storage.py
-src/simagentplg/session/memory.py
-src/simagentplg/session/recorder.py
-tests/test_agent_session.py
+src/simagentplg/agent/cancellation.py
+src/simagentplg/agent/base.py
+src/simagentplg/agent/orchestrator.py
+src/simagentplg/agent/tool_runtime.py
+tests/test_agent_cancellation.py
 ```
 
 验收标准：
 
-1. Session 具有独立 `session_id`，并可关联多个 `run_id`。
-2. `MemorySessionStorage` 能保存和加载线性 Session。
-3. Recorder 通过 `AgentEventSink` 记录运行，不侵入 Orchestrator。
-4. 保存的终态直接复用 `AgentRunResult` 语义。
-5. 恢复后可以重建对话消息并继续运行。
-6. 第一版不实现 Fork、Tree、Compaction 或数据库后端。
+1. `abort()` 能取消当前运行，但不会破坏 Agent 的后续复用。
+2. `wait_for_idle()` 在运行和事件收尾完成后返回。
+3. 取消能传播到 Model Adapter 和 Tool Runtime 的统一信号。
+4. 取消产生确定的 `TurnCompleted` 和 `AgentFinished(CANCELLED)`。
+5. 没有活动任务时调用 `abort()` 是幂等操作。
+6. 第一轮不同时实现 Text Delta、Thinking Delta 或 Tool Progress。

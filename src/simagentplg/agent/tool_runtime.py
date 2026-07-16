@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Iterable, Mapping
@@ -11,10 +12,17 @@ from simagentplg.agent.cancellation import (
 from simagentplg.agent.events import (
     AgentEventEmitter,
     ToolCompleted,
+    ToolProgressed,
     ToolStarted,
 )
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import StepOutcome, ToolCallResult, ToolControl
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
 from simagentplg.handlers.base import BaseHandler
 from simagentplg.middleware import (
     ToolCallContext,
@@ -24,8 +32,59 @@ from simagentplg.middleware import (
 )
 from simagentplg.providers.base import ModelToolCall
 
+
 class RepeatedToolCallError(RuntimeError):
     """Raised when an identical tool call reaches the configured limit."""
+
+
+class _ScopedToolProgressReporter(ToolProgressReporter):
+    """Serialize updates and reject them after one tool call settles."""
+
+    def __init__(
+        self,
+        *,
+        event_emitter: AgentEventEmitter,
+        turn: int,
+        tool_call: ModelToolCall,
+        cancellation: CancellationToken,
+    ) -> None:
+        self._event_emitter = event_emitter
+        self._turn = turn
+        self._tool_call = tool_call
+        self._cancellation = cancellation
+        self._lock = asyncio.Lock()
+        self._accepting = True
+
+    async def report(self, update: ToolProgressUpdate) -> None:
+        if not isinstance(update, ToolProgressUpdate):
+            raise TypeError(
+                "tool progress reporter requires ToolProgressUpdate, "
+                f"got {type(update).__name__}"
+            )
+
+        async with self._lock:
+            if not self._accepting or self._cancellation.cancelled:
+                return
+            emission = asyncio.create_task(
+                self._event_emitter.emit(
+                    ToolProgressed(
+                        self._turn,
+                        self._tool_call,
+                        update,
+                    )
+                )
+            )
+            try:
+                await asyncio.shield(emission)
+            except asyncio.CancelledError:
+                await asyncio.gather(emission, return_exceptions=True)
+                raise
+
+    async def close(self) -> None:
+        """Wait for an in-flight update, then reject future reports."""
+
+        async with self._lock:
+            self._accepting = False
 
 
 class ToolRuntime:
@@ -161,6 +220,7 @@ class ToolRuntime:
         *,
         tool_call_id: str | None = None,
         cancellation: CancellationToken | None = None,
+        progress: ToolProgressReporter | None = None,
     ) -> StepOutcome:
         if not self._started:
             await self.startup()
@@ -175,6 +235,7 @@ class ToolRuntime:
             arguments=dict(arguments),
             tool_call_id=tool_call_id,
             cancellation=token,
+            progress=progress,
         )
         return await token.run(self._tool_chain(context))
 
@@ -189,40 +250,58 @@ class ToolRuntime:
         await self.event_emitter.emit(
             ToolStarted(self.state.turn, tool_call)
         )
+        progress = _ScopedToolProgressReporter(
+            event_emitter=self.event_emitter,
+            turn=self.state.turn,
+            tool_call=tool_call,
+            cancellation=cancellation,
+        )
         error: str | None = None
+        immediate_result: ToolCallResult | None = None
+        repeated_error: RepeatedToolCallError | None = None
+        outcome: StepOutcome | None = None
         try:
-            self._check_repeated_tool_call(tool_name, raw_arguments)
-            arguments = json.loads(raw_arguments)
-            if not isinstance(arguments, dict):
-                raise TypeError("tool arguments must be a JSON object")
-            outcome = await self.dispatch(
-                tool_name,
-                arguments,
-                tool_call_id=tool_call.id,
-                cancellation=cancellation,
-            )
-        except AgentCancelledError as exc:
-            result = self._cancelled_tool_result(tool_call, str(exc))
-            await self.event_emitter.emit(
-                ToolCompleted(self.state.turn, tool_call, result)
-            )
-            return result
-        except RepeatedToolCallError as exc:
-            result = ToolCallResult((), error=str(exc))
-            await self.event_emitter.emit(
-                ToolCompleted(self.state.turn, tool_call, result)
-            )
-            raise
-        except Exception as exc:
-            error = str(exc)
-            outcome = StepOutcome(
-                {
-                    "status": "error",
-                    "tool": tool_name,
-                    "error": error,
-                }
-            )
+            try:
+                self._check_repeated_tool_call(tool_name, raw_arguments)
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must be a JSON object")
+                outcome = await self.dispatch(
+                    tool_name,
+                    arguments,
+                    tool_call_id=tool_call.id,
+                    cancellation=cancellation,
+                    progress=progress,
+                )
+            except AgentCancelledError as exc:
+                immediate_result = self._cancelled_tool_result(
+                    tool_call,
+                    str(exc),
+                )
+            except RepeatedToolCallError as exc:
+                immediate_result = ToolCallResult((), error=str(exc))
+                repeated_error = exc
+            except Exception as exc:
+                error = str(exc)
+                outcome = StepOutcome(
+                    {
+                        "status": "error",
+                        "tool": tool_name,
+                        "error": error,
+                    }
+                )
+        finally:
+            await progress.close()
 
+        if immediate_result is not None:
+            await self.event_emitter.emit(
+                ToolCompleted(self.state.turn, tool_call, immediate_result)
+            )
+            if repeated_error is not None:
+                raise repeated_error
+            return immediate_result
+
+        assert outcome is not None
         serialized = serialize_tool_result(outcome.data)
         message = {
             "role": "tool",
@@ -284,11 +363,7 @@ class ToolRuntime:
 
     async def _dispatch_handler(self, context: ToolCallContext) -> StepOutcome:
         handler = self._get_handler(context.tool_name)
-        return await handler.dispatch(
-            context.tool_name,
-            context.arguments,
-            cancellation=context.cancellation,
-        )
+        return await handler.execute(context)
 
     def _cancelled_tool_result(
         self,

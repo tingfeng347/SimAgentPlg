@@ -8,7 +8,7 @@ from typing import ClassVar, Protocol, TypeAlias
 from uuid import uuid4
 
 from simagentplg.agent.result import AgentRunResult
-from simagentplg.agent.types import ToolCallResult
+from simagentplg.agent.types import ToolCallResult, ToolProgressUpdate
 from simagentplg.providers.base import AssistantMessage, ModelToolCall
 
 
@@ -21,6 +21,7 @@ class AgentEventKind(StrEnum):
     ASSISTANT_TEXT_DELTA = "assistant_text_delta"
     ASSISTANT_THINKING_DELTA = "assistant_thinking_delta"
     TOOL_STARTED = "tool_started"
+    TOOL_PROGRESSED = "tool_progressed"
     TOOL_COMPLETED = "tool_completed"
     TURN_COMPLETED = "turn_completed"
     AGENT_FINISHED = "agent_finished"
@@ -91,6 +92,20 @@ class ToolStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolProgressed:
+    """One provisional update from the active tool execution."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.TOOL_PROGRESSED
+    turn: int
+    tool_call: ModelToolCall
+    update: ToolProgressUpdate
+
+    def __post_init__(self) -> None:
+        if self.turn <= 0:
+            raise ValueError("turn must be greater than zero")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCompleted:
     """Execution of one normalized model tool call settled."""
 
@@ -123,6 +138,7 @@ AgentEventPayload: TypeAlias = (
     | AssistantTextDelta
     | AssistantThinkingDelta
     | ToolStarted
+    | ToolProgressed
     | ToolCompleted
     | TurnCompleted
     | AgentFinished

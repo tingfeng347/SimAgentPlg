@@ -21,6 +21,7 @@ Requires Python 3.12 or newer.
 - Composable `BaseHandler` and `MethodToolHandler` tool contracts
 - `ToolRuntime` lifecycle, routing, middleware, and repeat-call protection
 - Generic `ToolMiddleware` interception
+- Structured, cancellable Tool Progress events
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -149,9 +150,10 @@ class ConsoleSink:
 `OpenAIModelAdapter` uses a real streaming request. Tool-call fragments are
 assembled inside the provider adapter and only complete `AssistantMessage`
 objects enter Agent state. Thinking Delta remains observation-only and is not
-mixed into normal text or persisted to Session. Existing complete-only adapters remain compatible
-through the default `ModelAdapter.stream()` implementation. Session recording
-ignores provisional deltas and persists only `MessageCompleted`.
+mixed into normal text or persisted to Session. Existing complete-only adapters
+remain compatible through the default `ModelAdapter.stream()` implementation.
+Session recording ignores provisional deltas and persists only
+`MessageCompleted`.
 
 ## Runtime policy
 
@@ -233,6 +235,37 @@ agent = BaseAgent(
 
 Duplicate tool names fail during startup instead of being silently
 overwritten.
+
+### Tool progress
+
+Long-running tools can optionally accept a scoped `progress` reporter. Existing
+`do_*` methods that do not declare this keyword remain compatible:
+
+```python
+from simagentplg import ToolProgressReporter, ToolProgressUpdate
+
+
+async def do_index(
+    self,
+    arguments,
+    *,
+    cancellation,
+    progress: ToolProgressReporter | None = None,
+) -> StepOutcome:
+    if progress is not None:
+        await progress.report(
+            ToolProgressUpdate(
+                "indexing files",
+                {"completed": 12, "total": 40},
+            )
+        )
+    return StepOutcome({"indexed": 40})
+```
+
+Each accepted update becomes a `ToolProgressed` event correlated with the
+current run, turn, and tool call. Updates are ordered, stop after cancellation,
+and are ignored after `ToolCompleted`. They never change `StepOutcome` or
+`ToolControl`, and are not persisted to Agent state or Session.
 
 ### Tool control signals
 
@@ -334,7 +367,8 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
-+ Lifecycle Events + Linear Session + Runtime Cancellation + Provider Streaming
++ Lifecycle Events + Linear Session + Runtime Cancellation
++ Provider Streaming + Tool Progress
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -362,6 +396,7 @@ uv run python examples/08_session_resume.py
 uv run python examples/09_runtime_control.py
 uv run python examples/10_composed_harness.py
 uv run python examples/11_streaming_events.py
+uv run python examples/12_tool_progress.py
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -381,10 +416,10 @@ The package root exports:
 - Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
-- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
-- Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
+- Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`
 

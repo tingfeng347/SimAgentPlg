@@ -176,6 +176,36 @@ agent = BaseAgent(
 
 重复工具名会在启动阶段报错，不会静默覆盖。
 
+### 工具执行进度
+
+长时间运行的工具可以选择声明一个作用域限定的 `progress` Reporter。没有声明该参数的
+现有 `do_*` 方法仍然兼容：
+
+```python
+from simagentplg import ToolProgressReporter, ToolProgressUpdate
+
+
+async def do_index(
+    self,
+    arguments,
+    *,
+    cancellation,
+    progress: ToolProgressReporter | None = None,
+) -> StepOutcome:
+    if progress is not None:
+        await progress.report(
+            ToolProgressUpdate(
+                "正在建立文件索引",
+                {"completed": 12, "total": 40},
+            )
+        )
+    return StepOutcome({"indexed": 40})
+```
+
+每条有效更新都会生成关联当前 run、turn 和 tool call 的 `ToolProgressed` 事件。
+Progress 保持顺序，在取消或 `ToolCompleted` 后停止接收；它不会改变 `StepOutcome`、
+`ToolControl`，也不会写入 Agent State、Session 或模型上下文。
+
 ### 工具控制信号
 
 工具结果数据与运行控制已经分离：

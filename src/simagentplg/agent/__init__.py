@@ -20,6 +20,7 @@ from simagentplg.agent.events import (
     CompositeAgentEventSink,
     MessageCompleted,
     ToolCompleted,
+    ToolProgressed,
     ToolStarted,
     TurnCompleted,
     TurnStarted,
@@ -40,7 +41,13 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import StepOutcome, ToolCallResult, ToolControl
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
 from simagentplg.agent.state import AgentState, AgentStatus
 __all__ = [
     "BaseAgent",
@@ -63,6 +70,7 @@ __all__ = [
     "TurnStarted",
     "MessageCompleted",
     "ToolStarted",
+    "ToolProgressed",
     "ToolCompleted",
     "TurnCompleted",
     "AgentFinished",
@@ -75,6 +83,8 @@ __all__ = [
     "StepOutcome",
     "ToolCallResult",
     "ToolControl",
+    "ToolProgressReporter",
+    "ToolProgressUpdate",
     "Middleware",
     "ToolMiddleware",
     "ToolCallContext",

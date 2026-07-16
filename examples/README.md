@@ -2,7 +2,7 @@
 
 All examples use the environment variables documented in the project README.
 Copy `.env.example` to `.env` and fill in credentials for an OpenAI-compatible
-provider before running them. Examples `07` through `10` exercise the Harness
+provider before running them. Examples `07` through `12` exercise the Harness
 against the real `OpenAIModelAdapter`; they do not use scripted model results.
 
 Run an example from the repository root:
@@ -27,6 +27,8 @@ Every `BaseAgent` declares its own immutable `agent_id`.
   runtime policy, and explicit completion composed as one Harness
 - `11_streaming_events.py`: real provider Thinking and Text Delta events
   rendered as they arrive while the final message remains atomically committed
+- `12_tool_progress.py`: a real provider-triggered tool reports structured,
+  ordered progress before its final result is committed
 
 Run the composed Harness example directly:
 
@@ -57,6 +59,8 @@ skill explicitly loads its full `SKILL.md`, optional `template.md`, and optional
 The event examples use `CompositeAgentEventSink` to attach observers without
 changing the Agent Loop. The Session examples use `SessionRecorder` and
 `MemorySessionStorage`; only real user, assistant, and tool messages are saved.
+Tool Progress is observation-only and is not written to Agent state, Session,
+or the model transcript.
 The runtime-control example distinguishes external `abort()` from
 `ToolControl.CANCEL` and waits until terminal event sinks have settled before
 reporting idle. It waits briefly before aborting the provider request; set

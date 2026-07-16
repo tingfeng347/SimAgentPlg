@@ -1,12 +1,14 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from inspect import Parameter, signature
 from typing import Any
 
 from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
-from simagentplg.agent.types import StepOutcome
+from simagentplg.agent.types import StepOutcome, ToolProgressReporter
+from simagentplg.middleware.base import ToolCallContext
 
 ToolSchema = dict[str, Any]
 
@@ -42,6 +44,20 @@ class BaseHandler(ABC):
 
     def can_handle(self, tool_name: str) -> bool:
         return tool_name in self.tool_names
+
+    async def execute(self, context: ToolCallContext) -> StepOutcome:
+        """Execute a runtime context while adapting legacy dispatch methods."""
+
+        kwargs: dict[str, Any] = {
+            "cancellation": context.cancellation,
+        }
+        if _accepts_keyword(self.dispatch, "progress"):
+            kwargs["progress"] = context.progress
+        return await self.dispatch(
+            context.tool_name,
+            context.arguments,
+            **kwargs,
+        )
 
     @abstractmethod
     async def dispatch(
@@ -90,6 +106,7 @@ class MethodToolHandler(BaseHandler):
         arguments: Mapping[str, Any],
         *,
         cancellation: CancellationToken | None = None,
+        progress: ToolProgressReporter | None = None,
     ) -> StepOutcome:
         if not self.can_handle(tool_name):
             raise UnknownToolError(f"unknown tool {tool_name!r}")
@@ -101,13 +118,29 @@ class MethodToolHandler(BaseHandler):
             )
 
         token = cancellation or CancellationSource().token
-        outcome = await method(
-            dict(arguments),
-            cancellation=token,
-        )
+        kwargs: dict[str, Any] = {"cancellation": token}
+        if _accepts_keyword(method, "progress"):
+            kwargs["progress"] = progress
+        outcome = await method(dict(arguments), **kwargs)
         if not isinstance(outcome, StepOutcome):
             raise TypeError(
                 f"do_{tool_name}() must return StepOutcome, "
                 f"got {type(outcome).__name__}"
             )
         return outcome
+
+
+def _accepts_keyword(callable_: Any, keyword: str) -> bool:
+    """Return whether a callable accepts one explicit or variadic keyword."""
+
+    parameters = signature(callable_).parameters
+    parameter = parameters.get(keyword)
+    if parameter is not None and parameter.kind in {
+        Parameter.POSITIONAL_OR_KEYWORD,
+        Parameter.KEYWORD_ONLY,
+    }:
+        return True
+    return any(
+        item.kind is Parameter.VAR_KEYWORD
+        for item in parameters.values()
+    )

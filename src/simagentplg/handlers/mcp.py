@@ -6,7 +6,7 @@ from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
-from simagentplg.agent.types import StepOutcome
+from simagentplg.agent.types import StepOutcome, ToolProgressReporter
 from simagentplg.handlers.base import BaseHandler, ToolSchema, UnknownToolError
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
 
@@ -58,6 +58,7 @@ class McpToolHandler(BaseHandler):
         arguments: Mapping[str, Any],
         *,
         cancellation: CancellationToken | None = None,
+        progress: ToolProgressReporter | None = None,
     ) -> StepOutcome:
         if not self.can_handle(tool_name):
             raise UnknownToolError(f"unknown MCP tool {tool_name!r}")

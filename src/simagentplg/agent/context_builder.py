@@ -45,7 +45,8 @@ class AgentContextBuilder:
         context = self._copy_messages(state.messages)
         self._insert_skill_context(context, state.active_skill_name)
         context.extend(self._copy_messages(transient_messages))
-        llm_messages = self.convert_to_llm_messages(context)
+        projected = self.convert_to_llm_messages(context)
+        llm_messages = self._strip_internal_metadata(projected)
         return ContextBuildResult(
             agent_messages=tuple(context),
             llm_messages=tuple(llm_messages),
@@ -58,11 +59,25 @@ class AgentContextBuilder:
     ) -> list[AgentMessage]:
         """Convert internal messages into provider-compatible messages.
 
-        The default is copy-only. Subclasses can filter internal records or
-        adapt custom message types without mutating ``AgentState``.
+        The default is copy-only. Subclasses can inspect internal metadata,
+        filter records, or adapt custom message types without mutating
+        ``AgentState``. Core-only metadata is removed after this hook returns.
         """
 
         return self._copy_messages(messages)
+
+    @staticmethod
+    def _strip_internal_metadata(
+        messages: Sequence[Mapping[str, Any]],
+    ) -> list[AgentMessage]:
+        return [
+            {
+                key: value
+                for key, value in message.items()
+                if key != "usage"
+            }
+            for message in messages
+        ]
 
     def _insert_skill_context(
         self,

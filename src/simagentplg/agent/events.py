@@ -9,7 +9,11 @@ from uuid import uuid4
 
 from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.types import ToolCallResult, ToolProgressUpdate
-from simagentplg.providers.base import AssistantMessage, ModelToolCall
+from simagentplg.providers.base import (
+    AssistantMessage,
+    ModelToolCall,
+    ModelUsage,
+)
 
 
 class AgentEventKind(StrEnum):
@@ -50,6 +54,7 @@ class MessageCompleted:
     kind: ClassVar[AgentEventKind] = AgentEventKind.MESSAGE_COMPLETED
     turn: int
     message: AssistantMessage
+    usage: ModelUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)

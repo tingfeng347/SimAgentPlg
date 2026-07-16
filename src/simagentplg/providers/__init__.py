@@ -8,6 +8,7 @@ from simagentplg.providers.base import (
     ModelTextDelta,
     ModelThinkingDelta,
     ModelToolCall,
+    ModelUsage,
 )
 from simagentplg.providers.openai import ModelConfig, OpenAIModelAdapter
 
@@ -19,6 +20,7 @@ __all__ = [
     "ModelThinkingDelta",
     "ModelResponseCompleted",
     "ModelToolCall",
+    "ModelUsage",
     "ModelConfig",
     "OpenAIModelAdapter",
 ]

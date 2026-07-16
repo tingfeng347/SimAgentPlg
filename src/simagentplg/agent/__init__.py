@@ -49,6 +49,7 @@ from simagentplg.agent.types import (
     ToolProgressUpdate,
 )
 from simagentplg.agent.state import AgentState, AgentStatus
+from simagentplg.agent.usage import RunUsage
 __all__ = [
     "BaseAgent",
     "AgentCancelledError",
@@ -80,6 +81,7 @@ __all__ = [
     "AgentRunError",
     "RunStatus",
     "StopReason",
+    "RunUsage",
     "StepOutcome",
     "ToolCallResult",
     "ToolControl",

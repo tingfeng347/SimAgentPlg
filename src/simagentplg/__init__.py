@@ -49,6 +49,7 @@ from simagentplg.agent.types import (
     ToolProgressUpdate,
 )
 from simagentplg.agent.state import AgentState, AgentStatus
+from simagentplg.agent.usage import RunUsage
 from simagentplg.handlers import (
     BaseHandler,
     McpToolHandler,
@@ -67,6 +68,7 @@ from simagentplg.providers import (
     ModelTextDelta,
     ModelThinkingDelta,
     ModelToolCall,
+    ModelUsage,
     OpenAIModelAdapter,
 )
 from simagentplg.session import (
@@ -92,6 +94,7 @@ __all__ = [
     "ModelThinkingDelta",
     "ModelResponseCompleted",
     "ModelToolCall",
+    "ModelUsage",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",
@@ -118,6 +121,7 @@ __all__ = [
     "AgentRunError",
     "RunStatus",
     "StopReason",
+    "RunUsage",
     "StepOutcome",
     "ToolCallResult",
     "ToolControl",

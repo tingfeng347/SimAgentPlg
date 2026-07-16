@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -20,6 +20,7 @@ from simagentplg.providers.base import (
     ModelTextDelta,
     ModelThinkingDelta,
     ModelToolCall,
+    ModelUsage,
 )
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ class ModelConfig:
     base_url: str
     timeout: int = 60
     temperature: float = 0.7
+    include_usage: bool = True
 
     def __post_init__(self) -> None:
         if not self.model:
@@ -46,6 +48,8 @@ class ModelConfig:
             raise ValueError("base_url must not be empty")
         if self.timeout <= 0:
             raise ValueError("timeout must be greater than zero")
+        if not isinstance(self.include_usage, bool):
+            raise TypeError("include_usage must be a bool")
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -69,12 +73,17 @@ class ModelConfig:
                 "LLM_TIMEOUT and LLM_TEMPERATURE must be numeric"
             ) from exc
 
+        include_usage_value = os.getenv("LLM_INCLUDE_USAGE", "true").lower()
+        if include_usage_value not in {"true", "false"}:
+            raise ValueError("LLM_INCLUDE_USAGE must be true or false")
+
         return cls(
             model=model,
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
             temperature=temperature,
+            include_usage=include_usage_value == "true",
         )
 
 
@@ -83,6 +92,35 @@ class _StreamingToolCall:
     id: str = ""
     name: str = ""
     arguments: str = ""
+
+
+def _usage_field(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _normalize_usage(raw_usage: Any) -> ModelUsage:
+    input_tokens = int(_usage_field(raw_usage, "prompt_tokens") or 0)
+    output_tokens = int(_usage_field(raw_usage, "completion_tokens") or 0)
+    prompt_details = _usage_field(raw_usage, "prompt_tokens_details")
+    completion_details = _usage_field(
+        raw_usage,
+        "completion_tokens_details",
+    )
+    cache_read = _usage_field(prompt_details, "cached_tokens")
+    cache_write = _usage_field(prompt_details, "cache_write_tokens")
+    reasoning = _usage_field(completion_details, "reasoning_tokens")
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        cache_read_tokens=int(cache_read) if cache_read is not None else None,
+        cache_write_tokens=(
+            int(cache_write) if cache_write is not None else None
+        ),
+        reasoning_tokens=int(reasoning) if reasoning is not None else None,
+    )
 
 
 class OpenAIModelAdapter(ModelAdapter):
@@ -174,14 +212,18 @@ class OpenAIModelAdapter(ModelAdapter):
         content_parts: list[str] = []
         tool_calls: dict[int, _StreamingToolCall] = {}
         has_finish_reason = False
+        usage: ModelUsage | None = None
         try:
-            request = client.chat.completions.create(
-                model=self.config.model,
-                messages=cast(Any, context.llm_messages),
-                temperature=self.config.temperature,
-                tools=cast(Any, context.tools) or None,
-                stream=True,
-            )
+            request_options: dict[str, Any] = {
+                "model": self.config.model,
+                "messages": cast(Any, context.llm_messages),
+                "temperature": self.config.temperature,
+                "tools": cast(Any, context.tools) or None,
+                "stream": True,
+            }
+            if self.config.include_usage:
+                request_options["stream_options"] = {"include_usage": True}
+            request = client.chat.completions.create(**request_options)
             response = (
                 await cancellation.run(request)
                 if cancellation is not None
@@ -196,10 +238,14 @@ class OpenAIModelAdapter(ModelAdapter):
                     chunk = (
                         await cancellation.run(next_chunk)
                         if cancellation is not None
-                        else await next_chunk
+                        else await next_chunkq
                     )
                 except StopAsyncIteration:
                     break
+
+                raw_usage = getattr(chunk, "usage", None)
+                if raw_usage is not None:
+                    usage = _normalize_usage(raw_usage)
 
                 choices = getattr(chunk, "choices", None) or ()
                 if not choices:
@@ -289,5 +335,6 @@ class OpenAIModelAdapter(ModelAdapter):
             AssistantMessage(
                 content="".join(content_parts) or None,
                 tool_calls=tuple(normalized_tool_calls),
-            )
+            ),
+            usage=usage,
         )

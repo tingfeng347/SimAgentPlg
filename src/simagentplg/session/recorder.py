@@ -7,6 +7,7 @@ from simagentplg.agent.events import (
     MessageCompleted,
     ToolCompleted,
 )
+from simagentplg.providers.base import serialize_assistant_message
 from simagentplg.session.storage import SessionStorage
 from simagentplg.session.types import AgentSession
 
@@ -51,7 +52,10 @@ class SessionRecorder:
                 session.append_message(
                     event.run_id,
                     event.sequence,
-                    payload.message.to_agent_message(),
+                    serialize_assistant_message(
+                        payload.message,
+                        usage=payload.usage,
+                    ),
                 )
             elif isinstance(payload, ToolCompleted):
                 for message in payload.result.messages:

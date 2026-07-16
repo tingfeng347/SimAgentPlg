@@ -22,6 +22,7 @@ Requires Python 3.12 or newer.
 - `ToolRuntime` lifecycle, routing, middleware, and repeat-call protection
 - Generic `ToolMiddleware` interception
 - Structured, cancellable Tool Progress events
+- Provider-neutral token Usage and per-run budget guards
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -48,6 +49,7 @@ MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
+LLM_INCLUDE_USAGE=true
 ```
 
 `ModelConfig` belongs to `OpenAIModelAdapter`, rather than to `BaseAgent`.
@@ -155,6 +157,26 @@ remain compatible through the default `ModelAdapter.stream()` implementation.
 Session recording ignores provisional deltas and persists only
 `MessageCompleted`.
 
+### Usage and run budgets
+
+`ModelResponseCompleted` carries optional provider-neutral `ModelUsage`.
+Reported Usage is attached to internal agent messages and Session history, but
+`AgentContextBuilder` removes it from the final `llm_messages` sent to the
+Provider. `AgentRunResult.usage` aggregates all attempted requests while
+preserving whether every request actually reported Usage:
+
+```python
+result = await agent.run(task="Inspect the project.")
+
+print(result.usage.total_tokens)
+print(result.usage.request_count)
+print(result.usage.complete)
+```
+
+Unknown Usage is distinct from zero. Complete-only adapters remain compatible
+and produce an incomplete `RunUsage` unless they override `stream()` with a
+terminal Usage value.
+
 ## Runtime policy
 
 Tool availability and completion policy are independent:
@@ -166,9 +188,17 @@ policy = RuntimePolicy(
     max_steps=20,
     max_no_tool_responses=3,
     max_repeated_tool_calls=3,
+    max_run_tokens=None,
     require_explicit_finish=False,
 )
 ```
+
+`max_run_tokens` is an optional cumulative model-request budget. It is checked
+between turns: the current response and its requested tools settle first, then
+the guard prevents another Provider request with
+`StopReason.TOKEN_BUDGET_EXCEEDED`. If another request is needed but Usage was
+not reported, the run stops with `StopReason.USAGE_UNAVAILABLE` instead of
+treating unknown Usage as zero.
 
 By default, an agent may call tools and later complete with ordinary text. A
 derived autonomous agent can require a completion tool:
@@ -368,7 +398,7 @@ SimAgentPlg core owns mechanisms:
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Linear Session + Runtime Cancellation
-+ Provider Streaming + Tool Progress
++ Provider Streaming + Tool Progress + Usage Accounting + Run Budget
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -397,6 +427,7 @@ uv run python examples/09_runtime_control.py
 uv run python examples/10_composed_harness.py
 uv run python examples/11_streaming_events.py
 uv run python examples/12_tool_progress.py
+uv run python examples/13_usage_budget.py
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -413,8 +444,8 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
-- Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
+- Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`

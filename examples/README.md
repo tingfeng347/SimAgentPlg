@@ -2,7 +2,7 @@
 
 All examples use the environment variables documented in the project README.
 Copy `.env.example` to `.env` and fill in credentials for an OpenAI-compatible
-provider before running them. Examples `07` through `12` exercise the Harness
+provider before running them. Examples `07` through `13` exercise the Harness
 against the real `OpenAIModelAdapter`; they do not use scripted model results.
 
 Run an example from the repository root:
@@ -29,6 +29,8 @@ Every `BaseAgent` declares its own immutable `agent_id`.
   rendered as they arrive while the final message remains atomically committed
 - `12_tool_progress.py`: a real provider-triggered tool reports structured,
   ordered progress before its final result is committed
+- `13_usage_budget.py`: real Provider Usage is normalized, aggregated, and used
+  to stop before an intentionally over-budget follow-up request
 
 Run the composed Harness example directly:
 
@@ -46,6 +48,9 @@ plain text completes a task by default. A derived agent can require explicit
 completion through `RuntimePolicy` and return
 `StepOutcome(..., control=ToolControl.COMPLETE)` from its own completion tool.
 The repeated-tool-call guard remains configurable through the same policy.
+Example `13` defaults `HARNESS_MAX_RUN_TOKENS` to `1` so its first reported
+response exhausts the budget after the requested tool settles. Set a larger
+value to observe additional turns.
 
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server

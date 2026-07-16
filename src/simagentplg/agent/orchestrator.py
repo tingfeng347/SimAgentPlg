@@ -32,6 +32,7 @@ from simagentplg.agent.tool_runtime import (
     ToolRuntime,
 )
 from simagentplg.agent.types import ToolCallResult, ToolControl
+from simagentplg.agent.usage import UsageAccumulator
 from simagentplg.plugins.skill.skill_manager import SkillManager
 from simagentplg.providers.base import (
     AssistantMessage,
@@ -39,6 +40,7 @@ from simagentplg.providers.base import (
     ModelStreamEvent,
     ModelTextDelta,
     ModelThinkingDelta,
+    serialize_assistant_message,
 )
 
 TOOL_COMPLETION_RETRY_PROMPT = """
@@ -82,6 +84,7 @@ class AgentOrchestrator:
         self.skill_manager = skill_manager
         self.policy = policy
         self.event_emitter = event_emitter
+        self._usage = UsageAccumulator()
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -98,6 +101,7 @@ class AgentOrchestrator:
         """Run one task and return its structured terminal result."""
 
         token = cancellation or CancellationSource().token
+        self._usage = UsageAccumulator()
         run_id = self.event_emitter.begin_run()
         try:
             caller_cancellation: asyncio.CancelledError | None = None
@@ -136,13 +140,23 @@ class AgentOrchestrator:
     ) -> AgentRunResult:
         for _ in range(self.policy.max_steps):
             cancellation.raise_if_cancelled()
+            budget_failure = self._budget_failure()
+            if budget_failure is not None:
+                return budget_failure
             turn = self.state.advance_turn()
             await self.event_emitter.emit(TurnStarted(turn))
             try:
-                message = await self._chat_next_turn(cancellation)
-                self.state.add_message(message.to_agent_message())
+                response = await self._chat_next_turn(cancellation)
+                message = response.message
+                self._usage.record(response.usage)
+                self.state.add_message(
+                    serialize_assistant_message(
+                        message,
+                        usage=response.usage,
+                    )
+                )
                 await self.event_emitter.emit(
-                    MessageCompleted(turn, message)
+                    MessageCompleted(turn, message, response.usage)
                 )
                 cancellation.raise_if_cancelled()
 
@@ -154,6 +168,7 @@ class AgentOrchestrator:
                                 stop_reason=StopReason.TEXT_RESPONSE,
                                 turns=self.state.turn,
                                 output=message.content,
+                                usage=self._usage.snapshot(),
                             )
                         return self._failure(
                             StopReason.EMPTY_RESPONSE,
@@ -201,18 +216,19 @@ class AgentOrchestrator:
     async def _chat_next_turn(
         self,
         cancellation: CancellationToken,
-    ) -> AssistantMessage:
+    ) -> ModelResponseCompleted:
         context = self.context_builder.build(
             self.state,
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
+        self._usage.begin_request()
         stream = self.model_stream(
             context,
             cancellation=cancellation,
         )
         iterator = stream.__aiter__()
-        completed: AssistantMessage | None = None
+        completed: ModelResponseCompleted | None = None
         try:
             while completed is None:
                 cancellation.raise_if_cancelled()
@@ -233,7 +249,7 @@ class AgentOrchestrator:
                         )
                     )
                 elif isinstance(event, ModelResponseCompleted):
-                    completed = event.message
+                    completed = event
                 else:
                     raise TypeError(
                         "model stream returned an unsupported event: "
@@ -250,6 +266,29 @@ class AgentOrchestrator:
                 "model stream ended without a completed response"
             )
         return completed
+
+    def _budget_failure(self) -> AgentRunResult | None:
+        limit = self.policy.max_run_tokens
+        if limit is None:
+            return None
+
+        usage = self._usage.snapshot()
+        if usage.request_count == 0:
+            return None
+        if not usage.complete:
+            return self._failure(
+                StopReason.USAGE_UNAVAILABLE,
+                "run token budget cannot continue because "
+                f"{usage.missing_request_count} model request(s) did not "
+                "report usage",
+            )
+        if usage.total_tokens >= limit:
+            return self._failure(
+                StopReason.TOKEN_BUDGET_EXCEEDED,
+                f"run used {usage.total_tokens} tokens and cannot start "
+                f"another model request under the {limit}-token budget",
+            )
+        return None
 
     def _runtime_context_messages(self) -> list[dict[str, str]]:
         if self.state.no_tool_response_count == 0:
@@ -335,6 +374,7 @@ class AgentOrchestrator:
             stop_reason=StopReason.EXTERNAL_ABORT,
             turns=self.state.turn,
             error=error,
+            usage=self._usage.snapshot(),
         )
 
     def _terminal_tool_result(
@@ -349,6 +389,7 @@ class AgentOrchestrator:
                 stop_reason=StopReason.TOOL_COMPLETION,
                 turns=self.state.turn,
                 output=tool_result.output,
+                usage=self._usage.snapshot(),
             )
         if tool_result.control is ToolControl.REJECT:
             return AgentRunResult(
@@ -357,6 +398,7 @@ class AgentOrchestrator:
                 turns=self.state.turn,
                 output=tool_result.output,
                 error="tool execution was rejected",
+                usage=self._usage.snapshot(),
             )
         return AgentRunResult(
             status=RunStatus.CANCELLED,
@@ -364,6 +406,7 @@ class AgentOrchestrator:
             turns=self.state.turn,
             output=tool_result.output,
             error="tool execution was cancelled",
+            usage=self._usage.snapshot(),
         )
 
     def _failure(
@@ -376,6 +419,7 @@ class AgentOrchestrator:
             stop_reason=stop_reason,
             turns=self.state.turn,
             error=error,
+            usage=self._usage.snapshot(),
         )
 
     def _commit_result(self, result: AgentRunResult) -> None:

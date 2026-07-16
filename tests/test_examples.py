@@ -2,7 +2,7 @@ import runpy
 import unittest
 from pathlib import Path
 
-from simagentplg import MethodToolHandler, SkillManager
+from simagentplg import MethodToolHandler, OpenAIModelAdapter, SkillManager
 
 EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
 
@@ -41,6 +41,27 @@ class ExampleTests(unittest.IsolatedAsyncioTestCase):
         skill = manager._skills["release_notes"]
         self.assertIsNotNone(skill.template_md)
         self.assertIsNotNone(skill.sample_md)
+
+    def test_harness_examples_use_real_provider_adapter(self) -> None:
+        for filename in (
+            "07_event_observers.py",
+            "08_session_resume.py",
+            "09_runtime_control.py",
+            "10_composed_harness.py",
+        ):
+            with self.subTest(example=filename):
+                namespace = runpy.run_path(
+                    EXAMPLES_DIR / filename,
+                    run_name="example_test",
+                )
+                if filename == "09_runtime_control.py":
+                    adapter = namespace["ObservableOpenAIModelAdapter"]
+                    self.assertTrue(issubclass(adapter, OpenAIModelAdapter))
+                else:
+                    self.assertIs(
+                        namespace["OpenAIModelAdapter"],
+                        OpenAIModelAdapter,
+                    )
 
     def test_skill_manager_requires_an_explicit_root(self) -> None:
         with self.assertRaisesRegex(TypeError, "skills_root"):

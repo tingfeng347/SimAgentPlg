@@ -309,6 +309,7 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
++ Lifecycle Events + Linear Session + Runtime Cancellation
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -324,11 +325,21 @@ architecture analysis and future roadmap.
 ## Examples
 
 ```bash
+# Provider-backed examples
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
+
+# Harness examples using the configured real provider
+uv run python examples/07_event_observers.py
+uv run python examples/08_session_resume.py
+uv run python examples/09_runtime_control.py
+uv run python examples/10_composed_harness.py
 ```
+
+See [the examples guide](examples/README.md) for the capability demonstrated by
+each file.
 
 ## Tests
 
@@ -343,6 +354,9 @@ The package root exports:
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
 - Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
+- Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
 - Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`

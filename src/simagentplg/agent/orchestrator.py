@@ -18,6 +18,7 @@ from simagentplg.agent.events import (
     AgentEventEmitter,
     AgentFinished,
     AgentStarted,
+    AssistantThinkingDelta,
     AssistantTextDelta,
     MessageCompleted,
     TurnCompleted,
@@ -37,6 +38,7 @@ from simagentplg.providers.base import (
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
+    ModelThinkingDelta,
 )
 
 TOOL_COMPLETION_RETRY_PROMPT = """
@@ -222,6 +224,13 @@ class AgentOrchestrator:
                 if isinstance(event, ModelTextDelta):
                     await self.event_emitter.emit(
                         AssistantTextDelta(self.state.turn, event.delta)
+                    )
+                elif isinstance(event, ModelThinkingDelta):
+                    await self.event_emitter.emit(
+                        AssistantThinkingDelta(
+                            self.state.turn,
+                            event.delta,
+                        )
                     )
                 elif isinstance(event, ModelResponseCompleted):
                     completed = event.message

@@ -1,10 +1,11 @@
-"""Render real provider text deltas from the Harness event stream."""
+"""Render real provider Thinking and Text deltas from Harness events."""
 
 import asyncio
 
 from simagentplg import (
     AgentEvent,
     AgentFinished,
+    AssistantThinkingDelta,
     AssistantTextDelta,
     BaseAgent,
     MessageCompleted,
@@ -16,10 +17,19 @@ from simagentplg import (
 class StreamingConsoleSink:
     def __init__(self) -> None:
         self.received_delta = False
+        self.in_thinking = False
 
     async def emit(self, event: AgentEvent) -> None:
         payload = event.payload
-        if isinstance(payload, AssistantTextDelta):
+        if isinstance(payload, AssistantThinkingDelta):
+            if not self.in_thinking:
+                self.in_thinking = True
+                print("[thinking] ", end="", flush=True)
+            print(payload.delta, end="", flush=True)
+        elif isinstance(payload, AssistantTextDelta):
+            if self.in_thinking:
+                self.in_thinking = False
+                print("\n[answer] ", end="", flush=True)
             self.received_delta = True
             print(payload.delta, end="", flush=True)
         elif isinstance(payload, MessageCompleted) and self.received_delta:
@@ -41,12 +51,7 @@ async def main() -> None:
     )
 
     try:
-        result = await agent.run(
-            task=(
-                "In three short sentences, explain why streaming improves "
-                "an Agent Harness user experience."
-            )
-        )
+        result = await agent.run(task="你有什么能力")
         if not result.succeeded:
             result.raise_for_status()
     finally:

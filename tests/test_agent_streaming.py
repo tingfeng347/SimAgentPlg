@@ -11,6 +11,7 @@ from simagentplg import (
     AgentStarted,
     AgentState,
     AssistantMessage,
+    AssistantThinkingDelta,
     AssistantTextDelta,
     BaseAgent,
     CancellationToken,
@@ -23,6 +24,7 @@ from simagentplg import (
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
+    ModelThinkingDelta,
     ModelToolCall,
     OpenAIModelAdapter,
     RunStatus,
@@ -97,6 +99,27 @@ class CompleteOnlyModel(ModelAdapter):
         return AssistantMessage(content="fallback")
 
 
+class StreamingThinkingModel(ModelAdapter):
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AssistantMessage:
+        raise AssertionError("stream() should be used by the orchestrator")
+
+    async def stream(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        yield ModelThinkingDelta("inspect ")
+        yield ModelThinkingDelta("context")
+        yield ModelTextDelta("final")
+        yield ModelResponseCompleted(AssistantMessage(content="final"))
+
+
 class BlockingStreamModel(ModelAdapter):
     def __init__(self) -> None:
         self.blocked = asyncio.Event()
@@ -117,6 +140,33 @@ class BlockingStreamModel(ModelAdapter):
         cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         yield ModelTextDelta("partial")
+        self.blocked.set()
+        try:
+            await asyncio.Future()
+        finally:
+            self.closed.set()
+
+
+class BlockingThinkingStreamModel(ModelAdapter):
+    def __init__(self) -> None:
+        self.blocked = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AssistantMessage:
+        raise AssertionError("stream() should be used by the orchestrator")
+
+    async def stream(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        yield ModelThinkingDelta("unfinished reasoning")
         self.blocked.set()
         try:
             await asyncio.Future()
@@ -218,6 +268,9 @@ def chunk(
     content: str | None = None,
     tool_calls: list[Any] | None = None,
     finish_reason: str | None = None,
+    reasoning_content: str | None = None,
+    reasoning: str | None = None,
+    reasoning_text: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         choices=[
@@ -226,6 +279,9 @@ def chunk(
                 delta=SimpleNamespace(
                     content=content,
                     tool_calls=tool_calls,
+                    reasoning_content=reasoning_content,
+                    reasoning=reasoning,
+                    reasoning_text=reasoning_text,
                 )
             )
         ]
@@ -300,6 +356,48 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_thinking_deltas_are_observable_but_not_persisted(
+        self,
+    ) -> None:
+        storage = MemorySessionStorage()
+        recorder = SessionRecorder(session_id="thinking", storage=storage)
+        observer = RecordingSink()
+        agent = BaseAgent(
+            StreamingThinkingModel(),
+            agent_id="thinking-agent",
+            event_sink=CompositeAgentEventSink([observer, recorder]),
+        )
+
+        result = await agent.run(task="reason then answer")
+        session = await recorder.load()
+
+        self.assertEqual(result.output, "final")
+        self.assertEqual(
+            [type(payload) for payload in payloads(observer)],
+            [
+                AgentStarted,
+                TurnStarted,
+                AssistantThinkingDelta,
+                AssistantThinkingDelta,
+                AssistantTextDelta,
+                MessageCompleted,
+                TurnCompleted,
+                AgentFinished,
+            ],
+        )
+        thinking = [
+            payload.delta
+            for payload in payloads(observer)
+            if isinstance(payload, AssistantThinkingDelta)
+        ]
+        self.assertEqual(thinking, ["inspect ", "context"])
+        self.assertNotIn("thinking", agent.messages[-1])
+        assert session is not None
+        self.assertEqual(
+            [message["content"] for message in session.messages],
+            ["reason then answer", "final"],
+        )
+
     async def test_abort_discards_partial_message_but_finishes_session(
         self,
     ) -> None:
@@ -354,6 +452,48 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.stop_reason, StopReason.TOOL_COMPLETION)
         self.assertIn("streamed tool", result.output or "")
 
+    async def test_abort_during_thinking_discards_provisional_reasoning(
+        self,
+    ) -> None:
+        model = BlockingThinkingStreamModel()
+        storage = MemorySessionStorage()
+        recorder = SessionRecorder(
+            session_id="abort-thinking",
+            storage=storage,
+        )
+        observer = RecordingSink()
+        agent = BaseAgent(
+            model,
+            agent_id="abort-thinking",
+            event_sink=CompositeAgentEventSink([observer, recorder]),
+        )
+        run = asyncio.create_task(agent.run(task="abort reasoning"))
+        await model.blocked.wait()
+
+        agent.abort("stop thinking")
+        result = await run
+        session = await recorder.load()
+
+        self.assertEqual(result.status, RunStatus.CANCELLED)
+        self.assertTrue(model.closed.is_set())
+        self.assertTrue(
+            any(
+                isinstance(payload, AssistantThinkingDelta)
+                for payload in payloads(observer)
+            )
+        )
+        self.assertFalse(
+            any(
+                isinstance(payload, MessageCompleted)
+                for payload in payloads(observer)
+            )
+        )
+        assert session is not None
+        self.assertEqual(
+            [message["role"] for message in session.messages],
+            ["user"],
+        )
+
     async def test_missing_stream_terminal_event_is_runtime_failure(self) -> None:
         agent = BaseAgent(MissingTerminalModel(), agent_id="missing-terminal")
 
@@ -382,6 +522,11 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         response = FakeOpenAIStream(
             [
+                chunk(
+                    reasoning_content="reason ",
+                    reasoning="reason ",
+                ),
+                chunk(reasoning_text="carefully"),
                 chunk(content="Hello "),
                 chunk(content="world"),
                 chunk(tool_calls=[first_tool_delta]),
@@ -405,6 +550,14 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [event.delta for event in events if isinstance(event, ModelTextDelta)],
             ["Hello ", "world"],
+        )
+        self.assertEqual(
+            [
+                event.delta
+                for event in events
+                if isinstance(event, ModelThinkingDelta)
+            ],
+            ["reason ", "carefully"],
         )
         terminal = events[-1]
         assert isinstance(terminal, ModelResponseCompleted)

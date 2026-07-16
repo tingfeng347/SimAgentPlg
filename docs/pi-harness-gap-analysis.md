@@ -6,14 +6,14 @@
 ## 1. 当前结论
 
 SimAgentPlg 已完成通用 Agent Core 的执行内核、只读事件协议、线性内存 Session、
-基础运行控制协议和 Provider-neutral 文本流。
+基础运行控制协议和 Provider-neutral Text / Thinking 流。
 目前已经具备稳定的模型—工具循环、结构化运行结果、工具运行时、Provider 适配层、
 MCP 适配、Skill 上下文资源、统一生命周期事件，以及基于事件保存和恢复对话的能力。
 
 它还不是完整的 Agent Harness。与 Pi 相比，主要缺少的是执行内核之上的控制面：
 
 - 行为型 Hook
-- Thinking Delta 和工具进度
+- 工具执行进度
 - 持久化 Session 后端和 Session 分支
 - Steering、Follow-up 等消息队列
 - Context Budget 与 Compaction
@@ -246,24 +246,26 @@ Event Sink 收尾。取消信号只中止模型与工具工作，不中止终态
 取消后会为下一次 Run 创建新 Token 并可正常复用。当前 Token 已传到 Tool Handler，
 未来 subprocess 工具仍需在 ExecutionEnv Adapter 中把它落实为进程终止。
 
-### 3.9 Provider-neutral 文本流
+### 3.9 Provider-neutral Text / Thinking 流
 
-`ModelAdapter.stream()` 以 `ModelTextDelta` 和唯一终态 `ModelResponseCompleted` 描述
-Provider 输出。complete-only Adapter 通过基类默认实现自动转换为单终态流；
+`ModelAdapter.stream()` 以 `ModelTextDelta`、`ModelThinkingDelta` 和唯一终态
+`ModelResponseCompleted` 描述 Provider 输出。complete-only Adapter 通过基类默认实现
+自动转换为单终态流；
 `OpenAIModelAdapter` 使用真实 `stream=True` 请求，并在内部组装 Tool Call 的 id、name
 和 arguments，不向 Core 暴露 OpenAI Chunk 类型。
 
-Orchestrator 将文本片段发布为 `AssistantTextDelta`，但不会把 partial message 写入
-`AgentState`。只有最终 `ModelResponseCompleted` 才提交 `AssistantMessage` 并发布
-`MessageCompleted`。`SessionRecorder` 忽略 Delta，因此正常完成只保存最终消息；中途
-abort 会关闭 Provider Stream，保留 Delta 作为观察数据，但不会把半截文本写入 State
-或 Session。
+Orchestrator 将文本和推理片段分别发布为 `AssistantTextDelta` 与
+`AssistantThinkingDelta`，但不会把 partial message 写入 `AgentState`。Thinking 不混入
+普通文本，默认也不进入 Session 或下一轮模型上下文。只有最终
+`ModelResponseCompleted` 才提交 `AssistantMessage` 并发布 `MessageCompleted`。
+`SessionRecorder` 忽略所有 Delta；中途 abort 会关闭 Provider Stream，但不会把半截
+文本或推理写入 State 和 Session。
 
 事件序列保持同一个 `run_id` 和单调 `sequence`：
 
 ```text
 TurnStarted
-  → AssistantTextDelta*
+  → AssistantThinkingDelta* / AssistantTextDelta*
   → MessageCompleted
   → ToolStarted / ToolCompleted（可选）
   → TurnCompleted
@@ -340,8 +342,9 @@ Steering / Follow-up 队列，因此 `BaseAgent.abort()` 只负责当前活动 R
 ### 4.6 流式消息语义
 
 Pi 使用 `message_start / message_update / message_end`，Update 携带完整 partial message
-快照，并在 Agent State 中维护 `streamingMessage`。SimAgentPlg 第一版只发布不可变的
-`AssistantTextDelta`，partial 不进入 `AgentState`；`MessageCompleted` 仍是消息提交点。
+快照，并在 Agent State 中维护 `streamingMessage`。SimAgentPlg 发布不可变且分型的
+`AssistantTextDelta / AssistantThinkingDelta`，partial 不进入 `AgentState`；
+`MessageCompleted` 仍是消息提交点。
 Pi 的 `EventStream` 通过单独的 `result()` 返回最终消息，SimAgentPlg 使用流内唯一
 `ModelResponseCompleted`，同时保留 `BaseAgent.run() -> AgentRunResult` 的稳定终态 API。
 
@@ -360,7 +363,7 @@ Pi 的 `EventStream` 通过单独的 `result()` 返回最终消息，SimAgentPlg
 | Context Projection | `AgentContextBuilder` | 基础版 |
 | Event Stream | `AgentEvent` + `AgentEventSink` | 基础版已具备 |
 | Hook Protocol | Tool Middleware only | 部分具备 |
-| Streaming Output | `ModelAdapter.stream` + `AssistantTextDelta` | 文本基础版已具备 |
+| Streaming Output | Text / Thinking Delta | 基础版已具备 |
 | External Abort | `CancellationToken` + `BaseAgent.abort()` | 已具备 |
 | Wait for Idle | `BaseAgent.wait_for_idle()` | 已具备 |
 | Session Storage | `SessionStorage` + Memory 实现 | 基础版已具备 |
@@ -465,14 +468,14 @@ Fork、Tree 和 Branch Summary 留待线性语义稳定后再建设。
 - 确定性的 Tool、Turn、Agent 终态事件
 - 取消后的 Agent 复用
 
-### 阶段五：流式输出——文本基础版已完成
+### 阶段五：流式输出——Text / Thinking 基础版已完成
 
 - Provider Stream Adapter
 - Text Delta
+- Thinking Delta（观察型，不持久化）
 - complete-only Adapter 兼容
 - OpenAI Tool Call 流式组装
 - 流式 abort 与最终消息原子提交
-- Thinking Delta（待实现）
 - Tool Progress Event（待实现）
 - subprocess 取消在 ExecutionEnv 阶段落地
 
@@ -499,25 +502,23 @@ CodeAgent
 
 ## 8. 下一步任务建议
 
-下一步可以继续扩展流式协议，但 Thinking Delta 和 Tool Progress 应分开实现：前者要求
-升级 AssistantMessage 的内容模型，后者属于 ToolRuntime / ExecutionEnv。两者继续复用
-同一个 per-run CancellationToken 和 AgentEvent 信封。
+下一步应单独实现 Tool Progress。Thinking Delta 已保持为观察型事件，不要求立即升级
+AssistantMessage 的持久化内容模型；Tool Progress 则属于 ToolRuntime / ExecutionEnv，
+继续复用同一个 per-run CancellationToken 和 AgentEvent 信封。
 
 推荐第一轮改动范围：
 
 ```text
-src/simagentplg/providers/base.py
 src/simagentplg/agent/events.py
 src/simagentplg/agent/types.py
 src/simagentplg/agent/tool_runtime.py
-tests/test_agent_thinking_stream.py
 tests/test_tool_progress.py
 ```
 
 验收标准：
 
-1. Thinking 不伪装成普通文本，先建立 Provider-neutral 内容类型。
-2. Tool Progress 只观察执行进度，不改变 `StepOutcome` 和 `ToolControl`。
-3. 两类增量都保持有界、顺序和可取消。
-4. Session 默认仍只保存最终可恢复消息，不保存 UI 临时投影。
+1. Tool Progress 只观察执行进度，不改变 `StepOutcome` 和 `ToolControl`。
+2. Progress 必须关联 `tool_call_id`、turn 和现有 run id。
+3. Progress 保持顺序、可取消，并在 ToolCompleted 后拒绝继续发布。
+4. Session 默认不保存高频 Progress，只保存最终 Tool Result。
 5. 不同时引入 Parallel Tool Calls，避免混淆顺序语义。

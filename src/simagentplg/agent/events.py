@@ -19,6 +19,7 @@ class AgentEventKind(StrEnum):
     TURN_STARTED = "turn_started"
     MESSAGE_COMPLETED = "message_completed"
     ASSISTANT_TEXT_DELTA = "assistant_text_delta"
+    ASSISTANT_THINKING_DELTA = "assistant_thinking_delta"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
     TURN_COMPLETED = "turn_completed"
@@ -66,6 +67,21 @@ class AssistantTextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class AssistantThinkingDelta:
+    """One provisional reasoning fragment for the active turn."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.ASSISTANT_THINKING_DELTA
+    turn: int
+    delta: str
+
+    def __post_init__(self) -> None:
+        if self.turn <= 0:
+            raise ValueError("turn must be greater than zero")
+        if not self.delta:
+            raise ValueError("assistant thinking delta must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolStarted:
     """Execution of one normalized model tool call started."""
 
@@ -105,6 +121,7 @@ AgentEventPayload: TypeAlias = (
     | TurnStarted
     | MessageCompleted
     | AssistantTextDelta
+    | AssistantThinkingDelta
     | ToolStarted
     | ToolCompleted
     | TurnCompleted

@@ -65,13 +65,26 @@ class ModelTextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelThinkingDelta:
+    """One provider-neutral piece of provisional model reasoning."""
+
+    delta: str
+
+    def __post_init__(self) -> None:
+        if not self.delta:
+            raise ValueError("model thinking delta must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelResponseCompleted:
     """Terminal stream event containing the normalized assistant message."""
 
     message: AssistantMessage
 
 
-ModelStreamEvent: TypeAlias = ModelTextDelta | ModelResponseCompleted
+ModelStreamEvent: TypeAlias = (
+    ModelTextDelta | ModelThinkingDelta | ModelResponseCompleted
+)
 
 
 class ModelAdapter(ABC):

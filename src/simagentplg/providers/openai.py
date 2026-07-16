@@ -18,6 +18,7 @@ from simagentplg.providers.base import (
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
+    ModelThinkingDelta,
     ModelToolCall,
 )
 
@@ -215,6 +216,16 @@ class OpenAIModelAdapter(ModelAdapter):
                     text = str(content)
                     content_parts.append(text)
                     yield ModelTextDelta(text)
+
+                for field in (
+                    "reasoning_content",
+                    "reasoning",
+                    "reasoning_text",
+                ):
+                    reasoning = getattr(delta, field, None)
+                    if isinstance(reasoning, str) and reasoning:
+                        yield ModelThinkingDelta(reasoning)
+                        break
 
                 for position, partial in enumerate(
                     getattr(delta, "tool_calls", None) or ()

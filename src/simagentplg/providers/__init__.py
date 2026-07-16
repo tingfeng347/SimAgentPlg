@@ -6,6 +6,7 @@ from simagentplg.providers.base import (
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
+    ModelThinkingDelta,
     ModelToolCall,
 )
 from simagentplg.providers.openai import ModelConfig, OpenAIModelAdapter
@@ -15,6 +16,7 @@ __all__ = [
     "ModelAdapter",
     "ModelStreamEvent",
     "ModelTextDelta",
+    "ModelThinkingDelta",
     "ModelResponseCompleted",
     "ModelToolCall",
     "ModelConfig",

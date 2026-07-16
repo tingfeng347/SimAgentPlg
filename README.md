@@ -132,21 +132,24 @@ release resources such as subprocesses.
 ### Streaming responses
 
 `BaseAgent.run()` still returns one final `AgentRunResult`, while provisional
-text is observed through `AssistantTextDelta` events:
+text and provisional reasoning are observed through typed Delta events:
 
 ```python
-from simagentplg import AssistantTextDelta
+from simagentplg import AssistantThinkingDelta, AssistantTextDelta
 
 
 class ConsoleSink:
     async def emit(self, event):
-        if isinstance(event.payload, AssistantTextDelta):
+        if isinstance(event.payload, AssistantThinkingDelta):
+            print("[thinking]", event.payload.delta, end="")
+        elif isinstance(event.payload, AssistantTextDelta):
             print(event.payload.delta, end="", flush=True)
 ```
 
 `OpenAIModelAdapter` uses a real streaming request. Tool-call fragments are
 assembled inside the provider adapter and only complete `AssistantMessage`
-objects enter Agent state. Existing complete-only adapters remain compatible
+objects enter Agent state. Thinking Delta remains observation-only and is not
+mixed into normal text or persisted to Session. Existing complete-only adapters remain compatible
 through the default `ModelAdapter.stream()` implementation. Session recording
 ignores provisional deltas and persists only `MessageCompleted`.
 
@@ -375,10 +378,10 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelStreamEvent`, `ModelTextDelta`, `ModelResponseCompleted`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
-- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
 - Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`

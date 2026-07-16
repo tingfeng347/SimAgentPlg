@@ -2,7 +2,7 @@
 
 All examples use the environment variables documented in the project README.
 Copy `.env.example` to `.env` and fill in credentials for an OpenAI-compatible
-provider before running them. Examples `07` through `13` exercise the Harness
+provider before running them. Examples `07` through `14` exercise the Harness
 against the real `OpenAIModelAdapter`; they do not use scripted model results.
 
 Run an example from the repository root:
@@ -31,6 +31,9 @@ Every `BaseAgent` declares its own immutable `agent_id`.
   ordered progress before its final result is committed
 - `13_usage_budget.py`: real Provider Usage is normalized, aggregated, and used
   to stop before an intentionally over-budget follow-up request
+- `14_context_pressure.py`: the complete real Provider request is assessed,
+  old full turns are prepared for compaction, and current history remains
+  unchanged
 
 Run the composed Harness example directly:
 
@@ -51,6 +54,10 @@ The repeated-tool-call guard remains configurable through the same policy.
 Example `13` defaults `HARNESS_MAX_RUN_TOKENS` to `1` so its first reported
 response exhausts the budget after the requested tool settles. Set a larger
 value to observe additional turns.
+Example `14` uses `HARNESS_CONTEXT_WINDOW`, `HARNESS_CONTEXT_RESERVE`, and
+`HARNESS_KEEP_RECENT_TOKENS` only as Harness-side demonstration values. The
+default low threshold makes the seeded old tool output produce a compaction
+suggestion; it does not change the configured model's real context window.
 
 The MCP example requires the commands declared in `mcp_config.json` to be
 available locally. Its sample configuration starts the Playwright MCP server

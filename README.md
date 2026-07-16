@@ -23,6 +23,8 @@ Requires Python 3.12 or newer.
 - Generic `ToolMiddleware` interception
 - Structured, cancellable Tool Progress events
 - Provider-neutral token Usage and per-run budget guards
+- Context pressure estimates, independent window budgets, and non-mutating
+  compaction preparation
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -176,6 +178,42 @@ print(result.usage.complete)
 Unknown Usage is distinct from zero. Complete-only adapters remain compatible
 and produce an incomplete `RunUsage` unless they override `stream()` with a
 terminal Usage value.
+
+### Context pressure and compaction preparation
+
+Context window capacity is independent of cumulative run spend. Configure an
+optional `CompactionPolicy` to assess the complete provider request before each
+model call:
+
+```python
+from simagentplg import CompactionPolicy, ContextBudget
+
+context_policy = CompactionPolicy(
+    ContextBudget(
+        context_window=128_000,
+        reserve_tokens=16_000,
+        keep_recent_tokens=20_000,
+    )
+)
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+)
+```
+
+The estimate combines the latest assistant `ModelUsage`, trailing messages,
+and a UTF-8-aware heuristic lower bound that includes current tool schemas.
+Each configured turn emits `ContextPressureEvaluated`. When the threshold is
+reached, its `CompactionPreparation` separates protected messages, complete
+old User/Assistant/Tool turns to summarize, and recent turns to keep. Tool
+calls and results remain in the same turn.
+
+This stage is observation-only: it does not summarize, mutate Agent state or
+Session, stop the run, or retry an overflow. Applications can also call
+`estimate_context_usage()` and `prepare_compaction()` directly, and can replace
+the fallback through `MessageTokenEstimator`.
 
 ## Runtime policy
 
@@ -399,6 +437,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Linear Session + Runtime Cancellation
 + Provider Streaming + Tool Progress + Usage Accounting + Run Budget
++ Context Pressure + Compaction Preparation
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -428,6 +467,7 @@ uv run python examples/10_composed_harness.py
 uv run python examples/11_streaming_events.py
 uv run python examples/12_tool_progress.py
 uv run python examples/13_usage_budget.py
+uv run python examples/14_context_pressure.py
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -447,9 +487,9 @@ The package root exports:
 - Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
-- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
-- Context: `AgentContextBuilder`, `ContextBuildResult`
+- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`

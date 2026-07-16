@@ -14,12 +14,18 @@ from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
 )
+from simagentplg.agent.context_management import (
+    CompactionPolicy,
+    MessageTokenEstimator,
+    estimate_context_usage,
+)
 from simagentplg.agent.events import (
     AgentEventEmitter,
     AgentFinished,
     AgentStarted,
     AssistantThinkingDelta,
     AssistantTextDelta,
+    ContextPressureEvaluated,
     MessageCompleted,
     TurnCompleted,
     TurnStarted,
@@ -74,6 +80,8 @@ class AgentOrchestrator:
         tool_runtime: ToolRuntime,
         skill_manager: SkillManager | None,
         policy: RuntimePolicy,
+        compaction_policy: CompactionPolicy | None = None,
+        context_token_estimator: MessageTokenEstimator | None = None,
         event_emitter: AgentEventEmitter,
     ) -> None:
         self.agent_id = agent_id
@@ -83,6 +91,8 @@ class AgentOrchestrator:
         self.tool_runtime = tool_runtime
         self.skill_manager = skill_manager
         self.policy = policy
+        self.compaction_policy = compaction_policy
+        self.context_token_estimator = context_token_estimator
         self.event_emitter = event_emitter
         self._usage = UsageAccumulator()
 
@@ -222,6 +232,7 @@ class AgentOrchestrator:
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
+        await self._evaluate_context_pressure(context)
         self._usage.begin_request()
         stream = self.model_stream(
             context,
@@ -266,6 +277,36 @@ class AgentOrchestrator:
                 "model stream ended without a completed response"
             )
         return completed
+
+    async def _evaluate_context_pressure(
+        self,
+        context: ContextBuildResult,
+    ) -> None:
+        policy = self.compaction_policy
+        if policy is None:
+            return
+
+        estimate = estimate_context_usage(
+            context.agent_messages,
+            tools=context.tools,
+            estimator=self.context_token_estimator,
+        )
+        decision = policy.evaluate(estimate)
+        preparation = (
+            policy.prepare(
+                self.state.messages,
+                estimator=self.context_token_estimator,
+            )
+            if decision.should_compact
+            else None
+        )
+        await self.event_emitter.emit(
+            ContextPressureEvaluated(
+                turn=self.state.turn,
+                decision=decision,
+                preparation=preparation,
+            )
+        )
 
     def _budget_failure(self) -> AgentRunResult | None:
         limit = self.policy.max_run_tokens

@@ -6,6 +6,10 @@ from typing import TYPE_CHECKING, Any
 
 from simagentplg.agent.cancellation import CancellationSource
 from simagentplg.agent.context_builder import AgentContextBuilder
+from simagentplg.agent.context_management import (
+    CompactionPolicy,
+    MessageTokenEstimator,
+)
 from simagentplg.agent.events import AgentEventEmitter, AgentEventSink
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import AgentRunResult
@@ -57,6 +61,8 @@ class BaseAgent:
         middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
+        compaction_policy: CompactionPolicy | None = None,
+        context_token_estimator: MessageTokenEstimator | None = None,
         runtime_policy: RuntimePolicy | None = None,
         event_sink: AgentEventSink | None = None,
     ) -> None:
@@ -67,6 +73,8 @@ class BaseAgent:
         self.model = model
         self.system_prompt = system_prompt
         self.runtime_policy = policy
+        self.compaction_policy = compaction_policy
+        self.context_token_estimator = context_token_estimator
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
         self.event_sink = event_sink
@@ -103,6 +111,8 @@ class BaseAgent:
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
+            compaction_policy=self.compaction_policy,
+            context_token_estimator=self.context_token_estimator,
             event_emitter=self._event_emitter,
         )
         self.reset()

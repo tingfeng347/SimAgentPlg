@@ -21,6 +21,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - `ToolRuntime` 生命周期、路由、Middleware 和重复调用保护
 - 通用 `ToolMiddleware` 拦截机制
 - Provider-neutral Token Usage 与单次 Run 预算保护
+- 上下文压力估算、独立窗口预算和非变异压缩准备
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -110,6 +111,39 @@ print(result.usage.complete)
 和 Session 中，但 `AgentContextBuilder` 会在构造 `llm_messages` 时移除，不会发送给
 Provider。`AgentRunResult.usage` 聚合一次 Run 的所有模型请求；`complete=False` 表示
 至少一次请求没有报告 Usage，不能把它当成零消耗。
+
+## 上下文压力与压缩准备
+
+Context Window 容量和累计 Run 消耗是两个独立概念。可以为 Agent 配置可选的
+`CompactionPolicy`，在每次模型请求前评估完整 Provider 上下文：
+
+```python
+from simagentplg import CompactionPolicy, ContextBudget
+
+context_policy = CompactionPolicy(
+    ContextBudget(
+        context_window=128_000,
+        reserve_tokens=16_000,
+        keep_recent_tokens=20_000,
+    )
+)
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+)
+```
+
+评估会组合最近一次 Assistant `ModelUsage`、它之后新增的消息，以及包含当前 Tool Schema
+的 UTF-8 感知保守估算。配置策略后，每轮都会发布 `ContextPressureEvaluated`；达到阈值
+时，事件中的 `CompactionPreparation` 会分离受保护消息、待摘要的旧完整
+User/Assistant/Tool Turn，以及需要原文保留的最近 Turn。Tool Call 和对应 Tool Result
+不会被切开。
+
+当前阶段仍是只读观察：不会生成摘要、修改 Agent State 或 Session、停止 Run，也不会
+自动重试 overflow。应用也可以直接调用 `estimate_context_usage()` 和
+`prepare_compaction()`，并通过 `MessageTokenEstimator` 替换默认估算器。
 
 ## RuntimePolicy
 
@@ -313,6 +347,7 @@ SimAgentPlg Core 负责机制：
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
++ Context Pressure + Compaction Preparation
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -333,6 +368,7 @@ uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
 uv run python examples/13_usage_budget.py
+uv run python examples/14_context_pressure.py
 ```
 
 ## 测试
@@ -348,7 +384,7 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Context：`AgentContextBuilder`、`ContextBuildResult`
+- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

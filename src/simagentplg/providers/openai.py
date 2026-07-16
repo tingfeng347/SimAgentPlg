@@ -238,7 +238,7 @@ class OpenAIModelAdapter(ModelAdapter):
                     chunk = (
                         await cancellation.run(next_chunk)
                         if cancellation is not None
-                        else await next_chunkq
+                        else await next_chunk
                     )
                 except StopAsyncIteration:
                     break

@@ -8,6 +8,10 @@ from typing import ClassVar, Protocol, TypeAlias
 from uuid import uuid4
 
 from simagentplg.agent.result import AgentRunResult
+from simagentplg.agent.context_management import (
+    CompactionDecision,
+    CompactionPreparation,
+)
 from simagentplg.agent.types import ToolCallResult, ToolProgressUpdate
 from simagentplg.providers.base import (
     AssistantMessage,
@@ -21,6 +25,7 @@ class AgentEventKind(StrEnum):
 
     AGENT_STARTED = "agent_started"
     TURN_STARTED = "turn_started"
+    CONTEXT_PRESSURE_EVALUATED = "context_pressure_evaluated"
     MESSAGE_COMPLETED = "message_completed"
     ASSISTANT_TEXT_DELTA = "assistant_text_delta"
     ASSISTANT_THINKING_DELTA = "assistant_thinking_delta"
@@ -45,6 +50,26 @@ class TurnStarted:
 
     kind: ClassVar[AgentEventKind] = AgentEventKind.TURN_STARTED
     turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPressureEvaluated:
+    """One complete model request was assessed before provider dispatch."""
+
+    kind: ClassVar[AgentEventKind] = (
+        AgentEventKind.CONTEXT_PRESSURE_EVALUATED
+    )
+    turn: int
+    decision: CompactionDecision
+    preparation: CompactionPreparation | None = None
+
+    def __post_init__(self) -> None:
+        if self.turn <= 0:
+            raise ValueError("turn must be greater than zero")
+        if self.preparation is not None and not self.decision.should_compact:
+            raise ValueError(
+                "compaction preparation requires a positive decision"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +164,7 @@ class AgentFinished:
 AgentEventPayload: TypeAlias = (
     AgentStarted
     | TurnStarted
+    | ContextPressureEvaluated
     | MessageCompleted
     | AssistantTextDelta
     | AssistantThinkingDelta

@@ -99,7 +99,7 @@ class BaseAgent:
             agent_id=self.agent_id,
             state=self.state,
             context_builder=self._context_builder,
-            model_call=self.model.complete,
+            model_stream=self.model.stream,
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,

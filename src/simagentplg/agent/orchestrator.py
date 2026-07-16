@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any, Protocol
 
 from simagentplg.agent.cancellation import (
@@ -17,6 +18,7 @@ from simagentplg.agent.events import (
     AgentEventEmitter,
     AgentFinished,
     AgentStarted,
+    AssistantTextDelta,
     MessageCompleted,
     TurnCompleted,
     TurnStarted,
@@ -30,7 +32,12 @@ from simagentplg.agent.tool_runtime import (
 )
 from simagentplg.agent.types import ToolCallResult, ToolControl
 from simagentplg.plugins.skill.skill_manager import SkillManager
-from simagentplg.providers.base import AssistantMessage
+from simagentplg.providers.base import (
+    AssistantMessage,
+    ModelResponseCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
+)
 
 TOOL_COMPLETION_RETRY_PROMPT = """
 Explicit-finish mode requires a completing tool call to finish the task.
@@ -39,15 +46,15 @@ Do not end with plain text.
 """.strip()
 
 
-class ModelCall(Protocol):
-    """Provider call shape consumed by the orchestrator."""
+class ModelStream(Protocol):
+    """Provider stream shape consumed by the orchestrator."""
 
     def __call__(
         self,
         context: ContextBuildResult,
         *,
         cancellation: CancellationToken | None = None,
-    ) -> Awaitable[AssistantMessage]: ...
+    ) -> AsyncIterator[ModelStreamEvent]: ...
 
 
 class AgentOrchestrator:
@@ -59,7 +66,7 @@ class AgentOrchestrator:
         agent_id: str,
         state: AgentState,
         context_builder: AgentContextBuilder,
-        model_call: ModelCall,
+        model_stream: ModelStream,
         tool_runtime: ToolRuntime,
         skill_manager: SkillManager | None,
         policy: RuntimePolicy,
@@ -68,7 +75,7 @@ class AgentOrchestrator:
         self.agent_id = agent_id
         self.state = state
         self.context_builder = context_builder
-        self.model_call = model_call
+        self.model_stream = model_stream
         self.tool_runtime = tool_runtime
         self.skill_manager = skill_manager
         self.policy = policy
@@ -198,9 +205,42 @@ class AgentOrchestrator:
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
-        return await cancellation.run(
-            self.model_call(context, cancellation=cancellation)
+        stream = self.model_stream(
+            context,
+            cancellation=cancellation,
         )
+        iterator = stream.__aiter__()
+        completed: AssistantMessage | None = None
+        try:
+            while completed is None:
+                cancellation.raise_if_cancelled()
+                try:
+                    event = await cancellation.run(anext(iterator))
+                except StopAsyncIteration:
+                    break
+
+                if isinstance(event, ModelTextDelta):
+                    await self.event_emitter.emit(
+                        AssistantTextDelta(self.state.turn, event.delta)
+                    )
+                elif isinstance(event, ModelResponseCompleted):
+                    completed = event.message
+                else:
+                    raise TypeError(
+                        "model stream returned an unsupported event: "
+                        f"{type(event).__name__}"
+                    )
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
+
+        if completed is None:
+            raise RuntimeError(
+                "model stream ended without a completed response"
+            )
+        return completed
 
     def _runtime_context_messages(self) -> list[dict[str, str]]:
         if self.state.no_tool_response_count == 0:

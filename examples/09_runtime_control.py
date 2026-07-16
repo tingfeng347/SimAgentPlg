@@ -2,14 +2,15 @@
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 from simagentplg import (
     AgentEvent,
-    AssistantMessage,
     BaseAgent,
     CancellationToken,
     ModelConfig,
+    ModelStreamEvent,
     OpenAIModelAdapter,
 )
 
@@ -21,17 +22,18 @@ class ObservableOpenAIModelAdapter(OpenAIModelAdapter):
         super().__init__(config)
         self.request_started = asyncio.Event()
 
-    async def complete(
+    async def stream(
         self,
         context: Any,
         *,
         cancellation: CancellationToken | None = None,
-    ) -> AssistantMessage:
+    ) -> AsyncIterator[ModelStreamEvent]:
         self.request_started.set()
-        return await super().complete(
+        async for event in super().stream(
             context,
             cancellation=cancellation,
-        )
+        ):
+            yield event
 
 
 class ConsoleEventSink:

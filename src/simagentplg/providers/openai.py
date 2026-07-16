@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,6 +15,9 @@ from simagentplg.agent.cancellation import AgentCancelledError
 from simagentplg.providers.base import (
     AssistantMessage,
     ModelAdapter,
+    ModelResponseCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
     ModelToolCall,
 )
 
@@ -69,6 +75,13 @@ class ModelConfig:
             timeout=timeout,
             temperature=temperature,
         )
+
+
+@dataclass(slots=True)
+class _StreamingToolCall:
+    id: str = ""
+    name: str = ""
+    arguments: str = ""
 
 
 class OpenAIModelAdapter(ModelAdapter):
@@ -141,4 +154,129 @@ class OpenAIModelAdapter(ModelAdapter):
                 for tool_call in message.tool_calls or ()
                 if tool_call.type == "function"
             ),
+        )
+
+    async def stream(
+        self,
+        context: "ContextBuildResult",
+        *,
+        cancellation: "CancellationToken | None" = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Stream and normalize one OpenAI-compatible chat completion."""
+
+        await self.startup()
+        client = self._client
+        if client is None:
+            raise RuntimeError("OpenAI model client is not initialized")
+
+        response: Any | None = None
+        content_parts: list[str] = []
+        tool_calls: dict[int, _StreamingToolCall] = {}
+        has_finish_reason = False
+        try:
+            request = client.chat.completions.create(
+                model=self.config.model,
+                messages=cast(Any, context.llm_messages),
+                temperature=self.config.temperature,
+                tools=cast(Any, context.tools) or None,
+                stream=True,
+            )
+            response = (
+                await cancellation.run(request)
+                if cancellation is not None
+                else await request
+            )
+            iterator = response.__aiter__()
+            while True:
+                if cancellation is not None:
+                    cancellation.raise_if_cancelled()
+                try:
+                    next_chunk = anext(iterator)
+                    chunk = (
+                        await cancellation.run(next_chunk)
+                        if cancellation is not None
+                        else await next_chunk
+                    )
+                except StopAsyncIteration:
+                    break
+
+                choices = getattr(chunk, "choices", None) or ()
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None) is not None:
+                    has_finish_reason = True
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+
+                content = getattr(delta, "content", None)
+                if content:
+                    text = str(content)
+                    content_parts.append(text)
+                    yield ModelTextDelta(text)
+
+                for position, partial in enumerate(
+                    getattr(delta, "tool_calls", None) or ()
+                ):
+                    index = getattr(partial, "index", None)
+                    if index is None:
+                        index = position
+                    call = tool_calls.setdefault(index, _StreamingToolCall())
+                    call_id = getattr(partial, "id", None)
+                    if call_id:
+                        call.id = str(call_id)
+                    function = getattr(partial, "function", None)
+                    if function is None:
+                        continue
+                    name = getattr(function, "name", None)
+                    if name:
+                        call.name += str(name)
+                    arguments = getattr(function, "arguments", None)
+                    if arguments:
+                        call.arguments += str(arguments)
+        except asyncio.CancelledError:
+            raise
+        except AgentCancelledError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"chat completion stream failed: {exc}"
+            ) from exc
+        finally:
+            if response is not None:
+                close = getattr(response, "close", None)
+                if close is None:
+                    close = getattr(response, "aclose", None)
+                if close is not None:
+                    with suppress(Exception):
+                        close_result = close()
+                        if inspect.isawaitable(close_result):
+                            await close_result
+
+        if not has_finish_reason:
+            raise RuntimeError(
+                "chat completion stream ended without finish_reason"
+            )
+
+        normalized_tool_calls: list[ModelToolCall] = []
+        for index in sorted(tool_calls):
+            call = tool_calls[index]
+            if not call.id or not call.name:
+                raise RuntimeError(
+                    "chat completion stream returned an incomplete tool call"
+                )
+            normalized_tool_calls.append(
+                ModelToolCall(
+                    id=call.id,
+                    name=call.name,
+                    arguments=call.arguments,
+                )
+            )
+
+        yield ModelResponseCompleted(
+            AssistantMessage(
+                content="".join(content_parts) or None,
+                tool_calls=tuple(normalized_tool_calls),
+            )
         )

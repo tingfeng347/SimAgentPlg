@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
     from simagentplg.agent.cancellation import CancellationToken
@@ -52,6 +53,27 @@ class AssistantMessage:
         return message
 
 
+@dataclass(frozen=True, slots=True)
+class ModelTextDelta:
+    """One provider-neutral piece of assistant text."""
+
+    delta: str
+
+    def __post_init__(self) -> None:
+        if not self.delta:
+            raise ValueError("model text delta must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelResponseCompleted:
+    """Terminal stream event containing the normalized assistant message."""
+
+    message: AssistantMessage
+
+
+ModelStreamEvent: TypeAlias = ModelTextDelta | ModelResponseCompleted
+
+
 class ModelAdapter(ABC):
     """Provider boundary used by the agent core."""
 
@@ -69,3 +91,17 @@ class ModelAdapter(ABC):
         cancellation: "CancellationToken | None" = None,
     ) -> AssistantMessage:
         """Return one complete response and honor the per-run cancellation."""
+
+    async def stream(
+        self,
+        context: "ContextBuildResult",
+        *,
+        cancellation: "CancellationToken | None" = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Adapt a complete-only provider into one terminal stream event."""
+
+        message = await self.complete(
+            context,
+            cancellation=cancellation,
+        )
+        yield ModelResponseCompleted(message)

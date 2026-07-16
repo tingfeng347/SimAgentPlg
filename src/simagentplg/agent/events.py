@@ -18,6 +18,7 @@ class AgentEventKind(StrEnum):
     AGENT_STARTED = "agent_started"
     TURN_STARTED = "turn_started"
     MESSAGE_COMPLETED = "message_completed"
+    ASSISTANT_TEXT_DELTA = "assistant_text_delta"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
     TURN_COMPLETED = "turn_completed"
@@ -47,6 +48,21 @@ class MessageCompleted:
     kind: ClassVar[AgentEventKind] = AgentEventKind.MESSAGE_COMPLETED
     turn: int
     message: AssistantMessage
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTextDelta:
+    """One provisional assistant text fragment for the active turn."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.ASSISTANT_TEXT_DELTA
+    turn: int
+    delta: str
+
+    def __post_init__(self) -> None:
+        if self.turn <= 0:
+            raise ValueError("turn must be greater than zero")
+        if not self.delta:
+            raise ValueError("assistant text delta must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +104,7 @@ AgentEventPayload: TypeAlias = (
     AgentStarted
     | TurnStarted
     | MessageCompleted
+    | AssistantTextDelta
     | ToolStarted
     | ToolCompleted
     | TurnCompleted

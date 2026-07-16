@@ -25,6 +25,8 @@ Every `BaseAgent` declares its own immutable `agent_id`.
 - `09_runtime_control.py`: `abort()`, `wait_for_idle()`, terminal events, and reuse
 - `10_composed_harness.py`: Model Adapter, tools, Middleware, events, Session,
   runtime policy, and explicit completion composed as one Harness
+- `11_streaming_events.py`: real provider Text Delta events rendered as they
+  arrive while the final message remains atomically committed
 
 Run the composed Harness example directly:
 

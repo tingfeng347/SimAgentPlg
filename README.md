@@ -63,9 +63,10 @@ config = ModelConfig(
 ```
 
 Other model providers can integrate with the core by implementing
-`ModelAdapter.complete()`. The adapter owns provider client creation,
-response normalization, and optional startup/shutdown resources; `BaseAgent`
-only consumes the normalized `AssistantMessage` contract.
+`ModelAdapter.complete()` and optionally overriding `ModelAdapter.stream()`.
+The adapter owns provider client creation, response normalization, streaming,
+and optional startup/shutdown resources; `BaseAgent` only consumes
+provider-neutral stream events and the normalized `AssistantMessage` contract.
 
 ## Plain agent
 
@@ -127,6 +128,27 @@ An externally aborted run returns `RunStatus.CANCELLED` with
 Model adapters, tool middleware, and tool handlers receive the run's
 `CancellationToken`; long-running handlers should also use `try/finally` to
 release resources such as subprocesses.
+
+### Streaming responses
+
+`BaseAgent.run()` still returns one final `AgentRunResult`, while provisional
+text is observed through `AssistantTextDelta` events:
+
+```python
+from simagentplg import AssistantTextDelta
+
+
+class ConsoleSink:
+    async def emit(self, event):
+        if isinstance(event.payload, AssistantTextDelta):
+            print(event.payload.delta, end="", flush=True)
+```
+
+`OpenAIModelAdapter` uses a real streaming request. Tool-call fragments are
+assembled inside the provider adapter and only complete `AssistantMessage`
+objects enter Agent state. Existing complete-only adapters remain compatible
+through the default `ModelAdapter.stream()` implementation. Session recording
+ignores provisional deltas and persists only `MessageCompleted`.
 
 ## Runtime policy
 
@@ -309,7 +331,7 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
-+ Lifecycle Events + Linear Session + Runtime Cancellation
++ Lifecycle Events + Linear Session + Runtime Cancellation + Provider Streaming
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -336,6 +358,7 @@ uv run python examples/07_event_observers.py
 uv run python examples/08_session_resume.py
 uv run python examples/09_runtime_control.py
 uv run python examples/10_composed_harness.py
+uv run python examples/11_streaming_events.py
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -352,10 +375,10 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelStreamEvent`, `ModelTextDelta`, `ModelResponseCompleted`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
-- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
 - Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`

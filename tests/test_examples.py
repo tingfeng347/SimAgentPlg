@@ -48,6 +48,7 @@ class ExampleTests(unittest.IsolatedAsyncioTestCase):
             "08_session_resume.py",
             "09_runtime_control.py",
             "10_composed_harness.py",
+            "11_streaming_events.py",
         ):
             with self.subTest(example=filename):
                 namespace = runpy.run_path(

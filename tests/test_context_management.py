@@ -63,6 +63,12 @@ class ContextManagementTests(unittest.IsolatedAsyncioTestCase):
                 "total_tokens": 19998,
             },
         }
+        with_internal_summary = {
+            **english,
+            "_simagentplg_summary": {
+                "content": "internal metadata must not be counted" * 100,
+            },
+        }
 
         self.assertGreater(
             estimator.estimate_message(chinese),
@@ -71,6 +77,10 @@ class ContextManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             estimator.estimate_message(english),
             estimator.estimate_message(with_usage),
+        )
+        self.assertEqual(
+            estimator.estimate_message(english),
+            estimator.estimate_message(with_internal_summary),
         )
 
     def test_estimate_without_usage_includes_messages_and_tools(self) -> None:

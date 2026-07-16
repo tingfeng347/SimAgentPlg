@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 
+from simagentplg.agent.compaction import SummaryEntry
 from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.types import AgentMessage
 
@@ -55,6 +56,28 @@ class SessionRun:
         return self.result is not None
 
 
+@dataclass(frozen=True, slots=True)
+class SessionCompaction:
+    """One compacted conversation projection with retained audit history."""
+
+    operation_id: str
+    sequence: int
+    summary: SummaryEntry
+    messages: tuple[AgentMessage, ...]
+    covered_entry_count: int
+
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            raise ValueError("operation_id must not be empty")
+        if self.sequence <= 0:
+            raise ValueError("sequence must be greater than zero")
+        if not self.messages:
+            raise ValueError("compaction messages must not be empty")
+        if self.covered_entry_count < 0:
+            raise ValueError("covered_entry_count must not be negative")
+        object.__setattr__(self, "messages", deepcopy(self.messages))
+
+
 @dataclass(slots=True)
 class AgentSession:
     """Linear conversation history spanning one or more agent runs."""
@@ -63,6 +86,7 @@ class AgentSession:
     agent_id: str | None = None
     entries: list[SessionMessage] = field(default_factory=list)
     runs: list[SessionRun] = field(default_factory=list)
+    compactions: list[SessionCompaction] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.session_id = self.session_id.strip()
@@ -81,12 +105,36 @@ class AgentSession:
             for entry in self.entries
         ]
         self.runs = list(self.runs)
+        self.compactions = [
+            SessionCompaction(
+                operation_id=compaction.operation_id,
+                sequence=compaction.sequence,
+                summary=compaction.summary,
+                messages=compaction.messages,
+                covered_entry_count=compaction.covered_entry_count,
+            )
+            for compaction in self.compactions
+        ]
+        if any(
+            compaction.covered_entry_count > len(self.entries)
+            for compaction in self.compactions
+        ):
+            raise ValueError("compaction covers unavailable session entries")
 
     @property
     def messages(self) -> list[AgentMessage]:
         """Return an independent history suitable for ``BaseAgent.reset``."""
 
-        return [deepcopy(entry.message) for entry in self.entries]
+        if not self.compactions:
+            return [deepcopy(entry.message) for entry in self.entries]
+
+        latest = self.compactions[-1]
+        compacted = [deepcopy(message) for message in latest.messages]
+        compacted.extend(
+            deepcopy(entry.message)
+            for entry in self.entries[latest.covered_entry_count :]
+        )
+        return compacted
 
     def bind_agent(self, agent_id: str) -> None:
         """Bind a new Session to one logical agent identity."""
@@ -164,6 +212,32 @@ class AgentSession:
             result=result,
         )
 
+    def apply_compaction(
+        self,
+        operation_id: str,
+        sequence: int,
+        summary: SummaryEntry,
+        messages: tuple[AgentMessage, ...],
+    ) -> None:
+        """Record a new compacted projection without deleting audit entries."""
+
+        if any(
+            compaction.operation_id == operation_id
+            for compaction in self.compactions
+        ):
+            raise ValueError(
+                f"compaction operation {operation_id!r} already exists"
+            )
+        self.compactions.append(
+            SessionCompaction(
+                operation_id=operation_id,
+                sequence=sequence,
+                summary=summary,
+                messages=messages,
+                covered_entry_count=len(self.entries),
+            )
+        )
+
     def snapshot(self) -> "AgentSession":
         """Return a detached copy safe for storage and callers."""
 
@@ -172,6 +246,7 @@ class AgentSession:
             agent_id=self.agent_id,
             entries=list(self.entries),
             runs=list(self.runs),
+            compactions=list(self.compactions),
         )
 
     def _get_run(self, run_id: str) -> SessionRun:

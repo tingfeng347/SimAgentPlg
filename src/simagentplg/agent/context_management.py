@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-from simagentplg.agent.types import AgentMessage
+from simagentplg.agent.types import AgentMessage, INTERNAL_METADATA_PREFIX
 from simagentplg.providers.base import ModelUsage
 
 
@@ -82,6 +82,7 @@ class HeuristicMessageTokenEstimator:
             key: value
             for key, value in message.items()
             if key != "usage"
+            and not key.startswith(INTERNAL_METADATA_PREFIX)
         }
         return self.message_overhead_tokens + self._estimate_value(visible)
 

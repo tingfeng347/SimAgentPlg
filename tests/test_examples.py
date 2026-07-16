@@ -52,6 +52,7 @@ class ExampleTests(unittest.IsolatedAsyncioTestCase):
             "12_tool_progress.py",
             "13_usage_budget.py",
             "14_context_pressure.py",
+            "15_explicit_compaction.py",
         ):
             with self.subTest(example=filename):
                 namespace = runpy.run_path(

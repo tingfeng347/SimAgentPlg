@@ -22,6 +22,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - 通用 `ToolMiddleware` 拦截机制
 - Provider-neutral Token Usage 与单次 Run 预算保护
 - 上下文压力估算、独立窗口预算和非变异压缩准备
+- 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -141,9 +142,36 @@ agent = BaseAgent(
 User/Assistant/Tool Turn，以及需要原文保留的最近 Turn。Tool Call 和对应 Tool Result
 不会被切开。
 
-当前阶段仍是只读观察：不会生成摘要、修改 Agent State 或 Session、停止 Run，也不会
-自动重试 overflow。应用也可以直接调用 `estimate_context_usage()` 和
-`prepare_compaction()`，并通过 `MessageTokenEstimator` 替换默认估算器。
+压力评估仍是只读观察，不会自动压缩或重试 overflow。应用也可以直接调用
+`estimate_context_usage()` 和 `prepare_compaction()`，并通过
+`MessageTokenEstimator` 替换默认估算器。
+
+## 显式上下文压缩
+
+派生 Agent 通过可取消的 `Compactor` 协议提供摘要行为，然后显式调用：
+
+```python
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+)
+
+compaction = await agent.compact()
+print(compaction.status)
+print(compaction.summary)
+```
+
+Core 将 `CompactionRequest` 交给 Compactor，由 Core 在 `SummaryEntry` 中写入可信的范围和
+Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn”。失败或取消返回
+结构化 `CompactionResult`，历史保持不变。重复压缩时，旧 Summary 会传给 Compactor
+合并，并由新 Summary 消息替换。
+
+生命周期通过 `CompactionStarted`、`CompactionCompleted` 和 `CompactionFailed` 发布。
+`abort()`、`wait_for_idle()` 同时适用于普通 Run 和压缩。`SessionRecorder` 保存紧凑恢复
+快照，同时保留原始 `SessionMessage` 审计条目。Core 不选择摘要模型或 Prompt，当前也
+不会自动触发压缩。
 
 ## RuntimePolicy
 
@@ -348,6 +376,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
 + Context Pressure + Compaction Preparation
++ Explicit Compactor + Summary Entry + Session Compaction Snapshot
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -369,6 +398,7 @@ uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
 uv run python examples/13_usage_budget.py
 uv run python examples/14_context_pressure.py
+uv run python examples/15_explicit_compaction.py
 ```
 
 ## 测试
@@ -385,6 +415,7 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
 - Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
+- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

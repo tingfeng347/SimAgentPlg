@@ -71,6 +71,11 @@ class AgentState:
 
         self.messages.extend(dict(message) for message in messages)
 
+    def replace_messages(self, messages: list[AgentMessage]) -> None:
+        """Atomically replace persistent history with detached messages."""
+
+        self.messages = deepcopy(messages)
+
     def complete(self, result: str) -> None:
         """Mark the current task as completed."""
 

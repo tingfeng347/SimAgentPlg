@@ -6,6 +6,15 @@ from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
+from simagentplg.agent.compaction import (
+    CompactionRequest,
+    CompactionResult,
+    CompactionRuntime,
+    CompactionStatus,
+    Compactor,
+    CompactorOutput,
+    SummaryEntry,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
 from simagentplg.agent.context_management import (
     CompactionDecision,
@@ -31,6 +40,9 @@ from simagentplg.agent.events import (
     AssistantThinkingDelta,
     AssistantTextDelta,
     CompositeAgentEventSink,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
     ContextPressureEvaluated,
     MessageCompleted,
     ToolCompleted,
@@ -91,6 +103,7 @@ from simagentplg.session import (
     SessionMessage,
     SessionRecorder,
     SessionRun,
+    SessionCompaction,
     SessionStorage,
 )
 
@@ -99,6 +112,13 @@ __all__ = [
     "AgentCancelledError",
     "CancellationSource",
     "CancellationToken",
+    "Compactor",
+    "CompactorOutput",
+    "CompactionRequest",
+    "CompactionResult",
+    "CompactionRuntime",
+    "CompactionStatus",
+    "SummaryEntry",
     "ModelConfig",
     "ModelAdapter",
     "OpenAIModelAdapter",
@@ -130,6 +150,9 @@ __all__ = [
     "AgentEventSink",
     "AgentEventSinkError",
     "CompositeAgentEventSink",
+    "CompactionStarted",
+    "CompactionCompleted",
+    "CompactionFailed",
     "ContextPressureEvaluated",
     "AgentStarted",
     "AssistantThinkingDelta",
@@ -169,6 +192,7 @@ __all__ = [
     "AgentSession",
     "SessionMessage",
     "SessionRun",
+    "SessionCompaction",
     "SessionStorage",
     "MemorySessionStorage",
     "SessionRecorder",

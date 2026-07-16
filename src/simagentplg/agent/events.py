@@ -8,6 +8,11 @@ from typing import ClassVar, Protocol, TypeAlias
 from uuid import uuid4
 
 from simagentplg.agent.result import AgentRunResult
+from simagentplg.agent.compaction import (
+    CompactionRequest,
+    CompactionResult,
+    CompactionStatus,
+)
 from simagentplg.agent.context_management import (
     CompactionDecision,
     CompactionPreparation,
@@ -26,6 +31,9 @@ class AgentEventKind(StrEnum):
     AGENT_STARTED = "agent_started"
     TURN_STARTED = "turn_started"
     CONTEXT_PRESSURE_EVALUATED = "context_pressure_evaluated"
+    COMPACTION_STARTED = "compaction_started"
+    COMPACTION_COMPLETED = "compaction_completed"
+    COMPACTION_FAILED = "compaction_failed"
     MESSAGE_COMPLETED = "message_completed"
     ASSISTANT_TEXT_DELTA = "assistant_text_delta"
     ASSISTANT_THINKING_DELTA = "assistant_thinking_delta"
@@ -70,6 +78,44 @@ class ContextPressureEvaluated:
             raise ValueError(
                 "compaction preparation requires a positive decision"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionStarted:
+    """One explicit compaction operation began summary generation."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_STARTED
+    request: CompactionRequest
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionCompleted:
+    """One explicit compaction completed or safely skipped."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_COMPLETED
+    result: CompactionResult
+
+    def __post_init__(self) -> None:
+        if self.result.status not in {
+            CompactionStatus.COMPLETED,
+            CompactionStatus.SKIPPED,
+        }:
+            raise ValueError("completed event requires completed or skipped result")
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionFailed:
+    """One explicit compaction failed or was cancelled before mutation."""
+
+    kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_FAILED
+    result: CompactionResult
+
+    def __post_init__(self) -> None:
+        if self.result.status not in {
+            CompactionStatus.FAILED,
+            CompactionStatus.CANCELLED,
+        }:
+            raise ValueError("failed event requires failed or cancelled result")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +211,9 @@ AgentEventPayload: TypeAlias = (
     AgentStarted
     | TurnStarted
     | ContextPressureEvaluated
+    | CompactionStarted
+    | CompactionCompleted
+    | CompactionFailed
     | MessageCompleted
     | AssistantTextDelta
     | AssistantThinkingDelta

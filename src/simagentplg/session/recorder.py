@@ -4,6 +4,7 @@ from simagentplg.agent.events import (
     AgentEvent,
     AgentFinished,
     AgentStarted,
+    CompactionCompleted,
     MessageCompleted,
     ToolCompleted,
 )
@@ -16,6 +17,7 @@ _RECORDED_PAYLOADS = (
     MessageCompleted,
     ToolCompleted,
     AgentFinished,
+    CompactionCompleted,
 )
 
 
@@ -39,6 +41,11 @@ class SessionRecorder:
         payload = event.payload
         if not isinstance(payload, _RECORDED_PAYLOADS):
             return
+        if (
+            isinstance(payload, CompactionCompleted)
+            and not payload.result.completed
+        ):
+            return
 
         async with self._lock:
             session = await self.storage.load(self.session_id)
@@ -48,6 +55,14 @@ class SessionRecorder:
 
             if isinstance(payload, AgentStarted):
                 session.begin_run(event.run_id, payload.task, event.sequence)
+            elif isinstance(payload, CompactionCompleted):
+                assert payload.result.summary is not None
+                session.apply_compaction(
+                    event.run_id,
+                    event.sequence,
+                    payload.result.summary,
+                    payload.result.messages,
+                )
             elif isinstance(payload, MessageCompleted):
                 session.append_message(
                     event.run_id,

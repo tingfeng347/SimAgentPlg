@@ -8,6 +8,7 @@ class RuntimePolicy:
     max_steps: int = 20
     max_no_tool_responses: int = 3
     max_repeated_tool_calls: int = 3
+    max_run_tokens: int | None = None
     require_explicit_finish: bool = False
 
     def __post_init__(self) -> None:
@@ -21,3 +22,5 @@ class RuntimePolicy:
             raise ValueError(
                 "max_repeated_tool_calls must be greater than zero"
             )
+        if self.max_run_tokens is not None and self.max_run_tokens <= 0:
+            raise ValueError("max_run_tokens must be greater than zero")

@@ -1,11 +1,28 @@
+import asyncio
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from typing import Any
 
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
+from simagentplg.agent.events import (
+    AgentEventEmitter,
+    ToolCompleted,
+    ToolProgressed,
+    ToolStarted,
+)
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import StepOutcome, ToolControl
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
 from simagentplg.handlers.base import BaseHandler
 from simagentplg.middleware import (
     ToolCallContext,
@@ -16,15 +33,58 @@ from simagentplg.middleware import (
 from simagentplg.providers.base import ModelToolCall
 
 
-@dataclass(frozen=True, slots=True)
-class ToolCallResult:
-    messages: tuple[dict[str, Any], ...]
-    control: ToolControl = ToolControl.CONTINUE
-    output: str | None = None
-
-
 class RepeatedToolCallError(RuntimeError):
     """Raised when an identical tool call reaches the configured limit."""
+
+
+class _ScopedToolProgressReporter(ToolProgressReporter):
+    """Serialize updates and reject them after one tool call settles."""
+
+    def __init__(
+        self,
+        *,
+        event_emitter: AgentEventEmitter,
+        turn: int,
+        tool_call: ModelToolCall,
+        cancellation: CancellationToken,
+    ) -> None:
+        self._event_emitter = event_emitter
+        self._turn = turn
+        self._tool_call = tool_call
+        self._cancellation = cancellation
+        self._lock = asyncio.Lock()
+        self._accepting = True
+
+    async def report(self, update: ToolProgressUpdate) -> None:
+        if not isinstance(update, ToolProgressUpdate):
+            raise TypeError(
+                "tool progress reporter requires ToolProgressUpdate, "
+                f"got {type(update).__name__}"
+            )
+
+        async with self._lock:
+            if not self._accepting or self._cancellation.cancelled:
+                return
+            emission = asyncio.create_task(
+                self._event_emitter.emit(
+                    ToolProgressed(
+                        self._turn,
+                        self._tool_call,
+                        update,
+                    )
+                )
+            )
+            try:
+                await asyncio.shield(emission)
+            except asyncio.CancelledError:
+                await asyncio.gather(emission, return_exceptions=True)
+                raise
+
+    async def close(self) -> None:
+        """Wait for an in-flight update, then reject future reports."""
+
+        async with self._lock:
+            self._accepting = False
 
 
 class ToolRuntime:
@@ -37,6 +97,7 @@ class ToolRuntime:
         *,
         state: AgentState,
         logger: logging.Logger,
+        event_emitter: AgentEventEmitter,
         max_repeated_tool_calls: int = 3,
     ) -> None:
         if max_repeated_tool_calls <= 0:
@@ -47,6 +108,7 @@ class ToolRuntime:
         self.middlewares = list(middlewares)
         self.state = state
         self.logger = logger
+        self.event_emitter = event_emitter
         self.max_repeated_tool_calls = max_repeated_tool_calls
         self._tool_routes: dict[str, BaseHandler] = {}
         self._active_middlewares: list[ToolMiddleware] = []
@@ -157,6 +219,8 @@ class ToolRuntime:
         arguments: Mapping[str, Any],
         *,
         tool_call_id: str | None = None,
+        cancellation: CancellationToken | None = None,
+        progress: ToolProgressReporter | None = None,
     ) -> StepOutcome:
         if not self._started:
             await self.startup()
@@ -164,56 +228,80 @@ class ToolRuntime:
         self._get_handler(tool_name)
         if self._tool_chain is None:
             raise RuntimeError("tool middleware chain is not initialized")
+        token = cancellation or CancellationSource().token
         context = ToolCallContext(
             state=self.state,
             tool_name=tool_name,
             arguments=dict(arguments),
             tool_call_id=tool_call_id,
+            cancellation=token,
+            progress=progress,
         )
-        return await self._tool_chain(context)
+        return await token.run(self._tool_chain(context))
 
     async def execute_tool_call(
         self,
         tool_call: ModelToolCall,
+        *,
+        cancellation: CancellationToken,
     ) -> ToolCallResult:
         tool_name = tool_call.name
         raw_arguments = tool_call.arguments
-        self._check_repeated_tool_call(tool_name, raw_arguments)
-        self.logger.info(
-            "Calling tool %s arguments=%s",
-            tool_name,
-            summarize_for_log(raw_arguments),
+        await self.event_emitter.emit(
+            ToolStarted(self.state.turn, tool_call)
         )
+        progress = _ScopedToolProgressReporter(
+            event_emitter=self.event_emitter,
+            turn=self.state.turn,
+            tool_call=tool_call,
+            cancellation=cancellation,
+        )
+        error: str | None = None
+        immediate_result: ToolCallResult | None = None
+        repeated_error: RepeatedToolCallError | None = None
+        outcome: StepOutcome | None = None
         try:
-            arguments = json.loads(raw_arguments)
-            if not isinstance(arguments, dict):
-                raise TypeError("tool arguments must be a JSON object")
-            outcome = await self.dispatch(
-                tool_name,
-                arguments,
-                tool_call_id=tool_call.id,
-            )
-            self.logger.info(
-                "Tool %s completed control=%s result=%s",
-                tool_name,
-                outcome.control,
-                summarize_for_log(outcome.data),
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Tool %s failed: %s arguments=%s",
-                tool_name,
-                exc,
-                summarize_for_log(raw_arguments),
-            )
-            outcome = StepOutcome(
-                {
-                    "status": "error",
-                    "tool": tool_name,
-                    "error": str(exc),
-                }
-            )
+            try:
+                self._check_repeated_tool_call(tool_name, raw_arguments)
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must be a JSON object")
+                outcome = await self.dispatch(
+                    tool_name,
+                    arguments,
+                    tool_call_id=tool_call.id,
+                    cancellation=cancellation,
+                    progress=progress,
+                )
+            except AgentCancelledError as exc:
+                immediate_result = self._cancelled_tool_result(
+                    tool_call,
+                    str(exc),
+                )
+            except RepeatedToolCallError as exc:
+                immediate_result = ToolCallResult((), error=str(exc))
+                repeated_error = exc
+            except Exception as exc:
+                error = str(exc)
+                outcome = StepOutcome(
+                    {
+                        "status": "error",
+                        "tool": tool_name,
+                        "error": error,
+                    }
+                )
+        finally:
+            await progress.close()
 
+        if immediate_result is not None:
+            await self.event_emitter.emit(
+                ToolCompleted(self.state.turn, tool_call, immediate_result)
+            )
+            if repeated_error is not None:
+                raise repeated_error
+            return immediate_result
+
+        assert outcome is not None
         serialized = serialize_tool_result(outcome.data)
         message = {
             "role": "tool",
@@ -221,12 +309,35 @@ class ToolRuntime:
             "content": serialized,
         }
         if outcome.control is not ToolControl.CONTINUE:
-            return ToolCallResult(
+            result = ToolCallResult(
                 (message,),
                 control=outcome.control,
                 output=serialized,
+                error=error,
             )
-        return ToolCallResult((message,))
+        else:
+            result = ToolCallResult((message,), error=error)
+        await self.event_emitter.emit(
+            ToolCompleted(self.state.turn, tool_call, result)
+        )
+        return result
+
+    async def cancel_tool_call(
+        self,
+        tool_call: ModelToolCall,
+        *,
+        reason: str,
+    ) -> ToolCallResult:
+        """Settle an unstarted call skipped after run cancellation."""
+
+        await self.event_emitter.emit(
+            ToolStarted(self.state.turn, tool_call)
+        )
+        result = self._cancelled_tool_result(tool_call, reason)
+        await self.event_emitter.emit(
+            ToolCompleted(self.state.turn, tool_call, result)
+        )
+        return result
 
     def _build_tool_routes(self) -> dict[str, BaseHandler]:
         routes: dict[str, BaseHandler] = {}
@@ -252,7 +363,29 @@ class ToolRuntime:
 
     async def _dispatch_handler(self, context: ToolCallContext) -> StepOutcome:
         handler = self._get_handler(context.tool_name)
-        return await handler.dispatch(context.tool_name, context.arguments)
+        return await handler.execute(context)
+
+    def _cancelled_tool_result(
+        self,
+        tool_call: ModelToolCall,
+        reason: str,
+    ) -> ToolCallResult:
+        message = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": serialize_tool_result(
+                {
+                    "status": "cancelled",
+                    "tool": tool_call.name,
+                    "error": reason,
+                }
+            ),
+        }
+        return ToolCallResult(
+            (message,),
+            error=reason,
+            cancelled=True,
+        )
 
     def _check_repeated_tool_call(
         self,
@@ -288,13 +421,3 @@ def serialize_tool_result(data: Any) -> str:
     if isinstance(data, str):
         return data
     return json.dumps(data, ensure_ascii=False, default=str)
-
-
-def summarize_for_log(data: Any, *, limit: int = 600) -> str:
-    if isinstance(data, str):
-        text = data
-    else:
-        text = json.dumps(data, ensure_ascii=False, default=str)
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}...<truncated {len(text) - limit} chars>"

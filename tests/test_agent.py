@@ -17,6 +17,7 @@ from simagentplg import (
     AgentState,
     AgentStatus,
     BaseAgent,
+    CancellationToken,
     Middleware,
     McpToolHandler,
     MethodToolHandler,
@@ -147,7 +148,12 @@ class FakeModelAdapter(ModelAdapter):
     async def shutdown(self) -> None:
         self.stopped += 1
 
-    async def complete(self, context: Any) -> FakeMessage:
+    async def complete(
+        self,
+        context: Any,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> FakeMessage:
         return await self.completions.create(
             messages=context.llm_messages,
             tools=context.tools or None,
@@ -171,7 +177,12 @@ class EchoHandler(MethodToolHandler):
     async def on_task_start(self) -> None:
         self.task_starts += 1
 
-    async def do_echo(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_echo(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         self.calls += 1
         text = arguments.get("text")
         if not isinstance(text, str):
@@ -183,7 +194,12 @@ class DoneHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((DONE_TOOL,))
 
-    async def do_done(self, arguments: dict[str, Any]) -> StepOutcome:
+    async def do_done(
+        self,
+        arguments: dict[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome(
             {"summary": arguments.get("summary", "")},
             control=ToolControl.COMPLETE,
@@ -434,7 +450,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         active = 0
         maximum = 0
 
-        async def run_loop() -> AgentRunResult:
+        async def run_loop(
+            cancellation: CancellationToken,
+        ) -> AgentRunResult:
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
@@ -1096,7 +1114,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_tool_calls_are_logged(self) -> None:
+    async def test_tool_lifecycle_is_not_duplicated_in_logs(self) -> None:
         client = FakeModelAdapter(
             [
                 FakeMessage(
@@ -1134,11 +1152,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(json.loads(result or "")["summary"], "logged")
         logs = "\n".join(captured.output)
-        self.assertIn("Calling tool echo", logs)
-        self.assertIn('arguments={"text": "hello"}', logs)
-        self.assertIn("Tool echo completed control=continue", logs)
-        self.assertIn("Calling tool done", logs)
-        self.assertIn("Tool done completed control=complete", logs)
+        self.assertIn("registered tools: done, echo", logs)
+        self.assertNotIn("Calling tool", logs)
+        self.assertNotIn("Tool echo completed", logs)
+        self.assertNotIn("Tool done completed", logs)
 
     async def test_task_start_hook_runs_for_each_tool_task(self) -> None:
         handler = EchoHandler()
@@ -1461,6 +1478,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             async def do_echo(
                 self,
                 arguments: dict[str, Any],
+                *,
+                cancellation: CancellationToken | None = None,
             ) -> StepOutcome:
                 self.calls += 1
                 raise RuntimeError("handler failed")

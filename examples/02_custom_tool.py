@@ -6,6 +6,7 @@ from typing import Any
 
 from simagentplg import (
     BaseAgent,
+    CancellationToken,
     MethodToolHandler,
     ModelConfig,
     OpenAIModelAdapter,
@@ -37,6 +38,8 @@ class MathHandler(MethodToolHandler):
     async def do_add(
         self,
         arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
     ) -> StepOutcome:
         left = arguments.get("left")
         right = arguments.get("right")

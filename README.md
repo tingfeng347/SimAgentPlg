@@ -21,6 +21,8 @@ Requires Python 3.12 or newer.
 - Composable `BaseHandler` and `MethodToolHandler` tool contracts
 - `ToolRuntime` lifecycle, routing, middleware, and repeat-call protection
 - Generic `ToolMiddleware` interception
+- Structured, cancellable Tool Progress events
+- Provider-neutral token Usage and per-run budget guards
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -47,6 +49,7 @@ MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
+LLM_INCLUDE_USAGE=true
 ```
 
 `ModelConfig` belongs to `OpenAIModelAdapter`, rather than to `BaseAgent`.
@@ -63,9 +66,10 @@ config = ModelConfig(
 ```
 
 Other model providers can integrate with the core by implementing
-`ModelAdapter.complete()`. The adapter owns provider client creation,
-response normalization, and optional startup/shutdown resources; `BaseAgent`
-only consumes the normalized `AssistantMessage` contract.
+`ModelAdapter.complete()` and optionally overriding `ModelAdapter.stream()`.
+The adapter owns provider client creation, response normalization, streaming,
+and optional startup/shutdown resources; `BaseAgent` only consumes
+provider-neutral stream events and the normalized `AssistantMessage` contract.
 
 ## Plain agent
 
@@ -106,6 +110,73 @@ print(result.output)
 completed run and raises `AgentRunError` for failed, rejected, or cancelled
 runs.
 
+### Cancelling a run
+
+Each run owns an independent cancellation token. `abort()` requests
+cancellation without waiting, while `wait_for_idle()` settles only after the
+terminal event and all awaited event sinks have completed:
+
+```python
+import asyncio
+
+run = asyncio.create_task(agent.run(task="Perform a long operation."))
+
+agent.abort("stopped by user")
+await agent.wait_for_idle()
+result = await run
+```
+
+An externally aborted run returns `RunStatus.CANCELLED` with
+`StopReason.EXTERNAL_ABORT`. The same agent can be reused for another run.
+Model adapters, tool middleware, and tool handlers receive the run's
+`CancellationToken`; long-running handlers should also use `try/finally` to
+release resources such as subprocesses.
+
+### Streaming responses
+
+`BaseAgent.run()` still returns one final `AgentRunResult`, while provisional
+text and provisional reasoning are observed through typed Delta events:
+
+```python
+from simagentplg import AssistantThinkingDelta, AssistantTextDelta
+
+
+class ConsoleSink:
+    async def emit(self, event):
+        if isinstance(event.payload, AssistantThinkingDelta):
+            print("[thinking]", event.payload.delta, end="")
+        elif isinstance(event.payload, AssistantTextDelta):
+            print(event.payload.delta, end="", flush=True)
+```
+
+`OpenAIModelAdapter` uses a real streaming request. Tool-call fragments are
+assembled inside the provider adapter and only complete `AssistantMessage`
+objects enter Agent state. Thinking Delta remains observation-only and is not
+mixed into normal text or persisted to Session. Existing complete-only adapters
+remain compatible through the default `ModelAdapter.stream()` implementation.
+Session recording ignores provisional deltas and persists only
+`MessageCompleted`.
+
+### Usage and run budgets
+
+`ModelResponseCompleted` carries optional provider-neutral `ModelUsage`.
+Reported Usage is attached to internal agent messages and Session history, but
+`AgentContextBuilder` removes it from the final `llm_messages` sent to the
+Provider. `AgentRunResult.usage` aggregates all attempted requests while
+preserving whether every request actually reported Usage:
+
+```python
+result = await agent.run(task="Inspect the project.")
+
+print(result.usage.total_tokens)
+print(result.usage.request_count)
+print(result.usage.complete)
+```
+
+Unknown Usage is distinct from zero. Complete-only adapters remain compatible
+and produce an incomplete `RunUsage` unless they override `stream()` with a
+terminal Usage value.
+
 ## Runtime policy
 
 Tool availability and completion policy are independent:
@@ -117,9 +188,17 @@ policy = RuntimePolicy(
     max_steps=20,
     max_no_tool_responses=3,
     max_repeated_tool_calls=3,
+    max_run_tokens=None,
     require_explicit_finish=False,
 )
 ```
+
+`max_run_tokens` is an optional cumulative model-request budget. It is checked
+between turns: the current response and its requested tools settle first, then
+the guard prevents another Provider request with
+`StopReason.TOKEN_BUDGET_EXCEEDED`. If another request is needed but Usage was
+not reported, the run stops with `StopReason.USAGE_UNAVAILABLE` instead of
+treating unknown Usage as zero.
 
 By default, an agent may call tools and later complete with ordinary text. A
 derived autonomous agent can require a completion tool:
@@ -140,7 +219,7 @@ an async `do_add()` method:
 from collections.abc import Mapping
 from typing import Any
 
-from simagentplg import MethodToolHandler, StepOutcome
+from simagentplg import CancellationToken, MethodToolHandler, StepOutcome
 
 ADD_TOOL = {
     "type": "function",
@@ -163,7 +242,12 @@ class MathHandler(MethodToolHandler):
     def __init__(self) -> None:
         super().__init__((ADD_TOOL,))
 
-    async def do_add(self, arguments: Mapping[str, Any]) -> StepOutcome:
+    async def do_add(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> StepOutcome:
         return StepOutcome(
             {"value": arguments["left"] + arguments["right"]}
         )
@@ -182,6 +266,37 @@ agent = BaseAgent(
 Duplicate tool names fail during startup instead of being silently
 overwritten.
 
+### Tool progress
+
+Long-running tools can optionally accept a scoped `progress` reporter. Existing
+`do_*` methods that do not declare this keyword remain compatible:
+
+```python
+from simagentplg import ToolProgressReporter, ToolProgressUpdate
+
+
+async def do_index(
+    self,
+    arguments,
+    *,
+    cancellation,
+    progress: ToolProgressReporter | None = None,
+) -> StepOutcome:
+    if progress is not None:
+        await progress.report(
+            ToolProgressUpdate(
+                "indexing files",
+                {"completed": 12, "total": 40},
+            )
+        )
+    return StepOutcome({"indexed": 40})
+```
+
+Each accepted update becomes a `ToolProgressed` event correlated with the
+current run, turn, and tool call. Updates are ordered, stop after cancellation,
+and are ignored after `ToolCompleted`. They never change `StepOutcome` or
+`ToolControl`, and are not persisted to Agent state or Session.
+
 ### Tool control signals
 
 Tool payload and runtime control are separate:
@@ -196,7 +311,9 @@ StepOutcome(data, control=ToolControl.CANCEL)
 ```
 
 This lets the runtime distinguish successful completion, policy rejection,
-and cancellation.
+and tool-requested cancellation. `ToolControl.CANCEL` is a tool's business
+decision; external `agent.abort()` uses the separate run cancellation
+protocol.
 
 ## Tool middleware
 
@@ -280,6 +397,8 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
++ Lifecycle Events + Linear Session + Runtime Cancellation
++ Provider Streaming + Tool Progress + Usage Accounting + Run Budget
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -295,11 +414,24 @@ architecture analysis and future roadmap.
 ## Examples
 
 ```bash
+# Provider-backed examples
 uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
+
+# Harness examples using the configured real provider
+uv run python examples/07_event_observers.py
+uv run python examples/08_session_resume.py
+uv run python examples/09_runtime_control.py
+uv run python examples/10_composed_harness.py
+uv run python examples/11_streaming_events.py
+uv run python examples/12_tool_progress.py
+uv run python examples/13_usage_budget.py
 ```
+
+See [the examples guide](examples/README.md) for the capability demonstrated by
+each file.
 
 ## Tests
 
@@ -312,10 +444,13 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`
-- Runtime: `RuntimePolicy`, `AgentRunResult`, `AgentRunError`, `RunStatus`, `StopReason`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
+- Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
+- Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
 - Context: `AgentContextBuilder`, `ContextBuildResult`
-- Tools: `StepOutcome`, `ToolControl`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
+- Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`
 

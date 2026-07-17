@@ -20,6 +20,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - 可组合的 `BaseHandler` 和 `MethodToolHandler` 工具协议
 - `ToolRuntime` 生命周期、路由、Middleware 和重复调用保护
 - 通用 `ToolMiddleware` 拦截机制
+- Provider-neutral Token Usage 与单次 Run 预算保护
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -46,6 +47,7 @@ MODEL_URL=https://api.deepseek.com
 CHAT_MODEL=deepseek-v4-flash
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.7
+LLM_INCLUDE_USAGE=true
 ```
 
 `ModelConfig` 属于 `OpenAIModelAdapter`，不再属于 `BaseAgent`。也可以直接构造：
@@ -97,10 +99,17 @@ print(result.status)
 print(result.stop_reason)
 print(result.turns)
 print(result.output)
+print(result.usage.total_tokens)
+print(result.usage.complete)
 ```
 
 `runtime()` 继续作为兼容接口。任务完成时返回 `result.output`；运行失败、被拒绝或
 取消时抛出 `AgentRunError`。
+
+`ModelResponseCompleted` 可以携带标准化 `ModelUsage`。Usage 会保存在 Agent 内部消息
+和 Session 中，但 `AgentContextBuilder` 会在构造 `llm_messages` 时移除，不会发送给
+Provider。`AgentRunResult.usage` 聚合一次 Run 的所有模型请求；`complete=False` 表示
+至少一次请求没有报告 Usage，不能把它当成零消耗。
 
 ## RuntimePolicy
 
@@ -113,9 +122,14 @@ policy = RuntimePolicy(
     max_steps=20,
     max_no_tool_responses=3,
     max_repeated_tool_calls=3,
+    max_run_tokens=None,
     require_explicit_finish=False,
 )
 ```
+
+可选的 `max_run_tokens` 在轮次边界阻止下一次模型请求。当前响应及其请求的工具会先完整
+收尾；达到预算时返回 `TOKEN_BUDGET_EXCEEDED`，需要继续但 Provider 未报告 Usage 时
+返回 `USAGE_UNAVAILABLE`。
 
 默认情况下，Agent 可以调用工具，之后用普通文本完成任务。自主型派生 Agent 可以要求
 必须调用完成工具：
@@ -175,6 +189,36 @@ agent = BaseAgent(
 ```
 
 重复工具名会在启动阶段报错，不会静默覆盖。
+
+### 工具执行进度
+
+长时间运行的工具可以选择声明一个作用域限定的 `progress` Reporter。没有声明该参数的
+现有 `do_*` 方法仍然兼容：
+
+```python
+from simagentplg import ToolProgressReporter, ToolProgressUpdate
+
+
+async def do_index(
+    self,
+    arguments,
+    *,
+    cancellation,
+    progress: ToolProgressReporter | None = None,
+) -> StepOutcome:
+    if progress is not None:
+        await progress.report(
+            ToolProgressUpdate(
+                "正在建立文件索引",
+                {"completed": 12, "total": 40},
+            )
+        )
+    return StepOutcome({"indexed": 40})
+```
+
+每条有效更新都会生成关联当前 run、turn 和 tool call 的 `ToolProgressed` 事件。
+Progress 保持顺序，在取消或 `ToolCompleted` 后停止接收；它不会改变 `StepOutcome`、
+`ToolControl`，也不会写入 Agent State、Session 或模型上下文。
 
 ### 工具控制信号
 
@@ -268,6 +312,7 @@ SimAgentPlg Core 负责机制：
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
++ Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -287,6 +332,7 @@ uv run python examples/01_stateful_chat.py
 uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
+uv run python examples/13_usage_budget.py
 ```
 
 ## 测试
@@ -300,8 +346,8 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 包根目录导出：
 
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
-- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`
-- Runtime：`RuntimePolicy`、`AgentRunResult`、`AgentRunError`、`RunStatus`、`StopReason`
+- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
+- Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
 - Context：`AgentContextBuilder`、`ContextBuildResult`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`

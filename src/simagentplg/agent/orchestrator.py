@@ -1,24 +1,47 @@
 from __future__ import annotations
 
-import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import suppress
+from typing import Any, Protocol
 
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
+)
+from simagentplg.agent.events import (
+    AgentEventEmitter,
+    AgentFinished,
+    AgentStarted,
+    AssistantThinkingDelta,
+    AssistantTextDelta,
+    MessageCompleted,
+    TurnCompleted,
+    TurnStarted,
 )
 from simagentplg.agent.result import AgentRunResult, RunStatus, StopReason
 from simagentplg.agent.runtime_policy import RuntimePolicy
 from simagentplg.agent.state import AgentState
 from simagentplg.agent.tool_runtime import (
     RepeatedToolCallError,
-    ToolCallResult,
     ToolRuntime,
 )
-from simagentplg.agent.types import ToolControl
+from simagentplg.agent.types import ToolCallResult, ToolControl
+from simagentplg.agent.usage import UsageAccumulator
 from simagentplg.plugins.skill.skill_manager import SkillManager
-from simagentplg.providers.base import AssistantMessage
+from simagentplg.providers.base import (
+    AssistantMessage,
+    ModelResponseCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
+    ModelThinkingDelta,
+    serialize_assistant_message,
+)
 
 TOOL_COMPLETION_RETRY_PROMPT = """
 Explicit-finish mode requires a completing tool call to finish the task.
@@ -26,7 +49,16 @@ If the work is complete, call a tool that returns completion control now.
 Do not end with plain text.
 """.strip()
 
-ModelCall = Callable[[ContextBuildResult], Awaitable[AssistantMessage]]
+
+class ModelStream(Protocol):
+    """Provider stream shape consumed by the orchestrator."""
+
+    def __call__(
+        self,
+        context: ContextBuildResult,
+        *,
+        cancellation: CancellationToken | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]: ...
 
 
 class AgentOrchestrator:
@@ -38,20 +70,21 @@ class AgentOrchestrator:
         agent_id: str,
         state: AgentState,
         context_builder: AgentContextBuilder,
-        model_call: ModelCall,
+        model_stream: ModelStream,
         tool_runtime: ToolRuntime,
         skill_manager: SkillManager | None,
         policy: RuntimePolicy,
-        logger: logging.Logger,
+        event_emitter: AgentEventEmitter,
     ) -> None:
         self.agent_id = agent_id
         self.state = state
         self.context_builder = context_builder
-        self.model_call = model_call
+        self.model_stream = model_stream
         self.tool_runtime = tool_runtime
         self.skill_manager = skill_manager
         self.policy = policy
-        self.logger = logger
+        self.event_emitter = event_emitter
+        self._usage = UsageAccumulator()
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -59,62 +92,120 @@ class AgentOrchestrator:
 
         return self.tool_runtime.tools
 
-    async def run(self, *, task: str) -> AgentRunResult:
+    async def run(
+        self,
+        *,
+        task: str,
+        cancellation: CancellationToken | None = None,
+    ) -> AgentRunResult:
         """Run one task and return its structured terminal result."""
 
+        token = cancellation or CancellationSource().token
+        self._usage = UsageAccumulator()
+        run_id = self.event_emitter.begin_run()
         try:
-            await self._prepare_task(task)
-            result = await self._run_loop()
-        except RepeatedToolCallError as exc:
-            result = self._failure(StopReason.REPEATED_TOOL_CALL, str(exc))
-        except Exception as exc:
-            result = self._failure(StopReason.RUNTIME_ERROR, str(exc))
-        self._commit_result(result)
-        return result
+            caller_cancellation: asyncio.CancelledError | None = None
+            try:
+                self.state.begin_task(task)
+                await self.event_emitter.emit(AgentStarted(task))
+                await token.run(self._prepare_task())
+                result = await self._run_loop(token)
+            except AgentCancelledError as exc:
+                result = self._cancelled(str(exc))
+            except RepeatedToolCallError as exc:
+                result = self._failure(
+                    StopReason.REPEATED_TOOL_CALL,
+                    str(exc),
+                )
+            except asyncio.CancelledError as exc:
+                caller_cancellation = exc
+                result = self._cancelled("agent run coroutine was cancelled")
+            except Exception as exc:
+                result = self._failure(StopReason.RUNTIME_ERROR, str(exc))
+            self._commit_result(result)
+            await self.event_emitter.emit(AgentFinished(result))
+            if caller_cancellation is not None:
+                raise caller_cancellation
+            return result
+        finally:
+            self.event_emitter.end_run(run_id)
 
-    async def _prepare_task(self, task: str) -> None:
-        self.state.begin_task(task)
+    async def _prepare_task(self) -> None:
         await self.tool_runtime.on_task_start()
         self._activate_explicit_skill()
 
-    async def _run_loop(self) -> AgentRunResult:
+    async def _run_loop(
+        self,
+        cancellation: CancellationToken,
+    ) -> AgentRunResult:
         for _ in range(self.policy.max_steps):
-            message = await self._chat_next_turn()
-            self.state.add_message(message.to_agent_message())
+            cancellation.raise_if_cancelled()
+            budget_failure = self._budget_failure()
+            if budget_failure is not None:
+                return budget_failure
+            turn = self.state.advance_turn()
+            await self.event_emitter.emit(TurnStarted(turn))
+            try:
+                response = await self._chat_next_turn(cancellation)
+                message = response.message
+                self._usage.record(response.usage)
+                self.state.add_message(
+                    serialize_assistant_message(
+                        message,
+                        usage=response.usage,
+                    )
+                )
+                await self.event_emitter.emit(
+                    MessageCompleted(turn, message, response.usage)
+                )
+                cancellation.raise_if_cancelled()
 
-            if not message.tool_calls:
-                if not self.policy.require_explicit_finish:
-                    if message.content:
-                        return AgentRunResult(
-                            status=RunStatus.COMPLETED,
-                            stop_reason=StopReason.TEXT_RESPONSE,
-                            turns=self.state.turn,
-                            output=message.content,
+                if not message.tool_calls:
+                    if not self.policy.require_explicit_finish:
+                        if message.content:
+                            return AgentRunResult(
+                                status=RunStatus.COMPLETED,
+                                stop_reason=StopReason.TEXT_RESPONSE,
+                                turns=self.state.turn,
+                                output=message.content,
+                                usage=self._usage.snapshot(),
+                            )
+                        return self._failure(
+                            StopReason.EMPTY_RESPONSE,
+                            "chat completion returned empty content",
                         )
-                    return self._failure(
-                        StopReason.EMPTY_RESPONSE,
-                        "chat completion returned empty content",
-                    )
 
-                self.state.no_tool_response_count += 1
-                if (
-                    self.state.no_tool_response_count
-                    >= self.policy.max_no_tool_responses
-                ):
-                    return self._failure(
-                        StopReason.MAX_NO_TOOL_RESPONSES,
-                        "explicit-finish mode produced plain text without a "
-                        "completing tool call "
-                        f"{self.state.no_tool_response_count} consecutive times",
-                    )
-                continue
+                    self.state.no_tool_response_count += 1
+                    if (
+                        self.state.no_tool_response_count
+                        >= self.policy.max_no_tool_responses
+                    ):
+                        return self._failure(
+                            StopReason.MAX_NO_TOOL_RESPONSES,
+                            "explicit-finish mode produced plain text without a "
+                            "completing tool call "
+                            f"{self.state.no_tool_response_count} "
+                            "consecutive times",
+                        )
+                    continue
 
-            self.state.no_tool_response_count = 0
-            tool_result = await self._execute_tool_calls(message)
-            self.state.add_messages(list(tool_result.messages))
-            terminal_result = self._terminal_tool_result(tool_result)
-            if terminal_result is not None:
-                return terminal_result
+                self.state.no_tool_response_count = 0
+                tool_result = await self._execute_tool_calls(
+                    message,
+                    cancellation,
+                )
+                self.state.add_messages(list(tool_result.messages))
+                if tool_result.cancelled:
+                    raise AgentCancelledError(
+                        tool_result.error
+                        or cancellation.reason
+                        or "agent run was aborted"
+                    )
+                terminal_result = self._terminal_tool_result(tool_result)
+                if terminal_result is not None:
+                    return terminal_result
+            finally:
+                await self.event_emitter.emit(TurnCompleted(turn))
 
         return self._failure(
             StopReason.MAX_STEPS,
@@ -122,15 +213,82 @@ class AgentOrchestrator:
             f"{self.policy.max_steps} steps",
         )
 
-    async def _chat_next_turn(self) -> AssistantMessage:
-        turn = self.state.advance_turn()
-        self.logger.info("Turn %d/%d", turn, self.policy.max_steps)
+    async def _chat_next_turn(
+        self,
+        cancellation: CancellationToken,
+    ) -> ModelResponseCompleted:
         context = self.context_builder.build(
             self.state,
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
-        return await self.model_call(context)
+        self._usage.begin_request()
+        stream = self.model_stream(
+            context,
+            cancellation=cancellation,
+        )
+        iterator = stream.__aiter__()
+        completed: ModelResponseCompleted | None = None
+        try:
+            while completed is None:
+                cancellation.raise_if_cancelled()
+                try:
+                    event = await cancellation.run(anext(iterator))
+                except StopAsyncIteration:
+                    break
+
+                if isinstance(event, ModelTextDelta):
+                    await self.event_emitter.emit(
+                        AssistantTextDelta(self.state.turn, event.delta)
+                    )
+                elif isinstance(event, ModelThinkingDelta):
+                    await self.event_emitter.emit(
+                        AssistantThinkingDelta(
+                            self.state.turn,
+                            event.delta,
+                        )
+                    )
+                elif isinstance(event, ModelResponseCompleted):
+                    completed = event
+                else:
+                    raise TypeError(
+                        "model stream returned an unsupported event: "
+                        f"{type(event).__name__}"
+                    )
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
+
+        if completed is None:
+            raise RuntimeError(
+                "model stream ended without a completed response"
+            )
+        return completed
+
+    def _budget_failure(self) -> AgentRunResult | None:
+        limit = self.policy.max_run_tokens
+        if limit is None:
+            return None
+
+        usage = self._usage.snapshot()
+        if usage.request_count == 0:
+            return None
+        if not usage.complete:
+            return self._failure(
+                StopReason.USAGE_UNAVAILABLE,
+                "run token budget cannot continue because "
+                f"{usage.missing_request_count} model request(s) did not "
+                "report usage",
+            )
+        if usage.total_tokens >= limit:
+            return self._failure(
+                StopReason.TOKEN_BUDGET_EXCEEDED,
+                f"run used {usage.total_tokens} tokens and cannot start "
+                f"another model request under the {limit}-token budget",
+            )
+        return None
 
     def _runtime_context_messages(self) -> list[dict[str, str]]:
         if self.state.no_tool_response_count == 0:
@@ -173,12 +331,34 @@ class AgentOrchestrator:
     async def _execute_tool_calls(
         self,
         message: AssistantMessage,
+        cancellation: CancellationToken,
     ) -> ToolCallResult:
         result_messages: list[dict[str, Any]] = []
 
-        for tool_call in message.tool_calls or []:
-            tool_result = await self.tool_runtime.execute_tool_call(tool_call)
+        tool_calls = message.tool_calls or ()
+        for index, tool_call in enumerate(tool_calls):
+            tool_result = await self.tool_runtime.execute_tool_call(
+                tool_call,
+                cancellation=cancellation,
+            )
             result_messages.extend(tool_result.messages)
+            if tool_result.cancelled:
+                reason = (
+                    tool_result.error
+                    or cancellation.reason
+                    or "agent run was aborted"
+                )
+                for pending_call in tool_calls[index + 1 :]:
+                    pending_result = await self.tool_runtime.cancel_tool_call(
+                        pending_call,
+                        reason=reason,
+                    )
+                    result_messages.extend(pending_result.messages)
+                return ToolCallResult(
+                    tuple(result_messages),
+                    error=reason,
+                    cancelled=True,
+                )
             if tool_result.control is not ToolControl.CONTINUE:
                 return ToolCallResult(
                     tuple(result_messages),
@@ -187,6 +367,15 @@ class AgentOrchestrator:
                 )
 
         return ToolCallResult(tuple(result_messages))
+
+    def _cancelled(self, error: str) -> AgentRunResult:
+        return AgentRunResult(
+            status=RunStatus.CANCELLED,
+            stop_reason=StopReason.EXTERNAL_ABORT,
+            turns=self.state.turn,
+            error=error,
+            usage=self._usage.snapshot(),
+        )
 
     def _terminal_tool_result(
         self,
@@ -200,6 +389,7 @@ class AgentOrchestrator:
                 stop_reason=StopReason.TOOL_COMPLETION,
                 turns=self.state.turn,
                 output=tool_result.output,
+                usage=self._usage.snapshot(),
             )
         if tool_result.control is ToolControl.REJECT:
             return AgentRunResult(
@@ -208,6 +398,7 @@ class AgentOrchestrator:
                 turns=self.state.turn,
                 output=tool_result.output,
                 error="tool execution was rejected",
+                usage=self._usage.snapshot(),
             )
         return AgentRunResult(
             status=RunStatus.CANCELLED,
@@ -215,6 +406,7 @@ class AgentOrchestrator:
             turns=self.state.turn,
             output=tool_result.output,
             error="tool execution was cancelled",
+            usage=self._usage.snapshot(),
         )
 
     def _failure(
@@ -227,6 +419,7 @@ class AgentOrchestrator:
             stop_reason=stop_reason,
             turns=self.state.turn,
             error=error,
+            usage=self._usage.snapshot(),
         )
 
     def _commit_result(self, result: AgentRunResult) -> None:

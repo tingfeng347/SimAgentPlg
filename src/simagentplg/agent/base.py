@@ -1,9 +1,12 @@
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from simagentplg.agent.cancellation import CancellationSource
 from simagentplg.agent.context_builder import AgentContextBuilder
+from simagentplg.agent.events import AgentEventEmitter, AgentEventSink
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.runtime_policy import RuntimePolicy
@@ -36,6 +39,11 @@ that returns the completion control signal.
 """.strip()
 
 
+@dataclass(slots=True)
+class _ActiveRun:
+    cancellation: CancellationSource
+
+
 class BaseAgent:
     """Stateful agent core composed with a model adapter and tool handlers."""
 
@@ -50,6 +58,7 @@ class BaseAgent:
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
         runtime_policy: RuntimePolicy | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> None:
         self._agent_id = agent_id.strip()
         if not self._agent_id:
@@ -60,7 +69,12 @@ class BaseAgent:
         self.runtime_policy = policy
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
+        self.event_sink = event_sink
         self._operation_lock = asyncio.Lock()
+        self._active_run: _ActiveRun | None = None
+        self._pending_runs = 0
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
         self._started = False
         self._skill_manager = SkillManager(skills_dir) if skills_dir else None
         self.state = AgentState()
@@ -68,22 +82,28 @@ class BaseAgent:
             skill_manager=self._skill_manager,
         )
         self.logger = get_logger(f"{self.agent_id}")
+        self._event_emitter = AgentEventEmitter(
+            agent_id=self.agent_id,
+            sink=self.event_sink,
+            logger=self.logger,
+        )
         self._tool_runtime = ToolRuntime(
             self.handlers,
             self.middlewares,
             state=self.state,
             logger=self.logger,
+            event_emitter=self._event_emitter,
             max_repeated_tool_calls=policy.max_repeated_tool_calls,
         )
         self.orchestrator = AgentOrchestrator(
             agent_id=self.agent_id,
             state=self.state,
             context_builder=self._context_builder,
-            model_call=self.model.complete,
+            model_stream=self.model.stream,
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
-            logger=self.logger,
+            event_emitter=self._event_emitter,
         )
         self.reset()
 
@@ -209,9 +229,39 @@ class BaseAgent:
     async def run(self, *, task: str) -> AgentRunResult:
         """Run one task and return a structured terminal result."""
 
-        async with self._operation_lock:
-            await self._startup()
-            return await self.orchestrator.run(task=task)
+        self._pending_runs += 1
+        self._idle_event.clear()
+        try:
+            async with self._operation_lock:
+                source = CancellationSource()
+                active_run = _ActiveRun(source)
+                self._active_run = active_run
+                try:
+                    await self._startup()
+                    return await self.orchestrator.run(
+                        task=task,
+                        cancellation=source.token,
+                    )
+                finally:
+                    if self._active_run is active_run:
+                        self._active_run = None
+        finally:
+            self._pending_runs -= 1
+            if self._pending_runs == 0:
+                self._idle_event.set()
+
+    def abort(self, reason: str | None = None) -> bool:
+        """Request cancellation of the active run without waiting for it."""
+
+        active_run = self._active_run
+        if active_run is None:
+            return False
+        return active_run.cancellation.cancel(reason)
+
+    async def wait_for_idle(self) -> None:
+        """Wait for all requested runs and their event sinks to settle."""
+
+        await self._idle_event.wait()
 
     async def runtime(self, *, task: str) -> str | None:
         """Compatibility wrapper returning completed output as text."""

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+
+from simagentplg.agent.usage import RunUsage
 
 
 class RunStatus(StrEnum):
@@ -20,10 +22,13 @@ class StopReason(StrEnum):
     TOOL_COMPLETION = "tool_completion"
     TOOL_REJECTED = "tool_rejected"
     TOOL_CANCELLED = "tool_cancelled"
+    EXTERNAL_ABORT = "external_abort"
     EMPTY_RESPONSE = "empty_response"
     MAX_STEPS = "max_steps"
     MAX_NO_TOOL_RESPONSES = "max_no_tool_responses"
     REPEATED_TOOL_CALL = "repeated_tool_call"
+    TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
+    USAGE_UNAVAILABLE = "usage_unavailable"
     RUNTIME_ERROR = "runtime_error"
 
 
@@ -36,6 +41,7 @@ class AgentRunResult:
     turns: int
     output: str | None = None
     error: str | None = None
+    usage: RunUsage = field(default_factory=RunUsage)
 
     @property
     def succeeded(self) -> bool:

@@ -1,7 +1,30 @@
 """Composable stateful agents with tool handlers and MCP integration."""
 
 from simagentplg.agent.base import BaseAgent
+from simagentplg.agent.cancellation import (
+    AgentCancelledError,
+    CancellationSource,
+    CancellationToken,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
+from simagentplg.agent.events import (
+    AgentEvent,
+    AgentEventKind,
+    AgentEventPayload,
+    AgentEventSink,
+    AgentEventSinkError,
+    AgentFinished,
+    AgentStarted,
+    AssistantThinkingDelta,
+    AssistantTextDelta,
+    CompositeAgentEventSink,
+    MessageCompleted,
+    ToolCompleted,
+    ToolProgressed,
+    ToolStarted,
+    TurnCompleted,
+    TurnStarted,
+)
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import (
     AgentRunError,
@@ -18,8 +41,15 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import StepOutcome, ToolControl
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
 from simagentplg.agent.state import AgentState, AgentStatus
+from simagentplg.agent.usage import RunUsage
 from simagentplg.handlers import (
     BaseHandler,
     McpToolHandler,
@@ -33,29 +63,70 @@ from simagentplg.providers import (
     AssistantMessage,
     ModelAdapter,
     ModelConfig,
+    ModelResponseCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
+    ModelThinkingDelta,
     ModelToolCall,
+    ModelUsage,
     OpenAIModelAdapter,
+)
+from simagentplg.session import (
+    AgentSession,
+    MemorySessionStorage,
+    SessionMessage,
+    SessionRecorder,
+    SessionRun,
+    SessionStorage,
 )
 
 __all__ = [
     "BaseAgent",
+    "AgentCancelledError",
+    "CancellationSource",
+    "CancellationToken",
     "ModelConfig",
     "ModelAdapter",
     "OpenAIModelAdapter",
     "AssistantMessage",
+    "ModelStreamEvent",
+    "ModelTextDelta",
+    "ModelThinkingDelta",
+    "ModelResponseCompleted",
     "ModelToolCall",
+    "ModelUsage",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",
     "ContextBuildResult",
+    "AgentEvent",
+    "AgentEventKind",
+    "AgentEventPayload",
+    "AgentEventSink",
+    "AgentEventSinkError",
+    "CompositeAgentEventSink",
+    "AgentStarted",
+    "AssistantThinkingDelta",
+    "AssistantTextDelta",
+    "TurnStarted",
+    "MessageCompleted",
+    "ToolStarted",
+    "ToolProgressed",
+    "ToolCompleted",
+    "TurnCompleted",
+    "AgentFinished",
     "AgentOrchestrator",
     "RuntimePolicy",
     "AgentRunResult",
     "AgentRunError",
     "RunStatus",
     "StopReason",
+    "RunUsage",
     "StepOutcome",
+    "ToolCallResult",
     "ToolControl",
+    "ToolProgressReporter",
+    "ToolProgressUpdate",
     "Middleware",
     "ToolMiddleware",
     "ToolCallContext",
@@ -69,4 +140,10 @@ __all__ = [
     "UnknownToolError",
     "McpServerManager",
     "SkillManager",
+    "AgentSession",
+    "SessionMessage",
+    "SessionRun",
+    "SessionStorage",
+    "MemorySessionStorage",
+    "SessionRecorder",
 ]

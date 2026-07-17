@@ -93,15 +93,12 @@ class McpServerManager:
         Raises:
             ValueError: If the tool is not registered.
         """
-        logger.info("Calling MCP tool %s arguments=%s", tool_name, args)
         try:
             route = self._tool_routes[tool_name]
         except KeyError as exc:
-            logger.error("Unknown MCP tool: %s", tool_name)
             raise ValueError(f"unknown MCP tool: {tool_name}") from exc
 
         result = await route.client.call_tool(route.raw_name, args)
-        logger.info("MCP tool %s completed", tool_name)
         return str(result)
 
     def get_openai_tools(self) -> list[dict[str, Any]]:

@@ -3,14 +3,24 @@
 from simagentplg.providers.base import (
     AssistantMessage,
     ModelAdapter,
+    ModelResponseCompleted,
+    ModelStreamEvent,
+    ModelTextDelta,
+    ModelThinkingDelta,
     ModelToolCall,
+    ModelUsage,
 )
 from simagentplg.providers.openai import ModelConfig, OpenAIModelAdapter
 
 __all__ = [
     "AssistantMessage",
     "ModelAdapter",
+    "ModelStreamEvent",
+    "ModelTextDelta",
+    "ModelThinkingDelta",
+    "ModelResponseCompleted",
     "ModelToolCall",
+    "ModelUsage",
     "ModelConfig",
     "OpenAIModelAdapter",
 ]

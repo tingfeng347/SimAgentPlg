@@ -22,13 +22,12 @@ from simagentplg import (
     ModelUsage,
     OpenAIModelAdapter,
     RunStatus,
-    RunUsage,
     RuntimePolicy,
+    RunUsage,
     SessionRecorder,
     StepOutcome,
     StopReason,
 )
-
 
 CONTINUE_TOOL = {
     "type": "function",
@@ -209,9 +208,7 @@ class UsageBudgetTests(unittest.IsolatedAsyncioTestCase):
         )
 
         agent_assistant = next(
-            message
-            for message in agent.messages
-            if message["role"] == "assistant"
+            message for message in agent.messages if message["role"] == "assistant"
         )
         self.assertEqual(agent_assistant["usage"], first_usage.to_dict())
         context_assistant_index = next(
@@ -290,9 +287,7 @@ class UsageBudgetTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_final_response_can_complete_after_crossing_budget(self) -> None:
-        model = UsageSequenceModel(
-            [(AssistantMessage(content="done"), usage(100, 50))]
-        )
+        model = UsageSequenceModel([(AssistantMessage(content="done"), usage(100, 50))])
         agent = BaseAgent(
             model,
             agent_id="final-over-budget",
@@ -399,9 +394,7 @@ class UsageBudgetTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         completions = FakeOpenAICompletions(response)
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         adapter = OpenAIModelAdapter(
             ModelConfig(
                 model="test-model",
@@ -454,9 +447,7 @@ class UsageBudgetTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         completions = FakeOpenAICompletions(response)
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         adapter = OpenAIModelAdapter(
             ModelConfig(
                 model="test-model",
@@ -469,9 +460,7 @@ class UsageBudgetTests(unittest.IsolatedAsyncioTestCase):
 
         _ = [
             event
-            async for event in adapter.stream(
-                AgentContextBuilder().build(AgentState())
-            )
+            async for event in adapter.stream(AgentContextBuilder().build(AgentState()))
         ]
 
         self.assertNotIn("stream_options", completions.calls[0])

@@ -34,9 +34,7 @@ class ModelUsage:
             if value is not None and value < 0:
                 raise ValueError(f"{name} must not be negative")
         if self.total_tokens != self.input_tokens + self.output_tokens:
-            raise ValueError(
-                "total_tokens must equal input_tokens + output_tokens"
-            )
+            raise ValueError("total_tokens must equal input_tokens + output_tokens")
         if (
             self.cache_read_tokens is not None
             and self.cache_read_tokens > self.input_tokens
@@ -103,8 +101,7 @@ class AssistantMessage:
         }
         if self.tool_calls:
             message["tool_calls"] = [
-                tool_call.to_agent_message()
-                for tool_call in self.tool_calls
+                tool_call.to_agent_message() for tool_call in self.tool_calls
             ]
         return message
 
@@ -169,17 +166,17 @@ class ModelAdapter(ABC):
     @abstractmethod
     async def complete(
         self,
-        context: "ContextBuildResult",
+        context: ContextBuildResult,
         *,
-        cancellation: "CancellationToken | None" = None,
+        cancellation: CancellationToken | None = None,
     ) -> AssistantMessage:
         """Return one complete response and honor the per-run cancellation."""
 
     async def stream(
         self,
-        context: "ContextBuildResult",
+        context: ContextBuildResult,
         *,
-        cancellation: "CancellationToken | None" = None,
+        cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """Adapt a complete-only provider into one terminal stream event."""
 

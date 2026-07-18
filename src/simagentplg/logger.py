@@ -5,7 +5,7 @@ def setup_logger(
     name: str = "SimAgentPlg",
     level: str = "INFO",
     fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-):
+) -> logging.Logger:
     """Create and configure a console logger.
 
     Args:

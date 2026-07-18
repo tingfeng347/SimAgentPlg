@@ -18,9 +18,9 @@ from simagentplg import (
     AgentStatus,
     BaseAgent,
     CancellationToken,
-    Middleware,
     McpToolHandler,
     MethodToolHandler,
+    Middleware,
     ModelAdapter,
     ModelConfig,
     OpenAIModelAdapter,
@@ -120,8 +120,7 @@ class FakeMessage:
         }
         if self.tool_calls:
             message["tool_calls"] = [
-                tool_call.to_agent_message()
-                for tool_call in self.tool_calls
+                tool_call.to_agent_message() for tool_call in self.tool_calls
             ]
         return message
 
@@ -298,7 +297,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(agent.orchestrator, AgentOrchestrator)
         self.assertIs(agent.orchestrator.state, agent.state)
 
-    async def test_middleware_base_class_is_exported_with_standard_spelling(self) -> None:
+    async def test_middleware_base_class_is_exported_with_standard_spelling(
+        self,
+    ) -> None:
         self.assertTrue(issubclass(ToolMiddleware, Middleware))
 
     async def test_base_agent_public_api_uses_model_and_runtime_policy(self) -> None:
@@ -374,9 +375,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         completions = OpenAICompletions()
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         adapter = OpenAIModelAdapter(
             TEST_CONFIG,
             client=client,  # type: ignore[arg-type]
@@ -909,9 +908,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(Path, "read_text", autospec=True) as read_text:
                 read_text.side_effect = count_read_text
-                result = await agent.runtime(
-                    task="$release_notes Write release notes"
-                )
+                result = await agent.runtime(task="$release_notes Write release notes")
 
         self.assertEqual(result, "release notes")
         self.assertEqual(read_counts[skill_dir / "SKILL.md"], 1)
@@ -1368,9 +1365,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                         tool_calls=[
                             FakeToolCall(
                                 id="call-1",
-                                function=FakeFunction(
-                                    "echo", '{"text": "blocked"}'
-                                ),
+                                function=FakeFunction("echo", '{"text": "blocked"}'),
                             )
                         ]
                     )

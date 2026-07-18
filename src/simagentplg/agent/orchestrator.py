@@ -23,8 +23,8 @@ from simagentplg.agent.events import (
     AgentEventEmitter,
     AgentFinished,
     AgentStarted,
-    AssistantThinkingDelta,
     AssistantTextDelta,
+    AssistantThinkingDelta,
     ContextPressureEvaluated,
     MessageCompleted,
     TurnCompleted,
@@ -273,9 +273,7 @@ class AgentOrchestrator:
                     await close()
 
         if completed is None:
-            raise RuntimeError(
-                "model stream ended without a completed response"
-            )
+            raise RuntimeError("model stream ended without a completed response")
         return completed
 
     async def _evaluate_context_pressure(
@@ -363,9 +361,7 @@ class AgentOrchestrator:
         if self.skill_manager is None:
             return
 
-        skill_name = self.skill_manager.select_explicit_skill(
-            self.state.messages
-        )
+        skill_name = self.skill_manager.select_explicit_skill(self.state.messages)
         if skill_name is not None:
             self.state.active_skill_name = skill_name
 
@@ -385,9 +381,7 @@ class AgentOrchestrator:
             result_messages.extend(tool_result.messages)
             if tool_result.cancelled:
                 reason = (
-                    tool_result.error
-                    or cancellation.reason
-                    or "agent run was aborted"
+                    tool_result.error or cancellation.reason or "agent run was aborted"
                 )
                 for pending_call in tool_calls[index + 1 :]:
                     pending_result = await self.tool_runtime.cancel_tool_call(

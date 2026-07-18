@@ -17,8 +17,8 @@ from simagentplg import (
     SessionRecorder,
     StepOutcome,
     StopReason,
-    ToolCompleted,
     ToolCallContext,
+    ToolCompleted,
     ToolMiddleware,
     ToolNext,
     ToolProgressed,
@@ -26,7 +26,6 @@ from simagentplg import (
     ToolProgressUpdate,
     ToolStarted,
 )
-
 
 WORK_TOOL = {
     "type": "function",
@@ -183,9 +182,7 @@ class ToolProgressTests(unittest.IsolatedAsyncioTestCase):
             [payload.update.message for payload in progress],
             ["scanning", "finished"],
         )
-        self.assertTrue(
-            all(payload.tool_call is call for payload in tool_payloads)
-        )
+        self.assertTrue(all(payload.tool_call is call for payload in tool_payloads))
         self.assertEqual(
             [event.sequence for event in sink.events],
             list(range(1, len(sink.events) + 1)),
@@ -288,9 +285,7 @@ class ToolProgressTests(unittest.IsolatedAsyncioTestCase):
         handler = BlockingProgressHandler()
         sink = RecordingSink()
         agent = BaseAgent(
-            SequenceModel(
-                [AssistantMessage(tool_calls=(tool_call(),))]
-            ),
+            SequenceModel([AssistantMessage(tool_calls=(tool_call(),))]),
             agent_id="abort-progress",
             handlers=[handler],
             event_sink=sink,

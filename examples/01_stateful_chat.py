@@ -18,15 +18,11 @@ async def main() -> None:
         )
         print(f"First response: {first}")
 
-        second = await agent.runtime(
-            task="Which programming language do I prefer?"
-        )
+        second = await agent.runtime(task="Which programming language do I prefer?")
         print(f"Memory response: {second}")
 
         agent.reset()
-        third = await agent.runtime(
-            task="Which programming language do I prefer?"
-        )
+        third = await agent.runtime(task="Which programming language do I prefer?")
         print(f"After reset: {third}")
     finally:
         await agent.shutdown()

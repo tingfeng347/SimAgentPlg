@@ -100,8 +100,7 @@ class CompactionConsoleSink:
 
 
 OLD_TOOL_OUTPUT = "\n".join(
-    f"diagnostic line {index}: repeated legacy warning"
-    for index in range(80)
+    f"diagnostic line {index}: repeated legacy warning" for index in range(80)
 )
 
 HISTORY = [
@@ -155,21 +154,13 @@ async def main() -> None:
         ),
         compaction_policy=CompactionPolicy(
             ContextBudget(
-                context_window=int(
-                    os.getenv("HARNESS_CONTEXT_WINDOW", "4096")
-                ),
-                reserve_tokens=int(
-                    os.getenv("HARNESS_CONTEXT_RESERVE", "512")
-                ),
-                keep_recent_tokens=int(
-                    os.getenv("HARNESS_KEEP_RECENT_TOKENS", "20")
-                ),
+                context_window=int(os.getenv("HARNESS_CONTEXT_WINDOW", "4096")),
+                reserve_tokens=int(os.getenv("HARNESS_CONTEXT_RESERVE", "512")),
+                keep_recent_tokens=int(os.getenv("HARNESS_KEEP_RECENT_TOKENS", "20")),
             )
         ),
         compactor=OpenAICompactor(model),
-        event_sink=CompositeAgentEventSink(
-            [recorder, CompactionConsoleSink()]
-        ),
+        event_sink=CompositeAgentEventSink([recorder, CompactionConsoleSink()]),
     )
     agent.reset(history=HISTORY)
 

@@ -5,8 +5,8 @@ import asyncio
 from simagentplg import (
     AgentEvent,
     AgentFinished,
-    AssistantThinkingDelta,
     AssistantTextDelta,
+    AssistantThinkingDelta,
     BaseAgent,
     MessageCompleted,
     ModelConfig,
@@ -35,10 +35,7 @@ class StreamingConsoleSink:
         elif isinstance(payload, MessageCompleted) and self.received_delta:
             print()
         elif isinstance(payload, AgentFinished):
-            print(
-                f"\nfinished: {payload.result.status} / "
-                f"{payload.result.stop_reason}"
-            )
+            print(f"\nfinished: {payload.result.status} / {payload.result.stop_reason}")
 
 
 async def main() -> None:

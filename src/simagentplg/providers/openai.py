@@ -52,7 +52,7 @@ class ModelConfig:
             raise TypeError("include_usage must be a bool")
 
     @classmethod
-    def from_env(cls) -> "ModelConfig":
+    def from_env(cls) -> ModelConfig:
         """Build a config from the configured model environment variables."""
 
         load_dotenv()
@@ -61,17 +61,13 @@ class ModelConfig:
         base_url = os.getenv("MODEL_URL")
 
         if not model or not api_key or not base_url:
-            raise ValueError(
-                "CHAT_MODEL, MODEL_API_KEY and MODEL_URL must be defined"
-            )
+            raise ValueError("CHAT_MODEL, MODEL_API_KEY and MODEL_URL must be defined")
 
         try:
             timeout = int(os.getenv("LLM_TIMEOUT", "60"))
             temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
         except ValueError as exc:
-            raise ValueError(
-                "LLM_TIMEOUT and LLM_TEMPERATURE must be numeric"
-            ) from exc
+            raise ValueError("LLM_TIMEOUT and LLM_TEMPERATURE must be numeric") from exc
 
         include_usage_value = os.getenv("LLM_INCLUDE_USAGE", "true").lower()
         if include_usage_value not in {"true", "false"}:
@@ -116,9 +112,7 @@ def _normalize_usage(raw_usage: Any) -> ModelUsage:
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cache_read_tokens=int(cache_read) if cache_read is not None else None,
-        cache_write_tokens=(
-            int(cache_write) if cache_write is not None else None
-        ),
+        cache_write_tokens=(int(cache_write) if cache_write is not None else None),
         reasoning_tokens=int(reasoning) if reasoning is not None else None,
     )
 
@@ -151,9 +145,9 @@ class OpenAIModelAdapter(ModelAdapter):
 
     async def complete(
         self,
-        context: "ContextBuildResult",
+        context: ContextBuildResult,
         *,
-        cancellation: "CancellationToken | None" = None,
+        cancellation: CancellationToken | None = None,
     ) -> AssistantMessage:
         await self.startup()
         client = self._client
@@ -165,7 +159,7 @@ class OpenAIModelAdapter(ModelAdapter):
                 model=self.config.model,
                 messages=cast(Any, context.llm_messages),
                 temperature=self.config.temperature,
-                tools=cast(Any, context.tools) or None,
+                tools=cast(Any, context.tools or None),
             )
             response = (
                 await cancellation.run(request)
@@ -197,9 +191,9 @@ class OpenAIModelAdapter(ModelAdapter):
 
     async def stream(
         self,
-        context: "ContextBuildResult",
+        context: ContextBuildResult,
         *,
-        cancellation: "CancellationToken | None" = None,
+        cancellation: CancellationToken | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """Stream and normalize one OpenAI-compatible chat completion."""
 
@@ -229,6 +223,7 @@ class OpenAIModelAdapter(ModelAdapter):
                 if cancellation is not None
                 else await request
             )
+            assert response is not None
             iterator = response.__aiter__()
             while True:
                 if cancellation is not None:
@@ -297,9 +292,7 @@ class OpenAIModelAdapter(ModelAdapter):
         except AgentCancelledError:
             raise
         except Exception as exc:
-            raise RuntimeError(
-                f"chat completion stream failed: {exc}"
-            ) from exc
+            raise RuntimeError(f"chat completion stream failed: {exc}") from exc
         finally:
             if response is not None:
                 close = getattr(response, "close", None)
@@ -312,9 +305,7 @@ class OpenAIModelAdapter(ModelAdapter):
                             await close_result
 
         if not has_finish_reason:
-            raise RuntimeError(
-                "chat completion stream ended without finish_reason"
-            )
+            raise RuntimeError("chat completion stream ended without finish_reason")
 
         normalized_tool_calls: list[ModelToolCall] = []
         for index in sorted(tool_calls):

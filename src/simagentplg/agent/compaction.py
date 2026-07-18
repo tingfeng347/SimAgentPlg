@@ -17,7 +17,7 @@ from simagentplg.agent.context_management import (
     MessageTokenEstimator,
 )
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import AgentMessage, INTERNAL_METADATA_PREFIX
+from simagentplg.agent.types import INTERNAL_METADATA_PREFIX, AgentMessage
 
 if TYPE_CHECKING:
     from simagentplg.agent.events import AgentEventEmitter
@@ -69,13 +69,9 @@ class SummaryEntry:
         if self.history_start_index < 0:
             raise ValueError("history_start_index must not be negative")
         if self.first_kept_index <= self.history_start_index:
-            raise ValueError(
-                "first_kept_index must follow history_start_index"
-            )
+            raise ValueError("first_kept_index must follow history_start_index")
         if self.summarized_message_count <= 0:
-            raise ValueError(
-                "summarized_message_count must be greater than zero"
-            )
+            raise ValueError("summarized_message_count must be greater than zero")
         if self.tokens_before < 0:
             raise ValueError("tokens_before must not be negative")
 
@@ -92,7 +88,7 @@ class SummaryEntry:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "SummaryEntry":
+    def from_dict(cls, value: Mapping[str, Any]) -> SummaryEntry:
         """Restore validated summary metadata from an internal message."""
 
         content = value["content"]
@@ -118,9 +114,7 @@ class SummaryEntry:
             source=source,
             history_start_index=integer_fields["history_start_index"],
             first_kept_index=integer_fields["first_kept_index"],
-            summarized_message_count=integer_fields[
-                "summarized_message_count"
-            ],
+            summarized_message_count=integer_fields["summarized_message_count"],
             tokens_before=integer_fields["tokens_before"],
         )
 
@@ -198,9 +192,7 @@ def build_summary_entry(
     """Combine trusted Core range metadata with concrete summary text."""
 
     previous_count = (
-        previous_summary.summarized_message_count
-        if previous_summary is not None
-        else 0
+        previous_summary.summarized_message_count if previous_summary is not None else 0
     )
     return SummaryEntry(
         content=output.content.strip(),
@@ -257,8 +249,7 @@ def build_compacted_session_messages(
     leading_system_end = 0
     while (
         leading_system_end < len(preparation.protected_messages)
-        and preparation.protected_messages[leading_system_end].get("role")
-        == "system"
+        and preparation.protected_messages[leading_system_end].get("role") == "system"
     ):
         leading_system_end += 1
     preserved = (
@@ -293,7 +284,7 @@ class CompactionRuntime:
         state: AgentState,
         policy: CompactionPolicy | None,
         estimator: MessageTokenEstimator | None,
-        event_emitter: "AgentEventEmitter",
+        event_emitter: AgentEventEmitter,
     ) -> None:
         self.state = state
         self.policy = policy
@@ -315,18 +306,14 @@ class CompactionRuntime:
         )
 
         if self.policy is None:
-            raise RuntimeError(
-                "explicit compaction requires a CompactionPolicy"
-            )
+            raise RuntimeError("explicit compaction requires a CompactionPolicy")
 
         before = self.state.snapshot().messages
         preparation = self.policy.prepare(
             before,
             estimator=self.estimator,
         )
-        previous_summary = find_previous_summary(
-            preparation.protected_messages
-        )
+        previous_summary = find_previous_summary(preparation.protected_messages)
         request = CompactionRequest(preparation, previous_summary)
         operation_id = self.event_emitter.begin_run()
         try:
@@ -347,14 +334,10 @@ class CompactionRuntime:
                     )
                 )
                 if not isinstance(output, CompactorOutput):
-                    raise TypeError(
-                        "Compactor.compact() must return CompactorOutput"
-                    )
+                    raise TypeError("Compactor.compact() must return CompactorOutput")
                 cancellation.raise_if_cancelled()
                 if self.state.messages != before:
-                    raise RuntimeError(
-                        "agent history changed during compaction"
-                    )
+                    raise RuntimeError("agent history changed during compaction")
 
                 summary = build_summary_entry(
                     output,

@@ -37,12 +37,12 @@ from simagentplg.agent.events import (
     AgentEventSinkError,
     AgentFinished,
     AgentStarted,
-    AssistantThinkingDelta,
     AssistantTextDelta,
-    CompositeAgentEventSink,
+    AssistantThinkingDelta,
     CompactionCompleted,
     CompactionFailed,
     CompactionStarted,
+    CompositeAgentEventSink,
     ContextPressureEvaluated,
     MessageCompleted,
     ToolCompleted,
@@ -59,6 +59,15 @@ from simagentplg.agent.result import (
     StopReason,
 )
 from simagentplg.agent.runtime_policy import RuntimePolicy
+from simagentplg.agent.state import AgentState, AgentStatus
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
+from simagentplg.agent.usage import RunUsage
 from simagentplg.middleware import (
     Middleware,
     ToolCallContext,
@@ -67,15 +76,7 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import (
-    StepOutcome,
-    ToolCallResult,
-    ToolControl,
-    ToolProgressReporter,
-    ToolProgressUpdate,
-)
-from simagentplg.agent.state import AgentState, AgentStatus
-from simagentplg.agent.usage import RunUsage
+
 __all__ = [
     "BaseAgent",
     "AgentCancelledError",

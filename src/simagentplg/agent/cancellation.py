@@ -5,7 +5,6 @@ import inspect
 from collections.abc import Awaitable
 from typing import TypeVar
 
-
 T = TypeVar("T")
 
 
@@ -41,9 +40,7 @@ class CancellationToken:
         """Raise the agent-level cancellation exception when cancelled."""
 
         if self.cancelled:
-            raise AgentCancelledError(
-                self.reason or "agent run was aborted"
-            )
+            raise AgentCancelledError(self.reason or "agent run was aborted")
 
     async def run(self, awaitable: Awaitable[T]) -> T:
         """Await work while interrupting it when this token is cancelled."""

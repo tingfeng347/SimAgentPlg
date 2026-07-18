@@ -40,16 +40,12 @@ class SessionRun:
         if self.start_sequence <= 0:
             raise ValueError("start_sequence must be greater than zero")
         if (self.finish_sequence is None) != (self.result is None):
-            raise ValueError(
-                "finish_sequence and result must be set together"
-            )
+            raise ValueError("finish_sequence and result must be set together")
         if (
             self.finish_sequence is not None
             and self.finish_sequence <= self.start_sequence
         ):
-            raise ValueError(
-                "finish_sequence must be greater than start_sequence"
-            )
+            raise ValueError("finish_sequence must be greater than start_sequence")
 
     @property
     def finished(self) -> bool:
@@ -203,9 +199,7 @@ class AgentSession:
         if run.finished:
             raise ValueError(f"run {run_id!r} is already finished")
         if sequence <= self._last_sequence(run_id):
-            raise ValueError(
-                f"finish sequence must follow messages for run {run_id!r}"
-            )
+            raise ValueError(f"finish sequence must follow messages for run {run_id!r}")
         self.runs[index] = replace(
             run,
             finish_sequence=sequence,
@@ -222,12 +216,9 @@ class AgentSession:
         """Record a new compacted projection without deleting audit entries."""
 
         if any(
-            compaction.operation_id == operation_id
-            for compaction in self.compactions
+            compaction.operation_id == operation_id for compaction in self.compactions
         ):
-            raise ValueError(
-                f"compaction operation {operation_id!r} already exists"
-            )
+            raise ValueError(f"compaction operation {operation_id!r} already exists")
         self.compactions.append(
             SessionCompaction(
                 operation_id=operation_id,
@@ -238,7 +229,7 @@ class AgentSession:
             )
         )
 
-    def snapshot(self) -> "AgentSession":
+    def snapshot(self) -> AgentSession:
         """Return a detached copy safe for storage and callers."""
 
         return AgentSession(
@@ -261,10 +252,6 @@ class AgentSession:
     def _last_sequence(self, run_id: str) -> int:
         run = self._get_run(run_id)
         return max(
-            (
-                entry.sequence
-                for entry in self.entries
-                if entry.run_id == run_id
-            ),
+            (entry.sequence for entry in self.entries if entry.run_id == run_id),
             default=run.start_sequence,
         )

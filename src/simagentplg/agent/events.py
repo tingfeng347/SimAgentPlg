@@ -7,7 +7,6 @@ from enum import StrEnum
 from typing import ClassVar, Protocol, TypeAlias
 from uuid import uuid4
 
-from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.compaction import (
     CompactionRequest,
     CompactionResult,
@@ -17,6 +16,7 @@ from simagentplg.agent.context_management import (
     CompactionDecision,
     CompactionPreparation,
 )
+from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.types import ToolCallResult, ToolProgressUpdate
 from simagentplg.providers.base import (
     AssistantMessage,
@@ -64,9 +64,7 @@ class TurnStarted:
 class ContextPressureEvaluated:
     """One complete model request was assessed before provider dispatch."""
 
-    kind: ClassVar[AgentEventKind] = (
-        AgentEventKind.CONTEXT_PRESSURE_EVALUATED
-    )
+    kind: ClassVar[AgentEventKind] = AgentEventKind.CONTEXT_PRESSURE_EVALUATED
     turn: int
     decision: CompactionDecision
     preparation: CompactionPreparation | None = None
@@ -75,9 +73,7 @@ class ContextPressureEvaluated:
         if self.turn <= 0:
             raise ValueError("turn must be greater than zero")
         if self.preparation is not None and not self.decision.should_compact:
-            raise ValueError(
-                "compaction preparation requires a positive decision"
-            )
+            raise ValueError("compaction preparation requires a positive decision")
 
 
 @dataclass(frozen=True, slots=True)

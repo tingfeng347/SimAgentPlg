@@ -18,7 +18,6 @@ from simagentplg import (
     StepOutcome,
 )
 
-
 READ_TOOL = {
     "type": "function",
     "function": {
@@ -52,8 +51,7 @@ class DemoTools(MethodToolHandler):
 
 
 OLD_TOOL_OUTPUT = "\n".join(
-    f"diagnostic line {index}: legacy warning"
-    for index in range(80)
+    f"diagnostic line {index}: legacy warning" for index in range(80)
 )
 
 HISTORY = [
@@ -140,8 +138,7 @@ class ContextConsoleSink:
         if payload.preparation is not None:
             preparation = payload.preparation
             roles = [
-                message.get("role")
-                for message in preparation.messages_to_summarize
+                message.get("role") for message in preparation.messages_to_summarize
             ]
             print(
                 f"preparation: can_compact={preparation.can_compact}, "
@@ -170,9 +167,7 @@ async def main() -> None:
     agent.reset(history=HISTORY)
 
     try:
-        result = await agent.run(
-            task="Does the old report contain repeated warnings?"
-        )
+        result = await agent.run(task="Does the old report contain repeated warnings?")
     finally:
         await agent.shutdown()
 

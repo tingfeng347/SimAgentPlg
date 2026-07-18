@@ -39,6 +39,13 @@ CodeAgent 等派生 Agent。
 uv sync
 ```
 
+MCP 支持是可选能力。只有使用 MCP 的 Agent 才需要安装额外依赖：
+
+```bash
+uv sync --extra mcp
+# 或：pip install "SimAgentPlg[mcp]"
+```
+
 ## 配置
 
 复制 `.env.example` 为 `.env` 并填写模型配置：
@@ -405,6 +412,16 @@ uv run python examples/15_explicit_compaction.py
 
 ```bash
 uv run python -m unittest discover -s tests -p 'test*.py' -q
+```
+
+提交变更前运行完整的本地质量门：
+
+```bash
+uv sync --locked --all-extras --group dev
+uv run ruff check src tests examples
+uv run ruff format --check src tests examples
+uv run mypy
+uv build
 ```
 
 ## 公共 API

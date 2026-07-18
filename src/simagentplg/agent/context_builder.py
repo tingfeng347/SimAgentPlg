@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from simagentplg.agent.state import AgentState
-from simagentplg.agent.types import AgentMessage, INTERNAL_METADATA_PREFIX
+from simagentplg.agent.types import INTERNAL_METADATA_PREFIX, AgentMessage
 from simagentplg.plugins.skill.skill_manager import SkillManager
 
 
@@ -74,8 +74,7 @@ class AgentContextBuilder:
             {
                 key: value
                 for key, value in message.items()
-                if key != "usage"
-                and not key.startswith(INTERNAL_METADATA_PREFIX)
+                if key != "usage" and not key.startswith(INTERNAL_METADATA_PREFIX)
             }
             for message in messages
         ]
@@ -94,9 +93,7 @@ class AgentContextBuilder:
             skill_messages.append(dict(index_message))
         if active_skill_name is not None:
             skill_messages.append(
-                self._skill_manager.build_skill_context_message(
-                    active_skill_name
-                )
+                self._skill_manager.build_skill_context_message(active_skill_name)
             )
         if not skill_messages:
             return

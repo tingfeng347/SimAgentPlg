@@ -43,6 +43,13 @@ Derived agents should provide equivalent implementations when needed.
 uv sync
 ```
 
+MCP support is optional. Install its extra only when the agent uses MCP:
+
+```bash
+uv sync --extra mcp
+# or: pip install "SimAgentPlg[mcp]"
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and provide model credentials:
@@ -512,6 +519,16 @@ each file.
 
 ```bash
 uv run python -m unittest discover -s tests -p 'test*.py' -q
+```
+
+Run the complete local quality gate before submitting a change:
+
+```bash
+uv sync --locked --all-extras --group dev
+uv run ruff check src tests examples
+uv run ruff format --check src tests examples
+uv run mypy
+uv build
 ```
 
 ## Public API

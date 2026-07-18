@@ -345,9 +345,7 @@ class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
             "first summary",
         )
         summary_messages = [
-            message
-            for message in agent.messages
-            if "_simagentplg_summary" in message
+            message for message in agent.messages if "_simagentplg_summary" in message
         ]
         self.assertEqual(len(summary_messages), 1)
         assert second.summary is not None

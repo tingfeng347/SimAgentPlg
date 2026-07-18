@@ -11,8 +11,8 @@ from simagentplg import (
     AgentStarted,
     AgentState,
     AssistantMessage,
-    AssistantThinkingDelta,
     AssistantTextDelta,
+    AssistantThinkingDelta,
     BaseAgent,
     CancellationToken,
     CompositeAgentEventSink,
@@ -35,7 +35,6 @@ from simagentplg import (
     TurnCompleted,
     TurnStarted,
 )
-
 
 FINISH_TOOL = {
     "type": "function",
@@ -282,7 +281,7 @@ def chunk(
                     reasoning_content=reasoning_content,
                     reasoning=reasoning,
                     reasoning_text=reasoning_text,
-                )
+                ),
             )
         ]
     )
@@ -350,10 +349,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, "fallback")
         self.assertEqual(model.calls, 1)
         self.assertFalse(
-            any(
-                isinstance(payload, AssistantTextDelta)
-                for payload in payloads(sink)
-            )
+            any(isinstance(payload, AssistantTextDelta) for payload in payloads(sink))
         )
 
     async def test_thinking_deltas_are_observable_but_not_persisted(
@@ -421,10 +417,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.stop_reason, StopReason.EXTERNAL_ABORT)
         self.assertTrue(model.closed.is_set())
         self.assertFalse(
-            any(
-                isinstance(payload, MessageCompleted)
-                for payload in payloads(observer)
-            )
+            any(isinstance(payload, MessageCompleted) for payload in payloads(observer))
         )
         self.assertIsInstance(payloads(observer)[-2], TurnCompleted)
         self.assertIsInstance(payloads(observer)[-1], AgentFinished)
@@ -483,10 +476,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertFalse(
-            any(
-                isinstance(payload, MessageCompleted)
-                for payload in payloads(observer)
-            )
+            any(isinstance(payload, MessageCompleted) for payload in payloads(observer))
         )
         assert session is not None
         self.assertEqual(
@@ -536,9 +526,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         completions = FakeOpenAICompletions(response)
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         adapter = OpenAIModelAdapter(
             TEST_CONFIG,
             client=client,  # type: ignore[arg-type]
@@ -552,11 +540,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
             ["Hello ", "world"],
         )
         self.assertEqual(
-            [
-                event.delta
-                for event in events
-                if isinstance(event, ModelThinkingDelta)
-            ],
+            [event.delta for event in events if isinstance(event, ModelThinkingDelta)],
             ["reason ", "carefully"],
         )
         terminal = events[-1]
@@ -576,9 +560,7 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         response = FakeOpenAIStream([chunk(content="partial")])
         completions = FakeOpenAICompletions(response)
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=completions)
-        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         adapter = OpenAIModelAdapter(
             TEST_CONFIG,
             client=client,  # type: ignore[arg-type]

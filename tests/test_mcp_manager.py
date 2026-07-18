@@ -92,7 +92,9 @@ class McpServerManagerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_duplicate_prefixed_tool_does_not_register_partial_routes(self) -> None:
+    async def test_duplicate_prefixed_tool_does_not_register_partial_routes(
+        self,
+    ) -> None:
         manager = McpServerManager(Path("unused.json"))
 
         with self.assertRaisesRegex(ValueError, "duplicate MCP tool"):

@@ -101,9 +101,7 @@ class ToolRuntime:
         max_repeated_tool_calls: int = 3,
     ) -> None:
         if max_repeated_tool_calls <= 0:
-            raise ValueError(
-                "max_repeated_tool_calls must be greater than zero"
-            )
+            raise ValueError("max_repeated_tool_calls must be greater than zero")
         self.handlers = list(handlers)
         self.middlewares = list(middlewares)
         self.state = state
@@ -119,11 +117,7 @@ class ToolRuntime:
 
     @property
     def tools(self) -> list[dict[str, Any]]:
-        return [
-            tool
-            for handler in self.handlers
-            for tool in handler.tools
-        ]
+        return [tool for handler in self.handlers for tool in handler.tools]
 
     async def startup(self) -> None:
         if self._started:
@@ -137,11 +131,7 @@ class ToolRuntime:
                 started_handlers.append(handler)
             self._tool_routes = self._build_tool_routes()
             self._active_middlewares = (
-                [
-                    middleware
-                    for middleware in self.middlewares
-                    if middleware.enabled
-                ]
+                [middleware for middleware in self.middlewares if middleware.enabled]
                 if self._tool_routes
                 else []
             )
@@ -247,9 +237,7 @@ class ToolRuntime:
     ) -> ToolCallResult:
         tool_name = tool_call.name
         raw_arguments = tool_call.arguments
-        await self.event_emitter.emit(
-            ToolStarted(self.state.turn, tool_call)
-        )
+        await self.event_emitter.emit(ToolStarted(self.state.turn, tool_call))
         progress = _ScopedToolProgressReporter(
             event_emitter=self.event_emitter,
             turn=self.state.turn,
@@ -317,9 +305,7 @@ class ToolRuntime:
             )
         else:
             result = ToolCallResult((message,), error=error)
-        await self.event_emitter.emit(
-            ToolCompleted(self.state.turn, tool_call, result)
-        )
+        await self.event_emitter.emit(ToolCompleted(self.state.turn, tool_call, result))
         return result
 
     async def cancel_tool_call(
@@ -330,13 +316,9 @@ class ToolRuntime:
     ) -> ToolCallResult:
         """Settle an unstarted call skipped after run cancellation."""
 
-        await self.event_emitter.emit(
-            ToolStarted(self.state.turn, tool_call)
-        )
+        await self.event_emitter.emit(ToolStarted(self.state.turn, tool_call))
         result = self._cancelled_tool_result(tool_call, reason)
-        await self.event_emitter.emit(
-            ToolCompleted(self.state.turn, tool_call, result)
-        )
+        await self.event_emitter.emit(ToolCompleted(self.state.turn, tool_call, result))
         return result
 
     def _build_tool_routes(self) -> dict[str, BaseHandler]:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-from simagentplg.agent.types import AgentMessage, INTERNAL_METADATA_PREFIX
+from simagentplg.agent.types import INTERNAL_METADATA_PREFIX, AgentMessage
 from simagentplg.providers.base import ModelUsage
 
 
@@ -45,9 +45,7 @@ class ContextUsageEstimate:
         if self.total_tokens < self.heuristic_tokens:
             raise ValueError("total_tokens must cover heuristic_tokens")
         if self.total_tokens < self.reported_tokens + self.trailing_tokens:
-            raise ValueError(
-                "total_tokens must cover reported and trailing tokens"
-            )
+            raise ValueError("total_tokens must cover reported and trailing tokens")
         if (
             self.last_usage_index is None
             and self.source is not ContextUsageSource.ESTIMATED
@@ -81,8 +79,7 @@ class HeuristicMessageTokenEstimator:
         visible = {
             key: value
             for key, value in message.items()
-            if key != "usage"
-            and not key.startswith(INTERNAL_METADATA_PREFIX)
+            if key != "usage" and not key.startswith(INTERNAL_METADATA_PREFIX)
         }
         return self.message_overhead_tokens + self._estimate_value(visible)
 
@@ -202,9 +199,7 @@ class ContextBudget:
         if self.keep_recent_tokens <= 0:
             raise ValueError("keep_recent_tokens must be greater than zero")
         if self.keep_recent_tokens > self.threshold_tokens:
-            raise ValueError(
-                "keep_recent_tokens must not exceed the context threshold"
-            )
+            raise ValueError("keep_recent_tokens must not exceed the context threshold")
 
     @property
     def threshold_tokens(self) -> int:
@@ -275,9 +270,7 @@ class CompactionPolicy:
                 should_compact=False,
                 reason=CompactionDecisionReason.DISABLED,
             )
-        should_compact = (
-            estimate.total_tokens >= self.budget.threshold_tokens
-        )
+        should_compact = estimate.total_tokens >= self.budget.threshold_tokens
         return CompactionDecision(
             estimate=estimate,
             threshold_tokens=self.budget.threshold_tokens,
@@ -336,10 +329,7 @@ def prepare_compaction(
         )
 
     turn_tokens = [
-        sum(
-            active_estimator.estimate_message(message)
-            for message in copied[start:end]
-        )
+        sum(active_estimator.estimate_message(message) for message in copied[start:end])
         for start, end in ranges
     ]
     kept_turn_index = len(ranges) - 1

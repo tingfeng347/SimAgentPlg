@@ -104,7 +104,7 @@ class AgentState:
         self.result = result
         self.error = None
 
-    def snapshot(self) -> "AgentState":
+    def snapshot(self) -> AgentState:
         """Return an independent copy suitable for observation or persistence."""
 
         return AgentState(

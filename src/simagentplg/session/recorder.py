@@ -41,10 +41,7 @@ class SessionRecorder:
         payload = event.payload
         if not isinstance(payload, _RECORDED_PAYLOADS):
             return
-        if (
-            isinstance(payload, CompactionCompleted)
-            and not payload.result.completed
-        ):
+        if isinstance(payload, CompactionCompleted) and not payload.result.completed:
             return
 
         async with self._lock:

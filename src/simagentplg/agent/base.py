@@ -289,9 +289,7 @@ class BaseAgent:
         if active_compactor is None:
             raise RuntimeError("explicit compaction requires a Compactor")
         if self.compaction_policy is None:
-            raise RuntimeError(
-                "explicit compaction requires a CompactionPolicy"
-            )
+            raise RuntimeError("explicit compaction requires a CompactionPolicy")
         self._pending_operations += 1
         self._idle_event.clear()
         try:

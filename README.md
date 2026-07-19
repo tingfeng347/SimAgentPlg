@@ -531,6 +531,8 @@ uv run mypy
 uv build
 ```
 
+fuck
+
 ## Public API
 
 The package root exports:

@@ -17,12 +17,12 @@ if TYPE_CHECKING:
 class ToolCallContext:
     """Metadata and cancellation signal for one tool execution."""
 
-    state: "AgentState"
+    state: AgentState
     tool_name: str
     arguments: dict[str, Any]
     tool_call_id: str | None = None
-    cancellation: "CancellationToken | None" = None
-    progress: "ToolProgressReporter | None" = None
+    cancellation: CancellationToken | None = None
+    progress: ToolProgressReporter | None = None
 
 
 ToolNext = Callable[[ToolCallContext], Awaitable[StepOutcome]]

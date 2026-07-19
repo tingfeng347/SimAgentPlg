@@ -21,9 +21,7 @@ class McpToolHandler(BaseHandler):
         manager: Any | None = None,
     ) -> None:
         if config_path is None and manager is None:
-            raise ValueError(
-                "config_path is required when manager is not provided"
-            )
+            raise ValueError("config_path is required when manager is not provided")
         if config_path is not None and manager is not None:
             raise ValueError("provide either config_path or manager, not both")
         if manager is not None:
@@ -63,7 +61,5 @@ class McpToolHandler(BaseHandler):
         if not self.can_handle(tool_name):
             raise UnknownToolError(f"unknown MCP tool {tool_name!r}")
         token = cancellation or CancellationSource().token
-        result = await token.run(
-            self.manager.call_tool(tool_name, dict(arguments))
-        )
+        result = await token.run(self.manager.call_tool(tool_name, dict(arguments)))
         return StepOutcome(result)

@@ -17,8 +17,8 @@ from simagentplg import (
     RuntimePolicy,
     StepOutcome,
     StopReason,
-    ToolCompleted,
     ToolCallResult,
+    ToolCompleted,
     ToolControl,
     ToolStarted,
     TurnCompleted,
@@ -224,9 +224,7 @@ class AgentEventTests(unittest.IsolatedAsyncioTestCase):
                     arguments='{"summary": "settled"}',
                 )
                 agent = BaseAgent(
-                    SequenceModel(
-                        [AssistantMessage(tool_calls=(tool_call,))]
-                    ),
+                    SequenceModel([AssistantMessage(tool_calls=(tool_call,))]),
                     agent_id=f"terminal-{control}",
                     handlers=[FinishHandler(control)],
                     event_sink=sink,

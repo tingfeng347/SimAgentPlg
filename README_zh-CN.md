@@ -21,6 +21,8 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - `ToolRuntime` 生命周期、路由、Middleware 和重复调用保护
 - 通用 `ToolMiddleware` 拦截机制
 - Provider-neutral Token Usage 与单次 Run 预算保护
+- 上下文压力估算、独立窗口预算和非变异压缩准备
+- 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -35,6 +37,13 @@ CodeAgent 等派生 Agent。
 
 ```bash
 uv sync
+```
+
+MCP 支持是可选能力。只有使用 MCP 的 Agent 才需要安装额外依赖：
+
+```bash
+uv sync --extra mcp
+# 或：pip install "SimAgentPlg[mcp]"
 ```
 
 ## 配置
@@ -110,6 +119,66 @@ print(result.usage.complete)
 和 Session 中，但 `AgentContextBuilder` 会在构造 `llm_messages` 时移除，不会发送给
 Provider。`AgentRunResult.usage` 聚合一次 Run 的所有模型请求；`complete=False` 表示
 至少一次请求没有报告 Usage，不能把它当成零消耗。
+
+## 上下文压力与压缩准备
+
+Context Window 容量和累计 Run 消耗是两个独立概念。可以为 Agent 配置可选的
+`CompactionPolicy`，在每次模型请求前评估完整 Provider 上下文：
+
+```python
+from simagentplg import CompactionPolicy, ContextBudget
+
+context_policy = CompactionPolicy(
+    ContextBudget(
+        context_window=128_000,
+        reserve_tokens=16_000,
+        keep_recent_tokens=20_000,
+    )
+)
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+)
+```
+
+评估会组合最近一次 Assistant `ModelUsage`、它之后新增的消息，以及包含当前 Tool Schema
+的 UTF-8 感知保守估算。配置策略后，每轮都会发布 `ContextPressureEvaluated`；达到阈值
+时，事件中的 `CompactionPreparation` 会分离受保护消息、待摘要的旧完整
+User/Assistant/Tool Turn，以及需要原文保留的最近 Turn。Tool Call 和对应 Tool Result
+不会被切开。
+
+压力评估仍是只读观察，不会自动压缩或重试 overflow。应用也可以直接调用
+`estimate_context_usage()` 和 `prepare_compaction()`，并通过
+`MessageTokenEstimator` 替换默认估算器。
+
+## 显式上下文压缩
+
+派生 Agent 通过可取消的 `Compactor` 协议提供摘要行为，然后显式调用：
+
+```python
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+)
+
+compaction = await agent.compact()
+print(compaction.status)
+print(compaction.summary)
+```
+
+Core 将 `CompactionRequest` 交给 Compactor，由 Core 在 `SummaryEntry` 中写入可信的范围和
+Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn”。失败或取消返回
+结构化 `CompactionResult`，历史保持不变。重复压缩时，旧 Summary 会传给 Compactor
+合并，并由新 Summary 消息替换。
+
+生命周期通过 `CompactionStarted`、`CompactionCompleted` 和 `CompactionFailed` 发布。
+`abort()`、`wait_for_idle()` 同时适用于普通 Run 和压缩。`SessionRecorder` 保存紧凑恢复
+快照，同时保留原始 `SessionMessage` 审计条目。Core 不选择摘要模型或 Prompt，当前也
+不会自动触发压缩。
 
 ## RuntimePolicy
 
@@ -313,6 +382,8 @@ SimAgentPlg Core 负责机制：
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
++ Context Pressure + Compaction Preparation
++ Explicit Compactor + Summary Entry + Session Compaction Snapshot
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -333,12 +404,24 @@ uv run python examples/02_custom_tool.py
 uv run python examples/04_mcp_tools.py
 uv run python examples/06_skill.py
 uv run python examples/13_usage_budget.py
+uv run python examples/14_context_pressure.py
+uv run python examples/15_explicit_compaction.py
 ```
 
 ## 测试
 
 ```bash
 uv run python -m unittest discover -s tests -p 'test*.py' -q
+```
+
+提交变更前运行完整的本地质量门：
+
+```bash
+uv sync --locked --all-extras --group dev
+uv run ruff check src tests examples
+uv run ruff format --check src tests examples
+uv run mypy
+uv build
 ```
 
 ## 公共 API
@@ -348,7 +431,8 @@ uv run python -m unittest discover -s tests -p 'test*.py' -q
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Context：`AgentContextBuilder`、`ContextBuildResult`
+- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
+- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

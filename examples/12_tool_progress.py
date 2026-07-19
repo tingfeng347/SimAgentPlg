@@ -22,7 +22,6 @@ from simagentplg import (
     ToolStarted,
 )
 
-
 INDEX_TOOL = {
     "type": "function",
     "function": {
@@ -84,10 +83,7 @@ class ProgressConsoleSink:
         elif isinstance(payload, ToolCompleted):
             print(f"tool completed: {payload.tool_call.name}")
         elif isinstance(payload, AgentFinished):
-            print(
-                f"finished: {payload.result.status} / "
-                f"{payload.result.stop_reason}"
-            )
+            print(f"finished: {payload.result.status} / {payload.result.stop_reason}")
 
 
 async def main() -> None:

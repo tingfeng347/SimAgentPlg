@@ -81,9 +81,7 @@ class BaseHandler(ABC):
             ) from exc
 
         if tool_type != "function" or not isinstance(name, str) or not name:
-            raise ToolDefinitionError(
-                "only named function tools are supported"
-            )
+            raise ToolDefinitionError("only named function tools are supported")
         return name
 
 
@@ -140,7 +138,4 @@ def _accepts_keyword(callable_: Any, keyword: str) -> bool:
         Parameter.KEYWORD_ONLY,
     }:
         return True
-    return any(
-        item.kind is Parameter.VAR_KEYWORD
-        for item in parameters.values()
-    )
+    return any(item.kind is Parameter.VAR_KEYWORD for item in parameters.values())

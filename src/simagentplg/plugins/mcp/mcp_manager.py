@@ -4,11 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastmcp import Client
-from fastmcp.mcp_config import MCPConfig
-from mcp.types import Tool
-
 from simagentplg.logger import get_logger
+
 logger = get_logger(name="MCP")
 
 
@@ -28,7 +25,7 @@ class McpServerManager:
             path: MCP configuration JSON path.
         """
         self.path = Path(path)
-        self._clients_by_service: dict[str, Client] = {}
+        self._clients_by_service: dict[str, Any] = {}
         self._tool_routes: dict[str, _McpToolRoute] = {}
         self._openai_tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
@@ -39,10 +36,22 @@ class McpServerManager:
         One service failure is logged and does not block other services.
         """
         logger.info("Starting MCP server manager")
+        try:
+            from fastmcp import Client
+            from fastmcp.mcp_config import MCPConfig
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "MCP integration requires optional dependencies; "
+                "install SimAgentPlg[mcp]"
+            ) from exc
+
         stack = AsyncExitStack()
-        with open(self.path, "r", encoding="utf-8") as f:
-            mcp_configs = MCPConfig.from_dict(json.load(f))
-            logger.info("Loaded %d MCP service config(s)", len(mcp_configs.mcpServers))
+        with self.path.open(encoding="utf-8") as config_file:
+            mcp_configs = MCPConfig.from_dict(json.load(config_file))
+            logger.info(
+                "Loaded %d MCP service config(s)",
+                len(mcp_configs.mcpServers),
+            )
             for service_name, server_model in mcp_configs.mcpServers.items():
                 service_stack = AsyncExitStack()
                 try:
@@ -60,7 +69,11 @@ class McpServerManager:
                     )
                 except Exception as e:
                     await service_stack.aclose()
-                    logger.error("Failed to connect MCP service %s: %s", service_name, e)
+                    logger.error(
+                        "Failed to connect MCP service %s: %s",
+                        service_name,
+                        e,
+                    )
         self._exit_stack = stack
         logger.info(
             "MCP server manager started with %d online service(s)",
@@ -113,8 +126,8 @@ class McpServerManager:
     def _register_service_tools(
         self,
         service_name: str,
-        client: Client,
-        tools: list[Tool],
+        client: Any,
+        tools: list[Any],
     ) -> None:
         routes: dict[str, _McpToolRoute] = {}
         openai_tools: list[dict[str, Any]] = []

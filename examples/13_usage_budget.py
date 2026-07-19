@@ -18,7 +18,6 @@ from simagentplg import (
     StepOutcome,
 )
 
-
 INSPECT_TOOL = {
     "type": "function",
     "function": {
@@ -66,10 +65,7 @@ class UsageConsoleSink:
                 )
         elif isinstance(payload, AgentFinished):
             usage = payload.result.usage
-            print(
-                f"finished: {payload.result.status} / "
-                f"{payload.result.stop_reason}"
-            )
+            print(f"finished: {payload.result.status} / {payload.result.stop_reason}")
             print(
                 f"run usage: total={usage.total_tokens}, "
                 f"requests={usage.reported_request_count}/"

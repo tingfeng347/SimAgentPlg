@@ -6,7 +6,29 @@ from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
+from simagentplg.agent.compaction import (
+    CompactionRequest,
+    CompactionResult,
+    CompactionRuntime,
+    CompactionStatus,
+    Compactor,
+    CompactorOutput,
+    SummaryEntry,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
+from simagentplg.agent.context_management import (
+    CompactionDecision,
+    CompactionDecisionReason,
+    CompactionPolicy,
+    CompactionPreparation,
+    ContextBudget,
+    ContextUsageEstimate,
+    ContextUsageSource,
+    HeuristicMessageTokenEstimator,
+    MessageTokenEstimator,
+    estimate_context_usage,
+    prepare_compaction,
+)
 from simagentplg.agent.events import (
     AgentEvent,
     AgentEventKind,
@@ -15,9 +37,13 @@ from simagentplg.agent.events import (
     AgentEventSinkError,
     AgentFinished,
     AgentStarted,
-    AssistantThinkingDelta,
     AssistantTextDelta,
+    AssistantThinkingDelta,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
     CompositeAgentEventSink,
+    ContextPressureEvaluated,
     MessageCompleted,
     ToolCompleted,
     ToolProgressed,
@@ -33,14 +59,7 @@ from simagentplg.agent.result import (
     StopReason,
 )
 from simagentplg.agent.runtime_policy import RuntimePolicy
-from simagentplg.middleware import (
-    Middleware,
-    ToolCallContext,
-    ToolMiddleware,
-    ToolNext,
-    compose_tool_middlewares,
-    format_tool_call_preview,
-)
+from simagentplg.agent.state import AgentState, AgentStatus
 from simagentplg.agent.types import (
     StepOutcome,
     ToolCallResult,
@@ -48,7 +67,6 @@ from simagentplg.agent.types import (
     ToolProgressReporter,
     ToolProgressUpdate,
 )
-from simagentplg.agent.state import AgentState, AgentStatus
 from simagentplg.agent.usage import RunUsage
 from simagentplg.handlers import (
     BaseHandler,
@@ -56,6 +74,14 @@ from simagentplg.handlers import (
     MethodToolHandler,
     ToolDefinitionError,
     UnknownToolError,
+)
+from simagentplg.middleware import (
+    Middleware,
+    ToolCallContext,
+    ToolMiddleware,
+    ToolNext,
+    compose_tool_middlewares,
+    format_tool_call_preview,
 )
 from simagentplg.plugins.mcp.mcp_manager import McpServerManager
 from simagentplg.plugins.skill.skill_manager import SkillManager
@@ -74,6 +100,7 @@ from simagentplg.providers import (
 from simagentplg.session import (
     AgentSession,
     MemorySessionStorage,
+    SessionCompaction,
     SessionMessage,
     SessionRecorder,
     SessionRun,
@@ -85,6 +112,13 @@ __all__ = [
     "AgentCancelledError",
     "CancellationSource",
     "CancellationToken",
+    "Compactor",
+    "CompactorOutput",
+    "CompactionRequest",
+    "CompactionResult",
+    "CompactionRuntime",
+    "CompactionStatus",
+    "SummaryEntry",
     "ModelConfig",
     "ModelAdapter",
     "OpenAIModelAdapter",
@@ -99,12 +133,27 @@ __all__ = [
     "AgentStatus",
     "AgentContextBuilder",
     "ContextBuildResult",
+    "ContextBudget",
+    "ContextUsageEstimate",
+    "ContextUsageSource",
+    "MessageTokenEstimator",
+    "HeuristicMessageTokenEstimator",
+    "CompactionPolicy",
+    "CompactionDecision",
+    "CompactionDecisionReason",
+    "CompactionPreparation",
+    "estimate_context_usage",
+    "prepare_compaction",
     "AgentEvent",
     "AgentEventKind",
     "AgentEventPayload",
     "AgentEventSink",
     "AgentEventSinkError",
     "CompositeAgentEventSink",
+    "CompactionStarted",
+    "CompactionCompleted",
+    "CompactionFailed",
+    "ContextPressureEvaluated",
     "AgentStarted",
     "AssistantThinkingDelta",
     "AssistantTextDelta",
@@ -143,6 +192,7 @@ __all__ = [
     "AgentSession",
     "SessionMessage",
     "SessionRun",
+    "SessionCompaction",
     "SessionStorage",
     "MemorySessionStorage",
     "SessionRecorder",

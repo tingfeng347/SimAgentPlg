@@ -6,7 +6,29 @@ from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
+from simagentplg.agent.compaction import (
+    CompactionRequest,
+    CompactionResult,
+    CompactionRuntime,
+    CompactionStatus,
+    Compactor,
+    CompactorOutput,
+    SummaryEntry,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
+from simagentplg.agent.context_management import (
+    CompactionDecision,
+    CompactionDecisionReason,
+    CompactionPolicy,
+    CompactionPreparation,
+    ContextBudget,
+    ContextUsageEstimate,
+    ContextUsageSource,
+    HeuristicMessageTokenEstimator,
+    MessageTokenEstimator,
+    estimate_context_usage,
+    prepare_compaction,
+)
 from simagentplg.agent.events import (
     AgentEvent,
     AgentEventKind,
@@ -15,9 +37,13 @@ from simagentplg.agent.events import (
     AgentEventSinkError,
     AgentFinished,
     AgentStarted,
-    AssistantThinkingDelta,
     AssistantTextDelta,
+    AssistantThinkingDelta,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
     CompositeAgentEventSink,
+    ContextPressureEvaluated,
     MessageCompleted,
     ToolCompleted,
     ToolProgressed,
@@ -33,6 +59,15 @@ from simagentplg.agent.result import (
     StopReason,
 )
 from simagentplg.agent.runtime_policy import RuntimePolicy
+from simagentplg.agent.state import AgentState, AgentStatus
+from simagentplg.agent.types import (
+    StepOutcome,
+    ToolCallResult,
+    ToolControl,
+    ToolProgressReporter,
+    ToolProgressUpdate,
+)
+from simagentplg.agent.usage import RunUsage
 from simagentplg.middleware import (
     Middleware,
     ToolCallContext,
@@ -41,30 +76,44 @@ from simagentplg.middleware import (
     compose_tool_middlewares,
     format_tool_call_preview,
 )
-from simagentplg.agent.types import (
-    StepOutcome,
-    ToolCallResult,
-    ToolControl,
-    ToolProgressReporter,
-    ToolProgressUpdate,
-)
-from simagentplg.agent.state import AgentState, AgentStatus
-from simagentplg.agent.usage import RunUsage
+
 __all__ = [
     "BaseAgent",
     "AgentCancelledError",
     "CancellationSource",
     "CancellationToken",
+    "Compactor",
+    "CompactorOutput",
+    "CompactionRequest",
+    "CompactionResult",
+    "CompactionRuntime",
+    "CompactionStatus",
+    "SummaryEntry",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",
     "ContextBuildResult",
+    "ContextBudget",
+    "ContextUsageEstimate",
+    "ContextUsageSource",
+    "MessageTokenEstimator",
+    "HeuristicMessageTokenEstimator",
+    "CompactionPolicy",
+    "CompactionDecision",
+    "CompactionDecisionReason",
+    "CompactionPreparation",
+    "estimate_context_usage",
+    "prepare_compaction",
     "AgentEvent",
     "AgentEventKind",
     "AgentEventPayload",
     "AgentEventSink",
     "AgentEventSinkError",
     "CompositeAgentEventSink",
+    "CompactionStarted",
+    "CompactionCompleted",
+    "CompactionFailed",
+    "ContextPressureEvaluated",
     "AgentStarted",
     "AssistantThinkingDelta",
     "AssistantTextDelta",

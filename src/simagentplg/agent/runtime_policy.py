@@ -15,12 +15,8 @@ class RuntimePolicy:
         if self.max_steps <= 0:
             raise ValueError("max_steps must be greater than zero")
         if self.max_no_tool_responses <= 0:
-            raise ValueError(
-                "max_no_tool_responses must be greater than zero"
-            )
+            raise ValueError("max_no_tool_responses must be greater than zero")
         if self.max_repeated_tool_calls <= 0:
-            raise ValueError(
-                "max_repeated_tool_calls must be greater than zero"
-            )
+            raise ValueError("max_repeated_tool_calls must be greater than zero")
         if self.max_run_tokens is not None and self.max_run_tokens <= 0:
             raise ValueError("max_run_tokens must be greater than zero")

@@ -22,7 +22,6 @@ from simagentplg import (
     ToolNext,
 )
 
-
 INSPECT_TOOL = {
     "type": "function",
     "function": {

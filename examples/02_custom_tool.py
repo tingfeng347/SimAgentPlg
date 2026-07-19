@@ -43,9 +43,7 @@ class MathHandler(MethodToolHandler):
     ) -> StepOutcome:
         left = arguments.get("left")
         right = arguments.get("right")
-        if not isinstance(left, (int, float)) or not isinstance(
-            right, (int, float)
-        ):
+        if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             return StepOutcome(
                 {"status": "error", "error": "left and right must be numbers"}
             )
@@ -63,9 +61,7 @@ async def main() -> None:
     )
 
     try:
-        result = await agent.runtime(
-            task="Use the add tool to calculate 19.5 + 22.5."
-        )
+        result = await agent.runtime(task="Use the add tool to calculate 19.5 + 22.5.")
         print(result)
     finally:
         await agent.shutdown()

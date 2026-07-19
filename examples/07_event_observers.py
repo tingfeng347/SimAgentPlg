@@ -15,10 +15,7 @@ from simagentplg import (
 
 class ConsoleEventSink:
     async def emit(self, event: AgentEvent) -> None:
-        print(
-            f"event #{event.sequence}: {event.kind} "
-            f"run={event.run_id[:8]}"
-        )
+        print(f"event #{event.sequence}: {event.kind} run={event.run_id[:8]}")
 
 
 class EventMetricsSink:

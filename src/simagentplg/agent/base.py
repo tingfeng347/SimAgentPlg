@@ -4,9 +4,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from simagentplg.agent.cancellation import CancellationSource
+from simagentplg.agent.cancellation import (
+    CancellationSource,
+)
+from simagentplg.agent.compaction import (
+    CompactionResult,
+    CompactionRuntime,
+    Compactor,
+)
 from simagentplg.agent.context_builder import AgentContextBuilder
-from simagentplg.agent.events import AgentEventEmitter, AgentEventSink
+from simagentplg.agent.context_management import (
+    CompactionPolicy,
+    MessageTokenEstimator,
+)
+from simagentplg.agent.events import (
+    AgentEventEmitter,
+    AgentEventSink,
+)
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import AgentRunResult
 from simagentplg.agent.runtime_policy import RuntimePolicy
@@ -40,7 +54,7 @@ that returns the completion control signal.
 
 
 @dataclass(slots=True)
-class _ActiveRun:
+class _ActiveOperation:
     cancellation: CancellationSource
 
 
@@ -57,6 +71,9 @@ class BaseAgent:
         middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
+        compaction_policy: CompactionPolicy | None = None,
+        compactor: Compactor | None = None,
+        context_token_estimator: MessageTokenEstimator | None = None,
         runtime_policy: RuntimePolicy | None = None,
         event_sink: AgentEventSink | None = None,
     ) -> None:
@@ -67,12 +84,15 @@ class BaseAgent:
         self.model = model
         self.system_prompt = system_prompt
         self.runtime_policy = policy
+        self.compaction_policy = compaction_policy
+        self.compactor = compactor
+        self.context_token_estimator = context_token_estimator
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
         self.event_sink = event_sink
         self._operation_lock = asyncio.Lock()
-        self._active_run: _ActiveRun | None = None
-        self._pending_runs = 0
+        self._active_operation: _ActiveOperation | None = None
+        self._pending_operations = 0
         self._idle_event = asyncio.Event()
         self._idle_event.set()
         self._started = False
@@ -86,6 +106,12 @@ class BaseAgent:
             agent_id=self.agent_id,
             sink=self.event_sink,
             logger=self.logger,
+        )
+        self._compaction_runtime = CompactionRuntime(
+            state=self.state,
+            policy=self.compaction_policy,
+            estimator=self.context_token_estimator,
+            event_emitter=self._event_emitter,
         )
         self._tool_runtime = ToolRuntime(
             self.handlers,
@@ -103,6 +129,8 @@ class BaseAgent:
             tool_runtime=self._tool_runtime,
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
+            compaction_policy=self.compaction_policy,
+            context_token_estimator=self.context_token_estimator,
             event_emitter=self._event_emitter,
         )
         self.reset()
@@ -229,13 +257,13 @@ class BaseAgent:
     async def run(self, *, task: str) -> AgentRunResult:
         """Run one task and return a structured terminal result."""
 
-        self._pending_runs += 1
+        self._pending_operations += 1
         self._idle_event.clear()
         try:
             async with self._operation_lock:
                 source = CancellationSource()
-                active_run = _ActiveRun(source)
-                self._active_run = active_run
+                active_operation = _ActiveOperation(source)
+                self._active_operation = active_operation
                 try:
                     await self._startup()
                     return await self.orchestrator.run(
@@ -243,23 +271,56 @@ class BaseAgent:
                         cancellation=source.token,
                     )
                 finally:
-                    if self._active_run is active_run:
-                        self._active_run = None
+                    if self._active_operation is active_operation:
+                        self._active_operation = None
         finally:
-            self._pending_runs -= 1
-            if self._pending_runs == 0:
+            self._pending_operations -= 1
+            if self._pending_operations == 0:
+                self._idle_event.set()
+
+    async def compact(
+        self,
+        *,
+        compactor: Compactor | None = None,
+    ) -> CompactionResult:
+        """Explicitly summarize old turns and atomically replace history."""
+
+        active_compactor = self.compactor if compactor is None else compactor
+        if active_compactor is None:
+            raise RuntimeError("explicit compaction requires a Compactor")
+        if self.compaction_policy is None:
+            raise RuntimeError("explicit compaction requires a CompactionPolicy")
+        self._pending_operations += 1
+        self._idle_event.clear()
+        try:
+            async with self._operation_lock:
+                source = CancellationSource()
+                active_operation = _ActiveOperation(source)
+                self._active_operation = active_operation
+                try:
+                    await self._startup()
+                    return await self._compaction_runtime.compact(
+                        active_compactor,
+                        cancellation=source.token,
+                    )
+                finally:
+                    if self._active_operation is active_operation:
+                        self._active_operation = None
+        finally:
+            self._pending_operations -= 1
+            if self._pending_operations == 0:
                 self._idle_event.set()
 
     def abort(self, reason: str | None = None) -> bool:
-        """Request cancellation of the active run without waiting for it."""
+        """Cancel the active run or compaction without waiting for it."""
 
-        active_run = self._active_run
-        if active_run is None:
+        active_operation = self._active_operation
+        if active_operation is None:
             return False
-        return active_run.cancellation.cancel(reason)
+        return active_operation.cancellation.cancel(reason)
 
     async def wait_for_idle(self) -> None:
-        """Wait for all requested runs and their event sinks to settle."""
+        """Wait for requested runs or compactions and their sinks to settle."""
 
         await self._idle_event.wait()
 

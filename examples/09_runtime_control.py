@@ -67,14 +67,9 @@ async def main() -> None:
         first_result = await run
 
         print(f"abort accepted: {accepted}")
-        print(
-            f"first result: {first_result.status} / "
-            f"{first_result.stop_reason}"
-        )
+        print(f"first result: {first_result.status} / {first_result.stop_reason}")
 
-        reused = await agent.run(
-            task="Reply with exactly: the agent is reusable"
-        )
+        reused = await agent.run(task="Reply with exactly: the agent is reusable")
         print(f"reused result: {reused.output}")
     finally:
         await agent.shutdown()

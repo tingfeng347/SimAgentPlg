@@ -33,13 +33,9 @@ class RunUsage:
             if value is not None and value < 0:
                 raise ValueError(f"{name} must not be negative")
         if self.total_tokens != self.input_tokens + self.output_tokens:
-            raise ValueError(
-                "total_tokens must equal input_tokens + output_tokens"
-            )
+            raise ValueError("total_tokens must equal input_tokens + output_tokens")
         if self.reported_request_count > self.request_count:
-            raise ValueError(
-                "reported_request_count must not exceed request_count"
-            )
+            raise ValueError("reported_request_count must not exceed request_count")
         if (
             self.cache_read_tokens is not None
             and self.cache_read_tokens > self.input_tokens

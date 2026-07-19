@@ -12,8 +12,8 @@ from simagentplg import (
     BaseAgent,
     CancellationToken,
     CompositeAgentEventSink,
-    MemorySessionStorage,
     McpToolHandler,
+    MemorySessionStorage,
     MethodToolHandler,
     ModelAdapter,
     ModelToolCall,
@@ -26,7 +26,6 @@ from simagentplg import (
     TurnCompleted,
     TurnStarted,
 )
-
 
 WAIT_TOOL = {
     "type": "function",
@@ -217,9 +216,7 @@ class AgentCancellationTests(unittest.IsolatedAsyncioTestCase):
         recorder = SessionRecorder(session_id="cancel-tool", storage=storage)
         observer = RecordingSink()
         agent = BaseAgent(
-            SequenceModel(
-                [AssistantMessage(tool_calls=(first_call, second_call))]
-            ),
+            SequenceModel([AssistantMessage(tool_calls=(first_call, second_call))]),
             agent_id="abort-tool",
             handlers=[handler],
             event_sink=CompositeAgentEventSink([recorder, observer]),

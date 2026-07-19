@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-
 AgentMessage = dict[str, Any]
+INTERNAL_METADATA_PREFIX = "_simagentplg_"
 
 
 class ToolControl(StrEnum):

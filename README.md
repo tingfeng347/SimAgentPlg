@@ -23,6 +23,10 @@ Requires Python 3.12 or newer.
 - Generic `ToolMiddleware` interception
 - Structured, cancellable Tool Progress events
 - Provider-neutral token Usage and per-run budget guards
+- Context pressure estimates, independent window budgets, and non-mutating
+  compaction preparation
+- Explicit, cancellable compaction through a pluggable `Compactor`, canonical
+  `SummaryEntry`, and resumable Session snapshots
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -37,6 +41,13 @@ Derived agents should provide equivalent implementations when needed.
 
 ```bash
 uv sync
+```
+
+MCP support is optional. Install its extra only when the agent uses MCP:
+
+```bash
+uv sync --extra mcp
+# or: pip install "SimAgentPlg[mcp]"
 ```
 
 ## Configuration
@@ -176,6 +187,73 @@ print(result.usage.complete)
 Unknown Usage is distinct from zero. Complete-only adapters remain compatible
 and produce an incomplete `RunUsage` unless they override `stream()` with a
 terminal Usage value.
+
+### Context pressure and compaction preparation
+
+Context window capacity is independent of cumulative run spend. Configure an
+optional `CompactionPolicy` to assess the complete provider request before each
+model call:
+
+```python
+from simagentplg import CompactionPolicy, ContextBudget
+
+context_policy = CompactionPolicy(
+    ContextBudget(
+        context_window=128_000,
+        reserve_tokens=16_000,
+        keep_recent_tokens=20_000,
+    )
+)
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+)
+```
+
+The estimate combines the latest assistant `ModelUsage`, trailing messages,
+and a UTF-8-aware heuristic lower bound that includes current tool schemas.
+Each configured turn emits `ContextPressureEvaluated`. When the threshold is
+reached, its `CompactionPreparation` separates protected messages, complete
+old User/Assistant/Tool turns to summarize, and recent turns to keep. Tool
+calls and results remain in the same turn.
+
+Pressure evaluation remains observation-only and never auto-compacts or retries
+an overflow. Applications can call `estimate_context_usage()` and
+`prepare_compaction()` directly, and can replace the fallback through
+`MessageTokenEstimator`.
+
+### Explicit compaction
+
+A derived agent supplies the summary behavior through the cancellable
+`Compactor` protocol, then invokes `compact()` explicitly:
+
+```python
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+)
+
+compaction = await agent.compact()
+print(compaction.status)
+print(compaction.summary)
+```
+
+The Core calls the Compactor with `CompactionRequest`, creates trusted range and
+token metadata in `SummaryEntry`, then atomically installs protected messages +
+Summary + recent turns. Failure or cancellation returns a structured
+`CompactionResult` and leaves history unchanged. Repeated compaction passes the
+previous Summary to the Compactor for merging and replaces the old Summary
+message.
+
+`CompactionStarted`, `CompactionCompleted`, and `CompactionFailed` expose the
+lifecycle. `abort()` and `wait_for_idle()` apply to compaction as well as normal
+runs. `SessionRecorder` stores a compacted recovery snapshot while retaining
+the original `SessionMessage` audit entries. The Core does not choose a summary
+model or prompt and still does not trigger compaction automatically.
 
 ## Runtime policy
 
@@ -399,6 +477,8 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Linear Session + Runtime Cancellation
 + Provider Streaming + Tool Progress + Usage Accounting + Run Budget
++ Context Pressure + Compaction Preparation
++ Explicit Compactor + Summary Entry + Session Compaction Snapshot
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -428,6 +508,8 @@ uv run python examples/10_composed_harness.py
 uv run python examples/11_streaming_events.py
 uv run python examples/12_tool_progress.py
 uv run python examples/13_usage_budget.py
+uv run python examples/14_context_pressure.py
+uv run python examples/15_explicit_compaction.py
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -439,6 +521,18 @@ each file.
 uv run python -m unittest discover -s tests -p 'test*.py' -q
 ```
 
+Run the complete local quality gate before submitting a change:
+
+```bash
+uv sync --locked --all-extras --group dev
+uv run ruff check src tests examples
+uv run ruff format --check src tests examples
+uv run mypy
+uv build
+```
+
+fuck
+
 ## Public API
 
 The package root exports:
@@ -447,9 +541,10 @@ The package root exports:
 - Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
-- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`
-- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`
-- Context: `AgentContextBuilder`, `ContextBuildResult`
+- Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `SessionCompaction`
+- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
+- Compaction: `CompactionRuntime`, `Compactor`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`

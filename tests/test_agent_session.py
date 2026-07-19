@@ -158,9 +158,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         session = await recorder.load()
         assert session is not None
 
-        resumed_model = SequenceModel(
-            [AssistantMessage(content="continued answer")]
-        )
+        resumed_model = SequenceModel([AssistantMessage(content="continued answer")])
         resumed_agent = BaseAgent(
             resumed_model,
             agent_id="resume-agent",
@@ -243,9 +241,7 @@ class AgentSessionTests(unittest.IsolatedAsyncioTestCase):
         storage = MemorySessionStorage()
         recorder = SessionRecorder(session_id="composite", storage=storage)
         observer = RecordingSink()
-        sink = CompositeAgentEventSink(
-            [FailingSink(), recorder, observer]
-        )
+        sink = CompositeAgentEventSink([FailingSink(), recorder, observer])
         agent = BaseAgent(
             SequenceModel([AssistantMessage(content="done")]),
             agent_id="composite-agent",

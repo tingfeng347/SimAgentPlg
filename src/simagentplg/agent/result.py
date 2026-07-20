@@ -29,6 +29,8 @@ class StopReason(StrEnum):
     REPEATED_TOOL_CALL = "repeated_tool_call"
     TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
     USAGE_UNAVAILABLE = "usage_unavailable"
+    CONTEXT_OVERFLOW = "context_overflow"
+    COMPACTION_FAILED = "compaction_failed"
     RUNTIME_ERROR = "runtime_error"
 
 

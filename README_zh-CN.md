@@ -23,6 +23,8 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - Provider-neutral Token Usage 与单次 Run 预算保护
 - 上下文压力估算、独立窗口预算和非变异压缩准备
 - 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
+- 可选的阈值自动压缩，以及 Provider 上下文溢出后的单次安全恢复
+- 版本化 Session 序列化、追加式 JSONL Journal 和显式跨进程恢复
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -149,9 +151,35 @@ agent = BaseAgent(
 User/Assistant/Tool Turn，以及需要原文保留的最近 Turn。Tool Call 和对应 Tool Result
 不会被切开。
 
-压力评估仍是只读观察，不会自动压缩或重试 overflow。应用也可以直接调用
+只配置 `CompactionPolicy` 时，压力评估仍是只读观察。应用也可以直接调用
 `estimate_context_usage()` 和 `prepare_compaction()`，并通过
 `MessageTokenEstimator` 替换默认估算器。
+
+## 自动压缩与 Overflow 恢复
+
+自动行为默认关闭；启用时复用同一个 `CompactionPolicy` 和 `Compactor`：
+
+```python
+from simagentplg import AutoCompactionPolicy
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+    auto_compaction_policy=AutoCompactionPolicy(),
+)
+```
+
+达到压力阈值后，Core 会在同一次 Agent Run 内压缩旧完整 Turn、重建上下文，再请求模型。
+Provider Adapter 抛出 `ContextOverflowError` 时，Core 最多执行一次“压缩—重建—重试”。
+第二次溢出返回 `StopReason.CONTEXT_OVERFLOW`；Compactor 失败返回
+`StopReason.COMPACTION_FAILED`。一旦 Text 或 Thinking Delta 已对外发布，Core 不会重试，
+从而避免重复的流式输出。
+
+`AutoCompactionPolicy(compact_on_pressure=False)` 可以只保留 Overflow 恢复；省略该策略或
+设置 `enabled=False` 会关闭全部自动行为。Provider Adapter 通过 `ModelProviderError` 和
+`ModelErrorKind` 统一区分上下文溢出、限流、超时、认证及普通 Provider 错误。
 
 ## 显式上下文压缩
 
@@ -170,6 +198,19 @@ print(compaction.status)
 print(compaction.summary)
 ```
 
+`ModelCompactor` 可以把借用的 `ModelAdapter` 接入该协议，同时由应用继续拥有摘要 Prompt：
+
+```python
+compactor = ModelCompactor(
+    summary_model,
+    context_builder=build_summary_context,
+    source="summary-model:v1",
+)
+```
+
+注入的 Builder 接收 `CompactionRequest`，返回完整 `ContextBuildResult`。调用方负责借用模型
+的生命周期，因此 Core 不会静默创建另一个 Provider Client，也不会替应用选择 Prompt。
+
 Core 将 `CompactionRequest` 交给 Compactor，由 Core 在 `SummaryEntry` 中写入可信的范围和
 Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn”。失败或取消返回
 结构化 `CompactionResult`，历史保持不变。重复压缩时，旧 Summary 会传给 Compactor
@@ -177,8 +218,66 @@ Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn
 
 生命周期通过 `CompactionStarted`、`CompactionCompleted` 和 `CompactionFailed` 发布。
 `abort()`、`wait_for_idle()` 同时适用于普通 Run 和压缩。`SessionRecorder` 保存紧凑恢复
-快照，同时保留原始 `SessionMessage` 审计条目。Core 不选择摘要模型或 Prompt，当前也
-不会自动触发压缩。
+快照，同时保留原始 `SessionMessage` 审计条目。每次压缩都有独立 `operation_id` 和
+`CompactionTrigger`。Core 不会替派生 Agent 选择摘要模型或 Prompt。
+
+## 持久化 Session Journal
+
+`SessionRecorder` 可以使用 `JsonlSessionStorage`，为每个已接受的生命周期变更追加一条
+版本化语义 Record：
+
+```python
+from simagentplg import JsonlSessionStorage, SessionRecorder
+
+storage = JsonlSessionStorage("./sessions")
+recorder = SessionRecorder(session_id="project-42", storage=storage)
+agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+await agent.run(task="remember this decision")
+```
+
+另一个进程可以读取完成快照并显式恢复新的 Agent：
+
+```python
+saved = await storage.load("project-42")
+if saved is not None:
+    resumed = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+    resumed.restore_session(saved)
+```
+
+每条 JSONL Record 都包含单调递增的 `revision`、不可变 `record_id`、`parent_id` 和
+`branch_id`。文件顺序定义全局 Revision，父指针定义逻辑树。`SessionRecorder` 追加 `run_started`、`message_appended`、
+`compaction_applied`、`run_finished` 等紧凑 Mutation；显式 `save()` 用完整 Checkpoint
+支持导入和导出。
+
+Branch 会复用源历史，不复制或改写旧 Record：
+
+```python
+forked = await storage.fork("project-42", branch_id="experiment")
+rolled_back = await storage.rollback(
+    "project-42",
+    to_record_id="a-completed-ancestor-record",
+    branch_id="rollback-before-change",
+)
+retry = await storage.prepare_retry(
+    "project-42",
+    run_id="run-to-repeat",
+    branch_id="retry-run",
+)
+```
+
+`fork()` 在已完成的投影上创建通用 Branch；`rollback()` 要求目标是源 Head 的祖先；
+`prepare_retry()` 在指定 Run 之前创建 Branch 并返回原始 Task。Core 不会自动执行重试，
+因为 Tool Call 可能已经产生外部副作用。可以使用 `checkout()`、`head()` 和
+`list_branches()` 检查 Session 树。继续某个 Branch 时，需要恢复其 Checkout，并把相同
+的 `branch_id` 传给 `SessionRecorder`。
+
+Session ID 会映射为哈希文件名。每一行先完整编码，再通过一次追加写入并执行 `fsync`；
+中断产生的不完整尾行会在读取时忽略，并在下一次追加前修复。已经换行的损坏 JSON 或
+未知 Journal Schema 会抛出 `SessionSerializationError`，不会被误认为 Session 不存在。
+
+`restore_session()` 会校验 Agent 身份，并拒绝包含未完成 Run 的 Session。Core 不会重放
+中断的 Tool Call，因为它可能已经产生外部副作用。不同进程可以读取已完成快照，但文件
+实现暂不协调同一 Session 的多进程并发写入。
 
 ## RuntimePolicy
 
@@ -383,7 +482,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
 + Context Pressure + Compaction Preparation
-+ Explicit Compactor + Summary Entry + Session Compaction Snapshot
++ Model Compactor + Summary Entry + Durable Session Journal + Session Tree
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -406,6 +505,8 @@ uv run python examples/06_skill.py
 uv run python examples/13_usage_budget.py
 uv run python examples/14_context_pressure.py
 uv run python examples/15_explicit_compaction.py
+uv run python examples/16_durable_session.py record
+uv run python examples/16_durable_session.py resume
 ```
 
 ## 测试
@@ -424,15 +525,41 @@ uv run mypy
 uv build
 ```
 
+## 发布
+
+PyPI 发布由 `.github/workflows/release.yml` 和 Trusted Publishing 完成，GitHub
+中不保存长期 API Token。配置 `pypi` Environment 和 PyPI Publisher 后，先把发布提交
+合并到 `main`，再推送与项目版本一致的 Tag：
+
+```text
+PyPI 项目：SimAgentPlg
+GitHub Owner：jyh20030112
+Repository：SimAgentPlg
+Workflow：release.yml
+Environment：pypi
+```
+
+建议为 GitHub `pypi` Environment 配置 Required Reviewer，并限制只有 Maintainer 可以
+创建 `v*` Tag。然后执行：
+
+```bash
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+工作流会拒绝不在 `main` 上或与 `project.version` 不一致的 Tag，重新执行完整质量矩阵，
+构建并 smoke test 发布产物，最后使用短期 OIDC 身份上传 PyPI。
+
 ## 公共 API
 
 包根目录导出：
 
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
-- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
+- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`、`ModelErrorKind`、`ModelProviderError`、`ContextOverflowError`、`ModelRateLimitError`、`ModelTimeoutError`、`ModelAuthenticationError`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
-- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`SummaryEntry`
+- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`SessionJournalStorage`、`MemorySessionStorage`、`JsonlSessionStorage`、`SessionCompaction`、`SessionRecord`、`SessionRecordDraft`、`SessionRecordKind`、`SessionBranchIntent`、`SessionBranch`、`SessionCheckout`、`SessionRetry`、`DEFAULT_SESSION_BRANCH`、`SESSION_SCHEMA_VERSION`、`SESSION_JOURNAL_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`、`SessionConflictError`
+- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`AutoCompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
+- Compaction：`CompactionRuntime`、`Compactor`、`ModelCompactor`、`CompactionContextBuilder`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

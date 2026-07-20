@@ -11,12 +11,14 @@ from simagentplg.agent.compaction import (
     CompactionResult,
     CompactionRuntime,
     CompactionStatus,
+    CompactionTrigger,
     Compactor,
     CompactorOutput,
     SummaryEntry,
 )
 from simagentplg.agent.context_builder import AgentContextBuilder, ContextBuildResult
 from simagentplg.agent.context_management import (
+    AutoCompactionPolicy,
     CompactionDecision,
     CompactionDecisionReason,
     CompactionPolicy,
@@ -50,6 +52,10 @@ from simagentplg.agent.events import (
     ToolStarted,
     TurnCompleted,
     TurnStarted,
+)
+from simagentplg.agent.model_compactor import (
+    CompactionContextBuilder,
+    ModelCompactor,
 )
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import (
@@ -88,7 +94,10 @@ __all__ = [
     "CompactionResult",
     "CompactionRuntime",
     "CompactionStatus",
+    "CompactionTrigger",
     "SummaryEntry",
+    "CompactionContextBuilder",
+    "ModelCompactor",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",
@@ -99,6 +108,7 @@ __all__ = [
     "MessageTokenEstimator",
     "HeuristicMessageTokenEstimator",
     "CompactionPolicy",
+    "AutoCompactionPolicy",
     "CompactionDecision",
     "CompactionDecisionReason",
     "CompactionPreparation",

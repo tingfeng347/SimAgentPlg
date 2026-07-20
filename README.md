@@ -27,6 +27,10 @@ Requires Python 3.12 or newer.
   compaction preparation
 - Explicit, cancellable compaction through a pluggable `Compactor`, canonical
   `SummaryEntry`, and resumable Session snapshots
+- Opt-in automatic compaction on context pressure and one safe recovery attempt
+  for provider-normalized context overflow
+- Versioned Session serialization, append-only JSONL journals, and explicit
+  cross-process restoration
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -219,10 +223,39 @@ reached, its `CompactionPreparation` separates protected messages, complete
 old User/Assistant/Tool turns to summarize, and recent turns to keep. Tool
 calls and results remain in the same turn.
 
-Pressure evaluation remains observation-only and never auto-compacts or retries
-an overflow. Applications can call `estimate_context_usage()` and
-`prepare_compaction()` directly, and can replace the fallback through
-`MessageTokenEstimator`.
+`CompactionPolicy` alone remains observation-only. Applications can call
+`estimate_context_usage()` and `prepare_compaction()` directly, and can replace
+the fallback through `MessageTokenEstimator`.
+
+### Automatic compaction and overflow recovery
+
+Automatic behavior is opt-in and reuses the same `CompactionPolicy` and
+`Compactor`:
+
+```python
+from simagentplg import AutoCompactionPolicy
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+    auto_compaction_policy=AutoCompactionPolicy(),
+)
+```
+
+At the configured pressure threshold, Core compacts old complete turns,
+rebuilds context, and dispatches the model request in the same Agent Run. If a
+provider adapter raises `ContextOverflowError`, Core can compact, rebuild, and
+retry once. A second overflow returns `StopReason.CONTEXT_OVERFLOW`; compactor
+failure returns `StopReason.COMPACTION_FAILED`. Core never retries after text or
+thinking deltas have been exposed, preventing duplicate provisional output.
+
+`AutoCompactionPolicy(compact_on_pressure=False)` keeps overflow recovery while
+disabling proactive compaction. Set `enabled=False` or omit the policy to keep
+all automatic behavior off. Provider adapters normalize overflow, rate-limit,
+timeout, authentication, and other failures through `ModelProviderError` and
+`ModelErrorKind`.
 
 ### Explicit compaction
 
@@ -242,6 +275,21 @@ print(compaction.status)
 print(compaction.summary)
 ```
 
+`ModelCompactor` adapts a borrowed `ModelAdapter` into this protocol while the
+application still owns the summary prompt:
+
+```python
+compactor = ModelCompactor(
+    summary_model,
+    context_builder=build_summary_context,
+    source="summary-model:v1",
+)
+```
+
+The injected builder receives `CompactionRequest` and returns the complete
+`ContextBuildResult`. The caller owns the borrowed model lifecycle, so Core
+does not silently create another provider client or choose a prompt.
+
 The Core calls the Compactor with `CompactionRequest`, creates trusted range and
 token metadata in `SummaryEntry`, then atomically installs protected messages +
 Summary + recent turns. Failure or cancellation returns a structured
@@ -252,8 +300,75 @@ message.
 `CompactionStarted`, `CompactionCompleted`, and `CompactionFailed` expose the
 lifecycle. `abort()` and `wait_for_idle()` apply to compaction as well as normal
 runs. `SessionRecorder` stores a compacted recovery snapshot while retaining
-the original `SessionMessage` audit entries. The Core does not choose a summary
-model or prompt and still does not trigger compaction automatically.
+the original `SessionMessage` audit entries. Each operation exposes a stable
+`operation_id` and `CompactionTrigger`. The Core does not choose a summary model
+or prompt.
+
+## Durable Session journals
+
+`SessionRecorder` can use `JsonlSessionStorage` to append a versioned semantic
+record for each accepted lifecycle mutation:
+
+```python
+from simagentplg import JsonlSessionStorage, SessionRecorder
+
+storage = JsonlSessionStorage("./sessions")
+recorder = SessionRecorder(session_id="project-42", storage=storage)
+agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+await agent.run(task="remember this decision")
+```
+
+A different process can load the completed snapshot and explicitly restore a
+new Agent:
+
+```python
+saved = await storage.load("project-42")
+if saved is not None:
+    resumed = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+    resumed.restore_session(saved)
+```
+
+Each JSONL record carries a monotonic `revision`, immutable `record_id`,
+`parent_id`, and `branch_id`. File order defines the global revision while
+parent links define the logical tree. `SessionRecorder` appends compact mutations such as
+`run_started`, `message_appended`, `compaction_applied`, and `run_finished`;
+explicit `save()` appends a full Checkpoint for imports and exports.
+
+Branches retain their source history without copying or rewriting records:
+
+```python
+forked = await storage.fork("project-42", branch_id="experiment")
+rolled_back = await storage.rollback(
+    "project-42",
+    to_record_id="a-completed-ancestor-record",
+    branch_id="rollback-before-change",
+)
+retry = await storage.prepare_retry(
+    "project-42",
+    run_id="run-to-repeat",
+    branch_id="retry-run",
+)
+```
+
+`fork()` creates a general branch at a completed projection. `rollback()`
+requires the target to be an ancestor of the source head. `prepare_retry()`
+branches immediately before a Run and returns its original task; it never
+executes that task automatically because Tool calls may have external side
+effects. Use `checkout()`, `head()`, and `list_branches()` to inspect the tree.
+To continue a branch, restore the checkout and give `SessionRecorder` the same
+`branch_id`.
+
+Session IDs are mapped to hashed filenames. Each complete line is encoded
+before one append write and followed by `fsync`; an incomplete final line from
+an interrupted write is ignored and repaired before the next append. Invalid
+JSON in a completed line and unsupported journal schema versions raise
+`SessionSerializationError` instead of looking like a missing Session.
+
+`restore_session()` verifies Agent identity and rejects unfinished Runs. Core
+does not replay an interrupted Tool call because it may already have produced
+an external side effect. Separate processes may read completed snapshots, but
+concurrent writers to the same Session are not yet coordinated in this
+file-backed implementation.
 
 ## Runtime policy
 
@@ -475,10 +590,10 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
-+ Lifecycle Events + Linear Session + Runtime Cancellation
++ Lifecycle Events + Session Tree + Runtime Cancellation
 + Provider Streaming + Tool Progress + Usage Accounting + Run Budget
 + Context Pressure + Compaction Preparation
-+ Explicit Compactor + Summary Entry + Session Compaction Snapshot
++ Model Compactor + Summary Entry + Durable Session Journal
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -510,6 +625,8 @@ uv run python examples/12_tool_progress.py
 uv run python examples/13_usage_budget.py
 uv run python examples/14_context_pressure.py
 uv run python examples/15_explicit_compaction.py
+uv run python examples/16_durable_session.py record
+uv run python examples/16_durable_session.py resume
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -531,20 +648,45 @@ uv run mypy
 uv build
 ```
 
-fuck
+## Release
+
+PyPI publishing uses `.github/workflows/release.yml` and Trusted Publishing;
+no long-lived API token is stored in GitHub. After configuring the `pypi`
+environment and PyPI publisher, merge the release commit into `main`, then push
+a version-matching tag:
+
+```text
+PyPI project: SimAgentPlg
+GitHub owner: jyh20030112
+Repository: SimAgentPlg
+Workflow: release.yml
+Environment: pypi
+```
+
+Protect the GitHub `pypi` environment with required reviewers and restrict
+creation of `v*` tags to maintainers. Then publish with:
+
+```bash
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+The workflow rejects tags whose commit is not on `main` or whose value does not
+match `project.version`, reruns the complete quality matrix, builds and smoke
+tests the distributions, then publishes them with a short-lived OIDC identity.
 
 ## Public API
 
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`, `ModelErrorKind`, `ModelProviderError`, `ContextOverflowError`, `ModelRateLimitError`, `ModelTimeoutError`, `ModelAuthenticationError`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
-- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `SessionCompaction`
-- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
-- Compaction: `CompactionRuntime`, `Compactor`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `SummaryEntry`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `SessionJournalStorage`, `MemorySessionStorage`, `JsonlSessionStorage`, `SessionCompaction`, `SessionRecord`, `SessionRecordDraft`, `SessionRecordKind`, `SessionBranchIntent`, `SessionBranch`, `SessionCheckout`, `SessionRetry`, `DEFAULT_SESSION_BRANCH`, `SESSION_SCHEMA_VERSION`, `SESSION_JOURNAL_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`, `SessionConflictError`
+- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `AutoCompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
+- Compaction: `CompactionRuntime`, `Compactor`, `ModelCompactor`, `CompactionContextBuilder`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`

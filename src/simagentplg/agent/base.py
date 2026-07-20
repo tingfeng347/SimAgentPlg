@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ from simagentplg.agent.compaction import (
 )
 from simagentplg.agent.context_builder import AgentContextBuilder
 from simagentplg.agent.context_management import (
+    AutoCompactionPolicy,
     CompactionPolicy,
     MessageTokenEstimator,
 )
@@ -34,6 +37,7 @@ from simagentplg.providers.base import ModelAdapter
 
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
+    from simagentplg.session.types import AgentSession
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful, concise assistant."
 
@@ -67,12 +71,13 @@ class BaseAgent:
         *,
         agent_id: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        handlers: Iterable["BaseHandler"] | None = None,
+        handlers: Iterable[BaseHandler] | None = None,
         middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
         compaction_policy: CompactionPolicy | None = None,
         compactor: Compactor | None = None,
+        auto_compaction_policy: AutoCompactionPolicy | None = None,
         context_token_estimator: MessageTokenEstimator | None = None,
         runtime_policy: RuntimePolicy | None = None,
         event_sink: AgentEventSink | None = None,
@@ -86,6 +91,12 @@ class BaseAgent:
         self.runtime_policy = policy
         self.compaction_policy = compaction_policy
         self.compactor = compactor
+        self.auto_compaction_policy = auto_compaction_policy
+        if auto_compaction_policy is not None and auto_compaction_policy.enabled:
+            if compaction_policy is None:
+                raise ValueError("automatic compaction requires a CompactionPolicy")
+            if compactor is None:
+                raise ValueError("automatic compaction requires a Compactor")
         self.context_token_estimator = context_token_estimator
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
@@ -130,6 +141,9 @@ class BaseAgent:
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
             compaction_policy=self.compaction_policy,
+            auto_compaction_policy=self.auto_compaction_policy,
+            compactor=self.compactor,
+            compaction_runtime=self._compaction_runtime,
             context_token_estimator=self.context_token_estimator,
             event_emitter=self._event_emitter,
         )
@@ -172,6 +186,25 @@ class BaseAgent:
         if history:
             messages.extend(dict(message) for message in history)
         self.state.reset(messages)
+
+    def restore_session(self, session: AgentSession) -> None:
+        """Restore one finished Session projection into this Agent's history."""
+
+        if self._pending_operations or self._operation_lock.locked():
+            raise RuntimeError("cannot restore a Session while the agent is active")
+        snapshot = session.snapshot()
+        if snapshot.agent_id is not None and snapshot.agent_id != self.agent_id:
+            raise ValueError(
+                f"session {snapshot.session_id!r} belongs to agent "
+                f"{snapshot.agent_id!r}, not {self.agent_id!r}"
+            )
+        unfinished = [run.run_id for run in snapshot.runs if not run.finished]
+        if unfinished:
+            raise ValueError(
+                "cannot restore a Session with unfinished run(s): "
+                + ", ".join(unfinished)
+            )
+        self.reset(snapshot.messages)
 
     async def startup(self) -> None:
         """Start the model adapter, handlers, and middleware resources."""

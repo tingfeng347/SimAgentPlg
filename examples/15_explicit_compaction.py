@@ -7,77 +7,57 @@ import os
 from simagentplg import (
     AgentEvent,
     BaseAgent,
-    CancellationToken,
     CompactionCompleted,
     CompactionFailed,
     CompactionPolicy,
     CompactionRequest,
     CompactionStarted,
-    CompactorOutput,
     CompositeAgentEventSink,
     ContextBudget,
     ContextBuildResult,
     MemorySessionStorage,
+    ModelCompactor,
     ModelConfig,
     OpenAIModelAdapter,
     SessionRecorder,
 )
 
 
-class OpenAICompactor:
-    """Example behavior: use an injected model and prompt to summarize."""
+def build_compaction_context(request: CompactionRequest) -> ContextBuildResult:
+    """Application-owned prompt policy injected into ModelCompactor."""
 
-    def __init__(self, model: OpenAIModelAdapter) -> None:
-        self.model = model
-
-    async def compact(
-        self,
-        request: CompactionRequest,
-        *,
-        cancellation: CancellationToken | None = None,
-    ) -> CompactorOutput:
-        visible_messages = [
-            {
-                key: value
-                for key, value in message.items()
-                if key not in {"usage", "_simagentplg_summary"}
-            }
-            for message in request.preparation.messages_to_summarize
-        ]
-        previous = (
-            request.previous_summary.content
-            if request.previous_summary is not None
-            else "(none)"
-        )
-        prompt = (
-            "Create a concise continuation summary. Preserve user goals, "
-            "tool findings, decisions, and unfinished work. Do not invent "
-            "facts. Return only the summary.\n\n"
-            f"Previous summary:\n{previous}\n\n"
-            "New messages:\n"
-            + json.dumps(visible_messages, ensure_ascii=False, indent=2)
-        )
-        messages = (
-            {
-                "role": "system",
-                "content": "You produce reliable Agent context summaries.",
-            },
-            {"role": "user", "content": prompt},
-        )
-        response = await self.model.complete(
-            ContextBuildResult(
-                agent_messages=messages,
-                llm_messages=messages,
-                tools=(),
-            ),
-            cancellation=cancellation,
-        )
-        if not response.content:
-            raise RuntimeError("summary model returned empty content")
-        return CompactorOutput(
-            content=response.content,
-            source=f"openai-compatible:{self.model.config.model}",
-        )
+    visible_messages = [
+        {
+            key: value
+            for key, value in message.items()
+            if key not in {"usage", "_simagentplg_summary"}
+        }
+        for message in request.preparation.messages_to_summarize
+    ]
+    previous = (
+        request.previous_summary.content
+        if request.previous_summary is not None
+        else "(none)"
+    )
+    prompt = (
+        "Create a concise continuation summary. Preserve user goals, "
+        "tool findings, decisions, and unfinished work. Do not invent "
+        "facts. Return only the summary.\n\n"
+        f"Previous summary:\n{previous}\n\n"
+        "New messages:\n" + json.dumps(visible_messages, ensure_ascii=False, indent=2)
+    )
+    messages = (
+        {
+            "role": "system",
+            "content": "You produce reliable Agent context summaries.",
+        },
+        {"role": "user", "content": prompt},
+    )
+    return ContextBuildResult(
+        agent_messages=messages,
+        llm_messages=messages,
+        tools=(),
+    )
 
 
 class CompactionConsoleSink:
@@ -159,7 +139,11 @@ async def main() -> None:
                 keep_recent_tokens=int(os.getenv("HARNESS_KEEP_RECENT_TOKENS", "20")),
             )
         ),
-        compactor=OpenAICompactor(model),
+        compactor=ModelCompactor(
+            model,
+            context_builder=build_compaction_context,
+            source=f"openai-compatible:{model.config.model}",
+        ),
         event_sink=CompositeAgentEventSink([recorder, CompactionConsoleSink()]),
     )
     agent.reset(history=HISTORY)

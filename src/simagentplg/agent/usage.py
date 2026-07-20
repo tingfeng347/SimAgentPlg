@@ -62,6 +62,20 @@ class RunUsage:
     def missing_request_count(self) -> int:
         return self.request_count - self.reported_request_count
 
+    def to_dict(self) -> dict[str, int | None]:
+        """Return a detached JSON-compatible representation."""
+
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "request_count": self.request_count,
+            "reported_request_count": self.reported_request_count,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+
 
 class UsageAccumulator:
     """Mutable per-run collector producing immutable usage snapshots."""

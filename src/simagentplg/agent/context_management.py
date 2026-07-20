@@ -295,6 +295,30 @@ class CompactionPolicy:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AutoCompactionPolicy:
+    """Opt-in behavior for proactive compaction and overflow recovery."""
+
+    enabled: bool = True
+    compact_on_pressure: bool = True
+    recover_on_overflow: bool = True
+    max_overflow_retries: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if not isinstance(self.compact_on_pressure, bool):
+            raise TypeError("compact_on_pressure must be a bool")
+        if not isinstance(self.recover_on_overflow, bool):
+            raise TypeError("recover_on_overflow must be a bool")
+        if (
+            not isinstance(self.max_overflow_retries, int)
+            or isinstance(self.max_overflow_retries, bool)
+            or self.max_overflow_retries not in {0, 1}
+        ):
+            raise ValueError("max_overflow_retries must be zero or one")
+
+
 def prepare_compaction(
     messages: Sequence[Mapping[str, Any]],
     *,

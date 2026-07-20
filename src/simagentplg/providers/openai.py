@@ -9,16 +9,26 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import (
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    RateLimitError,
+)
 
 from simagentplg.agent.cancellation import AgentCancelledError
 from simagentplg.providers.base import (
     AssistantMessage,
+    ContextOverflowError,
     ModelAdapter,
+    ModelAuthenticationError,
+    ModelProviderError,
+    ModelRateLimitError,
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
     ModelThinkingDelta,
+    ModelTimeoutError,
     ModelToolCall,
     ModelUsage,
 )
@@ -88,6 +98,74 @@ class _StreamingToolCall:
     id: str = ""
     name: str = ""
     arguments: str = ""
+
+
+_CONTEXT_OVERFLOW_CODES = {
+    "context_length_error",
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "input_too_long",
+    "prompt_too_long",
+}
+_CONTEXT_OVERFLOW_PHRASES = (
+    "context length exceeded",
+    "context window exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "too many tokens",
+)
+
+
+def _provider_error_values(exc: Exception) -> tuple[str, ...]:
+    values: list[str] = []
+    for candidate in (
+        getattr(exc, "code", None),
+        getattr(exc, "type", None),
+        getattr(exc, "body", None),
+    ):
+        if isinstance(candidate, str):
+            values.append(candidate)
+        elif isinstance(candidate, Mapping):
+            for key in ("code", "type", "message"):
+                value = candidate.get(key)
+                if isinstance(value, str):
+                    values.append(value)
+            nested = candidate.get("error")
+            if isinstance(nested, Mapping):
+                for key in ("code", "type", "message"):
+                    value = nested.get(key)
+                    if isinstance(value, str):
+                        values.append(value)
+    values.append(str(exc))
+    return tuple(values)
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    values = _provider_error_values(exc)
+    normalized_codes = {value.strip().lower() for value in values}
+    if normalized_codes & _CONTEXT_OVERFLOW_CODES:
+        return True
+    text = " ".join(normalized_codes)
+    return any(phrase in text for phrase in _CONTEXT_OVERFLOW_PHRASES)
+
+
+def _normalize_provider_error(
+    exc: Exception,
+    *,
+    operation: str,
+) -> ModelProviderError:
+    if isinstance(exc, ModelProviderError):
+        return exc
+    message = f"{operation} failed: {exc}"
+    if isinstance(exc, AuthenticationError):
+        return ModelAuthenticationError(message)
+    if isinstance(exc, RateLimitError):
+        return ModelRateLimitError(message)
+    if isinstance(exc, (APITimeoutError, TimeoutError)):
+        return ModelTimeoutError(message)
+    if _is_context_overflow(exc):
+        return ContextOverflowError(message)
+    return ModelProviderError(message)
 
 
 def _usage_field(value: Any, name: str) -> Any:
@@ -171,10 +249,13 @@ class OpenAIModelAdapter(ModelAdapter):
         except AgentCancelledError:
             raise
         except Exception as exc:
-            raise RuntimeError(f"chat completion failed: {exc}") from exc
+            raise _normalize_provider_error(
+                exc,
+                operation="chat completion",
+            ) from exc
 
         if not response.choices:
-            raise RuntimeError("chat completion returned no choices")
+            raise ModelProviderError("chat completion returned no choices")
         message = response.choices[0].message
         return AssistantMessage(
             content=message.content,
@@ -292,7 +373,10 @@ class OpenAIModelAdapter(ModelAdapter):
         except AgentCancelledError:
             raise
         except Exception as exc:
-            raise RuntimeError(f"chat completion stream failed: {exc}") from exc
+            raise _normalize_provider_error(
+                exc,
+                operation="chat completion stream",
+            ) from exc
         finally:
             if response is not None:
                 close = getattr(response, "close", None)
@@ -305,13 +389,15 @@ class OpenAIModelAdapter(ModelAdapter):
                             await close_result
 
         if not has_finish_reason:
-            raise RuntimeError("chat completion stream ended without finish_reason")
+            raise ModelProviderError(
+                "chat completion stream ended without finish_reason"
+            )
 
         normalized_tool_calls: list[ModelToolCall] = []
         for index in sorted(tool_calls):
             call = tool_calls[index]
             if not call.id or not call.name:
-                raise RuntimeError(
+                raise ModelProviderError(
                     "chat completion stream returned an incomplete tool call"
                 )
             normalized_tool_calls.append(

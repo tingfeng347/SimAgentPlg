@@ -19,6 +19,9 @@ from simagentplg import (
     ModelAdapter,
     RunStatus,
     RunUsage,
+    SessionBranchIntent,
+    SessionConflictError,
+    SessionRecordDraft,
     SessionRecorder,
     SessionRecordKind,
     SessionSerializationError,
@@ -412,6 +415,215 @@ asyncio.run(main())
                     "continue",
                 ],
             )
+
+    async def test_fork_continues_without_changing_main_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            first_agent = BaseAgent(
+                SequenceModel(["main answer"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(session_id="tree", storage=storage),
+            )
+            await first_agent.run(task="main task")
+            main_head = await storage.head("tree")
+            assert main_head is not None
+
+            forked = await storage.fork("tree", branch_id="experiment")
+            self.assertEqual(forked.branch.intent, SessionBranchIntent.FORK)
+            self.assertEqual(forked.branch.base_record_id, main_head.record_id)
+            self.assertEqual(forked.head.parent_id, main_head.record_id)
+            self.assertEqual(len(forked.session.runs), 1)
+
+            branch_agent = BaseAgent(
+                SequenceModel(["branch answer"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(
+                    session_id="tree",
+                    storage=storage,
+                    branch_id="experiment",
+                ),
+            )
+            branch_agent.restore_session(forked.session)
+            await branch_agent.run(task="branch task")
+
+            main = await storage.load("tree")
+            experiment = await storage.checkout("tree", branch_id="experiment")
+            assert main is not None
+            assert experiment is not None
+            self.assertEqual([run.task for run in main.runs], ["main task"])
+            self.assertEqual(
+                [run.task for run in experiment.session.runs],
+                ["main task", "branch task"],
+            )
+            branches = await storage.list_branches("tree")
+            self.assertEqual(
+                [branch.branch_id for branch in branches],
+                ["main", "experiment"],
+            )
+            records = await storage.records("tree")
+            self.assertEqual(
+                [record.revision for record in records],
+                list(range(1, len(records) + 1)),
+            )
+
+    async def test_rollback_requires_ancestor_and_preserves_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            recorder = SessionRecorder(session_id="rollback", storage=storage)
+            agent = BaseAgent(
+                SequenceModel(["one", "two"]),
+                agent_id="durable-agent",
+                event_sink=recorder,
+            )
+            await agent.run(task="first")
+            first_finish = (await storage.records("rollback"))[-1]
+            await agent.run(task="second")
+
+            rolled_back = await storage.rollback(
+                "rollback",
+                to_record_id=first_finish.record_id,
+                branch_id="before-second",
+            )
+            self.assertEqual(rolled_back.branch.intent, SessionBranchIntent.ROLLBACK)
+            self.assertEqual([run.task for run in rolled_back.session.runs], ["first"])
+            main = await storage.load("rollback")
+            assert main is not None
+            self.assertEqual([run.task for run in main.runs], ["first", "second"])
+
+            unrelated = await storage.fork(
+                "rollback",
+                branch_id="unrelated",
+            )
+            with self.assertRaisesRegex(ValueError, "not an ancestor"):
+                await storage.rollback(
+                    "rollback",
+                    to_record_id=unrelated.head.record_id,
+                    source_branch="main",
+                    branch_id="invalid-rollback",
+                )
+
+    async def test_prepare_retry_reuses_task_from_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            agent = BaseAgent(
+                SequenceModel(["first result", "original result"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(session_id="retry", storage=storage),
+            )
+            await agent.run(task="first task")
+            await agent.run(task="repeat me")
+            main = await storage.load("retry")
+            assert main is not None
+            retried_run_id = main.runs[-1].run_id
+
+            retry = await storage.prepare_retry(
+                "retry",
+                run_id=retried_run_id,
+                branch_id="retry-second",
+            )
+            self.assertEqual(retry.task, "repeat me")
+            self.assertEqual(retry.checkout.branch.intent, SessionBranchIntent.RETRY)
+            self.assertEqual(
+                [run.task for run in retry.checkout.session.runs],
+                ["first task"],
+            )
+
+            retry_agent = BaseAgent(
+                SequenceModel(["new result"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(
+                    session_id="retry",
+                    storage=storage,
+                    branch_id="retry-second",
+                ),
+            )
+            retry_agent.restore_session(retry.checkout.session)
+            await retry_agent.run(task=retry.task)
+
+            retry_checkout = await storage.checkout(
+                "retry",
+                branch_id="retry-second",
+            )
+            assert retry_checkout is not None
+            self.assertEqual(
+                [run.result.output for run in retry_checkout.session.runs],
+                ["first result", "new result"],
+            )
+            unchanged_main = await storage.load("retry")
+            assert unchanged_main is not None
+            self.assertEqual(unchanged_main.runs[-1].result.output, "original result")
+
+    async def test_first_run_retry_starts_from_bound_empty_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            agent = BaseAgent(
+                SequenceModel(["original"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(session_id="retry-first", storage=storage),
+            )
+            await agent.run(task="first task")
+            main = await storage.load("retry-first")
+            assert main is not None
+
+            retry = await storage.prepare_retry(
+                "retry-first",
+                run_id=main.runs[0].run_id,
+                branch_id="retry-root",
+            )
+
+            self.assertEqual(retry.task, "first task")
+            self.assertEqual(retry.checkout.session.agent_id, "durable-agent")
+            self.assertEqual(retry.checkout.session.runs, [])
+            self.assertIsNone(retry.checkout.head.parent_id)
+
+    async def test_conditional_append_rejects_stale_branch_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            session = durable_session("conflict")
+            await storage.save(session)
+            head = await storage.head("conflict")
+            assert head is not None
+            draft = SessionRecordDraft.run_started(
+                session_id="conflict",
+                agent_id="durable-agent",
+                sequence=1,
+                run_id="run-2",
+                task="new task",
+            )
+
+            with self.assertRaises(SessionConflictError):
+                await storage.append(
+                    draft,
+                    expected_head_id="stale-head",
+                    check_head=True,
+                )
+            self.assertEqual((await storage.head("conflict")), head)
+
+    async def test_checkout_allows_audit_of_unfinished_node_but_fork_rejects_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            agent = BaseAgent(
+                SequenceModel(["answer"]),
+                agent_id="durable-agent",
+                event_sink=SessionRecorder(session_id="audit-node", storage=storage),
+            )
+            await agent.run(task="task")
+            started = (await storage.records("audit-node"))[0]
+
+            audited = await storage.checkout(
+                "audit-node",
+                record_id=started.record_id,
+            )
+            assert audited is not None
+            self.assertFalse(audited.session.runs[0].finished)
+            with self.assertRaisesRegex(ValueError, "unfinished run"):
+                await storage.fork(
+                    "audit-node",
+                    from_record_id=started.record_id,
+                    branch_id="unsafe",
+                )
 
     def test_restore_rejects_wrong_agent_and_unfinished_run(self) -> None:
         wrong_agent = BaseAgent(

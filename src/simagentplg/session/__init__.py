@@ -1,4 +1,4 @@
-"""Linear Agent Session persistence built from lifecycle events."""
+"""Durable Agent Session projections built from lifecycle event trees."""
 
 from simagentplg.session.codec import (
     SESSION_SCHEMA_VERSION,
@@ -6,6 +6,7 @@ from simagentplg.session.codec import (
     session_to_dict,
 )
 from simagentplg.session.errors import (
+    SessionConflictError,
     SessionError,
     SessionSerializationError,
     SessionStorageError,
@@ -21,6 +22,12 @@ from simagentplg.session.jsonl import JsonlSessionStorage
 from simagentplg.session.memory import MemorySessionStorage
 from simagentplg.session.recorder import SessionRecorder
 from simagentplg.session.storage import SessionJournalStorage, SessionStorage
+from simagentplg.session.tree import (
+    SessionBranch,
+    SessionBranchIntent,
+    SessionCheckout,
+    SessionRetry,
+)
 from simagentplg.session.types import (
     AgentSession,
     SessionCompaction,
@@ -42,6 +49,7 @@ __all__ = [
     "session_to_dict",
     "session_from_dict",
     "SessionError",
+    "SessionConflictError",
     "SessionSerializationError",
     "SessionStorageError",
     "SESSION_JOURNAL_SCHEMA_VERSION",
@@ -49,4 +57,8 @@ __all__ = [
     "SessionRecordKind",
     "SessionRecordDraft",
     "SessionRecord",
+    "SessionBranchIntent",
+    "SessionBranch",
+    "SessionCheckout",
+    "SessionRetry",
 ]

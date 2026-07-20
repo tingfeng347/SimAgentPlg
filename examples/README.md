@@ -39,6 +39,8 @@ Every `BaseAgent` declares its own immutable `agent_id`.
   continue from the compacted projection
 - `16_durable_session.py`: append a versioned JSONL Session Journal and restore
   it in a separate process invocation
+- `17_session_tree.py`: inspect branches and prepare Fork, Rollback, or Retry
+  branches without automatically executing a model
 
 Run the composed Harness example directly:
 
@@ -89,3 +91,6 @@ reporting idle. It waits briefly before aborting the provider request; set
 `16_durable_session.py` appends a versioned JSONL Session Journal. Run it once
 with `record` and again with `resume`; the second invocation creates a new Agent
 process and restores the saved conversation through `restore_session()`.
+`17_session_tree.py` operates on that same journal. Its `branches`, `fork`,
+`rollback`, and `retry` commands expose tree management while leaving model
+execution explicit.

@@ -245,10 +245,31 @@ if saved is not None:
 ```
 
 每条 JSONL Record 都包含单调递增的 `revision`、不可变 `record_id`、`parent_id` 和
-`branch_id`。版本 1 只投影 `main` Branch，但 Envelope 已经可以寻址成树，因此未来加入
-Fork 不需要迁移文件格式。`SessionRecorder` 追加 `run_started`、`message_appended`、
+`branch_id`。文件顺序定义全局 Revision，父指针定义逻辑树。`SessionRecorder` 追加 `run_started`、`message_appended`、
 `compaction_applied`、`run_finished` 等紧凑 Mutation；显式 `save()` 用完整 Checkpoint
 支持导入和导出。
+
+Branch 会复用源历史，不复制或改写旧 Record：
+
+```python
+forked = await storage.fork("project-42", branch_id="experiment")
+rolled_back = await storage.rollback(
+    "project-42",
+    to_record_id="a-completed-ancestor-record",
+    branch_id="rollback-before-change",
+)
+retry = await storage.prepare_retry(
+    "project-42",
+    run_id="run-to-repeat",
+    branch_id="retry-run",
+)
+```
+
+`fork()` 在已完成的投影上创建通用 Branch；`rollback()` 要求目标是源 Head 的祖先；
+`prepare_retry()` 在指定 Run 之前创建 Branch 并返回原始 Task。Core 不会自动执行重试，
+因为 Tool Call 可能已经产生外部副作用。可以使用 `checkout()`、`head()` 和
+`list_branches()` 检查 Session 树。继续某个 Branch 时，需要恢复其 Checkout，并把相同
+的 `branch_id` 传给 `SessionRecorder`。
 
 Session ID 会映射为哈希文件名。每一行先完整编码，再通过一次追加写入并执行 `fsync`；
 中断产生的不完整尾行会在读取时忽略，并在下一次追加前修复。已经换行的损坏 JSON 或
@@ -461,7 +482,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
 + Context Pressure + Compaction Preparation
-+ Model Compactor + Summary Entry + Durable Session Snapshot
++ Model Compactor + Summary Entry + Durable Session Journal + Session Tree
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -504,6 +525,31 @@ uv run mypy
 uv build
 ```
 
+## 发布
+
+PyPI 发布由 `.github/workflows/release.yml` 和 Trusted Publishing 完成，GitHub
+中不保存长期 API Token。配置 `pypi` Environment 和 PyPI Publisher 后，先把发布提交
+合并到 `main`，再推送与项目版本一致的 Tag：
+
+```text
+PyPI 项目：SimAgentPlg
+GitHub Owner：jyh20030112
+Repository：SimAgentPlg
+Workflow：release.yml
+Environment：pypi
+```
+
+建议为 GitHub `pypi` Environment 配置 Required Reviewer，并限制只有 Maintainer 可以
+创建 `v*` Tag。然后执行：
+
+```bash
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+工作流会拒绝不在 `main` 上或与 `project.version` 不一致的 Tag，重新执行完整质量矩阵，
+构建并 smoke test 发布产物，最后使用短期 OIDC 身份上传 PyPI。
+
 ## 公共 API
 
 包根目录导出：
@@ -511,7 +557,7 @@ uv build
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`、`ModelErrorKind`、`ModelProviderError`、`ContextOverflowError`、`ModelRateLimitError`、`ModelTimeoutError`、`ModelAuthenticationError`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`SessionJournalStorage`、`MemorySessionStorage`、`JsonlSessionStorage`、`SessionCompaction`、`SessionRecord`、`SessionRecordDraft`、`SessionRecordKind`、`DEFAULT_SESSION_BRANCH`、`SESSION_SCHEMA_VERSION`、`SESSION_JOURNAL_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`
+- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`SessionJournalStorage`、`MemorySessionStorage`、`JsonlSessionStorage`、`SessionCompaction`、`SessionRecord`、`SessionRecordDraft`、`SessionRecordKind`、`SessionBranchIntent`、`SessionBranch`、`SessionCheckout`、`SessionRetry`、`DEFAULT_SESSION_BRANCH`、`SESSION_SCHEMA_VERSION`、`SESSION_JOURNAL_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`、`SessionConflictError`
 - Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`AutoCompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
 - Compaction：`CompactionRuntime`、`Compactor`、`ModelCompactor`、`CompactionContextBuilder`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`

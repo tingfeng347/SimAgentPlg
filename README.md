@@ -329,11 +329,34 @@ if saved is not None:
 ```
 
 Each JSONL record carries a monotonic `revision`, immutable `record_id`,
-`parent_id`, and `branch_id`. Version 1 projects only the `main` branch, but the
-envelope is already tree-addressable so future Fork support will not require a
-file-format migration. `SessionRecorder` appends compact mutations such as
+`parent_id`, and `branch_id`. File order defines the global revision while
+parent links define the logical tree. `SessionRecorder` appends compact mutations such as
 `run_started`, `message_appended`, `compaction_applied`, and `run_finished`;
 explicit `save()` appends a full Checkpoint for imports and exports.
+
+Branches retain their source history without copying or rewriting records:
+
+```python
+forked = await storage.fork("project-42", branch_id="experiment")
+rolled_back = await storage.rollback(
+    "project-42",
+    to_record_id="a-completed-ancestor-record",
+    branch_id="rollback-before-change",
+)
+retry = await storage.prepare_retry(
+    "project-42",
+    run_id="run-to-repeat",
+    branch_id="retry-run",
+)
+```
+
+`fork()` creates a general branch at a completed projection. `rollback()`
+requires the target to be an ancestor of the source head. `prepare_retry()`
+branches immediately before a Run and returns its original task; it never
+executes that task automatically because Tool calls may have external side
+effects. Use `checkout()`, `head()`, and `list_branches()` to inspect the tree.
+To continue a branch, restore the checkout and give `SessionRecorder` the same
+`branch_id`.
 
 Session IDs are mapped to hashed filenames. Each complete line is encoded
 before one append write and followed by `fsync`; an incomplete final line from
@@ -567,10 +590,10 @@ SimAgentPlg core owns mechanisms:
 ```text
 Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
-+ Lifecycle Events + Linear Session + Runtime Cancellation
++ Lifecycle Events + Session Tree + Runtime Cancellation
 + Provider Streaming + Tool Progress + Usage Accounting + Run Budget
 + Context Pressure + Compaction Preparation
-+ Model Compactor + Summary Entry + Durable Session Snapshot
++ Model Compactor + Summary Entry + Durable Session Journal
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -625,6 +648,33 @@ uv run mypy
 uv build
 ```
 
+## Release
+
+PyPI publishing uses `.github/workflows/release.yml` and Trusted Publishing;
+no long-lived API token is stored in GitHub. After configuring the `pypi`
+environment and PyPI publisher, merge the release commit into `main`, then push
+a version-matching tag:
+
+```text
+PyPI project: SimAgentPlg
+GitHub owner: jyh20030112
+Repository: SimAgentPlg
+Workflow: release.yml
+Environment: pypi
+```
+
+Protect the GitHub `pypi` environment with required reviewers and restrict
+creation of `v*` tags to maintainers. Then publish with:
+
+```bash
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+The workflow rejects tags whose commit is not on `main` or whose value does not
+match `project.version`, reruns the complete quality matrix, builds and smoke
+tests the distributions, then publishes them with a short-lived OIDC identity.
+
 ## Public API
 
 The package root exports:
@@ -634,7 +684,7 @@ The package root exports:
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
-- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `SessionJournalStorage`, `MemorySessionStorage`, `JsonlSessionStorage`, `SessionCompaction`, `SessionRecord`, `SessionRecordDraft`, `SessionRecordKind`, `DEFAULT_SESSION_BRANCH`, `SESSION_SCHEMA_VERSION`, `SESSION_JOURNAL_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `SessionJournalStorage`, `MemorySessionStorage`, `JsonlSessionStorage`, `SessionCompaction`, `SessionRecord`, `SessionRecordDraft`, `SessionRecordKind`, `SessionBranchIntent`, `SessionBranch`, `SessionCheckout`, `SessionRetry`, `DEFAULT_SESSION_BRANCH`, `SESSION_SCHEMA_VERSION`, `SESSION_JOURNAL_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`, `SessionConflictError`
 - Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `AutoCompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
 - Compaction: `CompactionRuntime`, `Compactor`, `ModelCompactor`, `CompactionContextBuilder`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`

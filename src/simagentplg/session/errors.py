@@ -8,3 +8,7 @@ class SessionSerializationError(SessionError):
 
 class SessionStorageError(SessionError):
     """A Session could not be read or atomically persisted."""
+
+
+class SessionConflictError(SessionStorageError):
+    """A branch head changed before a conditional append could commit."""

@@ -45,6 +45,9 @@ def main() -> None:
         "ModelCompactor",
         "JsonlSessionStorage",
         "SessionRecord",
+        "SessionBranch",
+        "SessionCheckout",
+        "SessionRetry",
         "session_to_dict",
         "session_from_dict",
     }

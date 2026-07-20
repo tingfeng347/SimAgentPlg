@@ -9,7 +9,7 @@ from simagentplg.agent.events import (
     ToolCompleted,
 )
 from simagentplg.providers.base import serialize_assistant_message
-from simagentplg.session.journal import SessionRecordDraft
+from simagentplg.session.journal import DEFAULT_SESSION_BRANCH, SessionRecordDraft
 from simagentplg.session.storage import SessionJournalStorage, SessionStorage
 from simagentplg.session.types import AgentSession
 
@@ -23,19 +23,23 @@ _RECORDED_PAYLOADS = (
 
 
 class SessionRecorder:
-    """Build a linear Agent Session from read-only lifecycle events."""
+    """Build one selected Session branch from read-only lifecycle events."""
 
     def __init__(
         self,
         *,
         session_id: str,
         storage: SessionStorage,
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> None:
         session_id = session_id.strip()
         if not session_id:
             raise ValueError("session_id must not be empty")
         self.session_id = session_id
         self.storage = storage
+        self.branch_id = branch_id.strip()
+        if not self.branch_id:
+            raise ValueError("branch_id must not be empty")
         self._lock = asyncio.Lock()
 
     async def emit(self, event: AgentEvent) -> None:
@@ -46,8 +50,26 @@ class SessionRecorder:
             return
 
         async with self._lock:
-            session = await self.storage.load(self.session_id)
+            expected_head_id: str | None = None
+            journal_storage = (
+                self.storage
+                if isinstance(self.storage, SessionJournalStorage)
+                else None
+            )
+            if journal_storage is not None:
+                checkout = await journal_storage.checkout(
+                    self.session_id,
+                    branch_id=self.branch_id,
+                )
+                session = checkout.session if checkout is not None else None
+                expected_head_id = (
+                    checkout.head.record_id if checkout is not None else None
+                )
+            else:
+                session = await self.storage.load(self.session_id)
             if session is None:
+                if self.branch_id != DEFAULT_SESSION_BRANCH:
+                    raise ValueError(f"unknown Session branch {self.branch_id!r}")
                 session = AgentSession(session_id=self.session_id)
             session.bind_agent(event.agent_id)
 
@@ -59,6 +81,7 @@ class SessionRecorder:
                     sequence=event.sequence,
                     run_id=event.run_id,
                     task=payload.task,
+                    branch_id=self.branch_id,
                 )
             elif isinstance(payload, CompactionCompleted):
                 assert payload.result.summary is not None
@@ -73,6 +96,7 @@ class SessionRecorder:
                     agent_id=event.agent_id,
                     sequence=event.sequence,
                     result=payload.result,
+                    branch_id=self.branch_id,
                 )
             elif isinstance(payload, MessageCompleted):
                 message = serialize_assistant_message(
@@ -90,6 +114,7 @@ class SessionRecorder:
                     sequence=event.sequence,
                     run_id=event.run_id,
                     message=message,
+                    branch_id=self.branch_id,
                 )
             elif isinstance(payload, ToolCompleted):
                 for message in payload.result.messages:
@@ -104,6 +129,7 @@ class SessionRecorder:
                     sequence=event.sequence,
                     run_id=event.run_id,
                     messages=payload.result.messages,
+                    branch_id=self.branch_id,
                 )
             else:
                 session.finish_run(
@@ -117,14 +143,25 @@ class SessionRecorder:
                     sequence=event.sequence,
                     run_id=event.run_id,
                     result=payload.result,
+                    branch_id=self.branch_id,
                 )
 
-            if isinstance(self.storage, SessionJournalStorage):
-                await self.storage.append(draft)
+            if journal_storage is not None:
+                await journal_storage.append(
+                    draft,
+                    expected_head_id=expected_head_id,
+                    check_head=True,
+                )
             else:
                 await self.storage.save(session)
 
     async def load(self) -> AgentSession | None:
         """Load the currently persisted detached Session snapshot."""
 
+        if isinstance(self.storage, SessionJournalStorage):
+            checkout = await self.storage.checkout(
+                self.session_id,
+                branch_id=self.branch_id,
+            )
+            return checkout.session if checkout is not None else None
         return await self.storage.load(self.session_id)

@@ -1,0 +1,122 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a version-matching tag on main
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          project_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "$RELEASE_TAG" != "v$project_version" ]]; then
+            echo "Tag $RELEASE_TAG does not match project version $project_version" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  quality:
+    name: Verify Python ${{ matrix.python-version }}
+    needs: validate-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Lint
+        run: uv run ruff check src tests examples
+
+      - name: Check formatting
+        run: uv run ruff format --check src tests examples
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Test
+        run: uv run python -m unittest discover -s tests -p 'test*.py' -q
+
+  build:
+    name: Build distributions
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Create clean environment
+        run: uv venv --python 3.12 .release-smoke
+
+      - name: Validate distribution contents
+        run: .release-smoke/bin/python tests/package_artifact_smoke.py dist
+
+      - name: Install wheel without optional extras
+        run: uv pip install --python .release-smoke/bin/python dist/*.whl
+
+      - name: Validate installed public API
+        run: .release-smoke/bin/python tests/public_api_smoke.py --expect-no-mcp
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish distributions to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/simagentplg
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

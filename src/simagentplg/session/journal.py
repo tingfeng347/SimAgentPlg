@@ -26,6 +26,7 @@ class SessionRecordKind(StrEnum):
     """Mutation represented by one immutable Session journal record."""
 
     CHECKPOINT = "checkpoint"
+    BRANCH_CREATED = "branch_created"
     RUN_STARTED = "run_started"
     MESSAGE_APPENDED = "message_appended"
     MESSAGES_APPENDED = "messages_appended"
@@ -64,6 +65,36 @@ class SessionRecordDraft:
         )
 
     @classmethod
+    def branch_created(
+        cls,
+        *,
+        session_id: str,
+        agent_id: str | None,
+        branch_id: str,
+        base_record_id: str | None,
+        source_branch_id: str,
+        source_head_id: str,
+        intent: str,
+        retried_run_id: str | None = None,
+    ) -> SessionRecordDraft:
+        data: dict[str, Any] = {
+            "base_record_id": base_record_id,
+            "source_branch_id": source_branch_id,
+            "source_head_id": source_head_id,
+            "intent": intent,
+        }
+        if retried_run_id is not None:
+            data["retried_run_id"] = retried_run_id
+        return cls(
+            session_id=session_id,
+            agent_id=agent_id,
+            sequence=0,
+            kind=SessionRecordKind.BRANCH_CREATED,
+            data=data,
+            branch_id=branch_id,
+        )
+
+    @classmethod
     def run_started(
         cls,
         *,
@@ -72,6 +103,7 @@ class SessionRecordDraft:
         sequence: int,
         run_id: str,
         task: str,
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> SessionRecordDraft:
         return cls(
             session_id=session_id,
@@ -79,6 +111,7 @@ class SessionRecordDraft:
             sequence=sequence,
             kind=SessionRecordKind.RUN_STARTED,
             data={"run_id": run_id, "task": task},
+            branch_id=branch_id,
         )
 
     @classmethod
@@ -90,6 +123,7 @@ class SessionRecordDraft:
         sequence: int,
         run_id: str,
         message: AgentMessage,
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> SessionRecordDraft:
         return cls(
             session_id=session_id,
@@ -97,6 +131,7 @@ class SessionRecordDraft:
             sequence=sequence,
             kind=SessionRecordKind.MESSAGE_APPENDED,
             data={"run_id": run_id, "message": deepcopy(message)},
+            branch_id=branch_id,
         )
 
     @classmethod
@@ -108,6 +143,7 @@ class SessionRecordDraft:
         sequence: int,
         run_id: str,
         messages: tuple[AgentMessage, ...],
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> SessionRecordDraft:
         return cls(
             session_id=session_id,
@@ -115,6 +151,7 @@ class SessionRecordDraft:
             sequence=sequence,
             kind=SessionRecordKind.MESSAGES_APPENDED,
             data={"run_id": run_id, "messages": deepcopy(list(messages))},
+            branch_id=branch_id,
         )
 
     @classmethod
@@ -125,6 +162,7 @@ class SessionRecordDraft:
         agent_id: str,
         sequence: int,
         result: CompactionResult,
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> SessionRecordDraft:
         if result.summary is None:
             raise ValueError("completed compaction requires a SummaryEntry")
@@ -138,6 +176,7 @@ class SessionRecordDraft:
                 "summary": result.summary.to_dict(),
                 "messages": deepcopy(list(result.messages)),
             },
+            branch_id=branch_id,
         )
 
     @classmethod
@@ -149,6 +188,7 @@ class SessionRecordDraft:
         sequence: int,
         run_id: str,
         result: AgentRunResult,
+        branch_id: str = DEFAULT_SESSION_BRANCH,
     ) -> SessionRecordDraft:
         return cls(
             session_id=session_id,
@@ -159,6 +199,7 @@ class SessionRecordDraft:
                 "run_id": run_id,
                 "result": agent_run_result_to_dict(result),
             },
+            branch_id=branch_id,
         )
 
 
@@ -265,6 +306,14 @@ def apply_session_record(
                 "checkpoint Agent id does not match its journal envelope"
             )
         return restored
+
+    if record.kind is SessionRecordKind.BRANCH_CREATED:
+        active = session or AgentSession(session_id=record.session_id)
+        if active.session_id != record.session_id:
+            raise SessionSerializationError("journal contains multiple Session ids")
+        if record.agent_id is not None:
+            active.bind_agent(record.agent_id)
+        return active
 
     active = session or AgentSession(session_id=record.session_id)
     if active.session_id != record.session_id:

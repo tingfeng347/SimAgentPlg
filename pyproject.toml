@@ -1,6 +1,6 @@
 [project]
 name = "SimAgentPlg"
-version = "0.4.0"
+version = "0.5.0"
 description = "A lightweight stateful agent framework with ReAct reasoning, tool dispatch, and MCP integration"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -10,6 +10,11 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jyh20030112/SimAgentPlg"
+Repository = "https://github.com/jyh20030112/SimAgentPlg"
+Issues = "https://github.com/jyh20030112/SimAgentPlg/issues"
 
 [project.optional-dependencies]
 mcp = [

@@ -78,7 +78,7 @@ class ContextPressureEvaluated:
 
 @dataclass(frozen=True, slots=True)
 class CompactionStarted:
-    """One explicit compaction operation began summary generation."""
+    """One compaction operation began summary generation."""
 
     kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_STARTED
     request: CompactionRequest
@@ -86,7 +86,7 @@ class CompactionStarted:
 
 @dataclass(frozen=True, slots=True)
 class CompactionCompleted:
-    """One explicit compaction completed or safely skipped."""
+    """One compaction completed or safely skipped."""
 
     kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_COMPLETED
     result: CompactionResult
@@ -101,7 +101,7 @@ class CompactionCompleted:
 
 @dataclass(frozen=True, slots=True)
 class CompactionFailed:
-    """One explicit compaction failed or was cancelled before mutation."""
+    """One compaction failed or was cancelled before mutation."""
 
     kind: ClassVar[AgentEventKind] = AgentEventKind.COMPACTION_FAILED
     result: CompactionResult

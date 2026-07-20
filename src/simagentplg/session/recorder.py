@@ -55,7 +55,7 @@ class SessionRecorder:
             elif isinstance(payload, CompactionCompleted):
                 assert payload.result.summary is not None
                 session.apply_compaction(
-                    event.run_id,
+                    payload.result.operation_id,
                     event.sequence,
                     payload.result.summary,
                     payload.result.messages,

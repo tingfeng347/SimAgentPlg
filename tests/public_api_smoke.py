@@ -39,6 +39,9 @@ def main() -> None:
         "SkillManager",
         "SessionStorage",
         "Compactor",
+        "AutoCompactionPolicy",
+        "ContextOverflowError",
+        "CompactionTrigger",
     }
     missing_exports = required_exports.difference(simagentplg.__all__)
     if missing_exports:

@@ -10,12 +10,20 @@ from simagentplg.agent.cancellation import (
     CancellationSource,
     CancellationToken,
 )
+from simagentplg.agent.compaction import (
+    CompactionRuntime,
+    CompactionStatus,
+    CompactionTrigger,
+    Compactor,
+)
 from simagentplg.agent.context_builder import (
     AgentContextBuilder,
     ContextBuildResult,
 )
 from simagentplg.agent.context_management import (
+    AutoCompactionPolicy,
     CompactionPolicy,
+    CompactionPreparation,
     MessageTokenEstimator,
     estimate_context_usage,
 )
@@ -42,6 +50,7 @@ from simagentplg.agent.usage import UsageAccumulator
 from simagentplg.plugins.skill.skill_manager import SkillManager
 from simagentplg.providers.base import (
     AssistantMessage,
+    ContextOverflowError,
     ModelResponseCompleted,
     ModelStreamEvent,
     ModelTextDelta,
@@ -67,6 +76,10 @@ class ModelStream(Protocol):
     ) -> AsyncIterator[ModelStreamEvent]: ...
 
 
+class _AutomaticCompactionError(RuntimeError):
+    """Automatic compaction failed before provider dispatch or retry."""
+
+
 class AgentOrchestrator:
     """Coordinate one agent task across model, state, and tool runtimes."""
 
@@ -81,6 +94,9 @@ class AgentOrchestrator:
         skill_manager: SkillManager | None,
         policy: RuntimePolicy,
         compaction_policy: CompactionPolicy | None = None,
+        auto_compaction_policy: AutoCompactionPolicy | None = None,
+        compactor: Compactor | None = None,
+        compaction_runtime: CompactionRuntime | None = None,
         context_token_estimator: MessageTokenEstimator | None = None,
         event_emitter: AgentEventEmitter,
     ) -> None:
@@ -92,6 +108,9 @@ class AgentOrchestrator:
         self.skill_manager = skill_manager
         self.policy = policy
         self.compaction_policy = compaction_policy
+        self.auto_compaction_policy = auto_compaction_policy
+        self.compactor = compactor
+        self.compaction_runtime = compaction_runtime
         self.context_token_estimator = context_token_estimator
         self.event_emitter = event_emitter
         self._usage = UsageAccumulator()
@@ -127,6 +146,10 @@ class AgentOrchestrator:
                     StopReason.REPEATED_TOOL_CALL,
                     str(exc),
                 )
+            except ContextOverflowError as exc:
+                result = self._failure(StopReason.CONTEXT_OVERFLOW, str(exc))
+            except _AutomaticCompactionError as exc:
+                result = self._failure(StopReason.COMPACTION_FAILED, str(exc))
             except asyncio.CancelledError as exc:
                 caller_cancellation = exc
                 result = self._cancelled("agent run coroutine was cancelled")
@@ -227,12 +250,60 @@ class AgentOrchestrator:
         self,
         cancellation: CancellationToken,
     ) -> ModelResponseCompleted:
+        context, preparation = await self._build_evaluated_context()
+        auto_policy = self.auto_compaction_policy
+        if (
+            auto_policy is not None
+            and auto_policy.enabled
+            and auto_policy.compact_on_pressure
+            and preparation is not None
+        ):
+            result = await self._compact_automatically(
+                cancellation,
+                trigger=CompactionTrigger.PRESSURE,
+                preparation=preparation,
+            )
+            if result:
+                context, _ = await self._build_evaluated_context()
+
+        overflow_retries = 0
+        while True:
+            try:
+                return await self._request_model(context, cancellation)
+            except ContextOverflowError as exc:
+                if (
+                    exc.response_started
+                    or auto_policy is None
+                    or not auto_policy.enabled
+                    or not auto_policy.recover_on_overflow
+                    or overflow_retries >= auto_policy.max_overflow_retries
+                ):
+                    raise
+                compacted = await self._compact_automatically(
+                    cancellation,
+                    trigger=CompactionTrigger.OVERFLOW,
+                )
+                if not compacted:
+                    raise
+                overflow_retries += 1
+                context, _ = await self._build_evaluated_context()
+
+    async def _build_evaluated_context(
+        self,
+    ) -> tuple[ContextBuildResult, CompactionPreparation | None]:
         context = self.context_builder.build(
             self.state,
             tools=self.tools,
             transient_messages=self._runtime_context_messages(),
         )
-        await self._evaluate_context_pressure(context)
+        preparation = await self._evaluate_context_pressure(context)
+        return context, preparation
+
+    async def _request_model(
+        self,
+        context: ContextBuildResult,
+        cancellation: CancellationToken,
+    ) -> ModelResponseCompleted:
         self._usage.begin_request()
         stream = self.model_stream(
             context,
@@ -240,6 +311,7 @@ class AgentOrchestrator:
         )
         iterator = stream.__aiter__()
         completed: ModelResponseCompleted | None = None
+        response_started = False
         try:
             while completed is None:
                 cancellation.raise_if_cancelled()
@@ -249,10 +321,12 @@ class AgentOrchestrator:
                     break
 
                 if isinstance(event, ModelTextDelta):
+                    response_started = True
                     await self.event_emitter.emit(
                         AssistantTextDelta(self.state.turn, event.delta)
                     )
                 elif isinstance(event, ModelThinkingDelta):
+                    response_started = True
                     await self.event_emitter.emit(
                         AssistantThinkingDelta(
                             self.state.turn,
@@ -266,6 +340,13 @@ class AgentOrchestrator:
                         "model stream returned an unsupported event: "
                         f"{type(event).__name__}"
                     )
+        except ContextOverflowError as exc:
+            if response_started and not exc.response_started:
+                raise ContextOverflowError(
+                    str(exc),
+                    response_started=True,
+                ) from exc
+            raise
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
@@ -279,10 +360,10 @@ class AgentOrchestrator:
     async def _evaluate_context_pressure(
         self,
         context: ContextBuildResult,
-    ) -> None:
+    ) -> CompactionPreparation | None:
         policy = self.compaction_policy
         if policy is None:
-            return
+            return None
 
         estimate = estimate_context_usage(
             context.agent_messages,
@@ -305,6 +386,36 @@ class AgentOrchestrator:
                 preparation=preparation,
             )
         )
+        return preparation
+
+    async def _compact_automatically(
+        self,
+        cancellation: CancellationToken,
+        *,
+        trigger: CompactionTrigger,
+        preparation: CompactionPreparation | None = None,
+    ) -> bool:
+        runtime = self.compaction_runtime
+        compactor = self.compactor
+        if runtime is None or compactor is None:
+            raise _AutomaticCompactionError(
+                "automatic compaction is missing its runtime or Compactor"
+            )
+        result = await runtime.compact_in_active_run(
+            compactor,
+            cancellation=cancellation,
+            trigger=trigger,
+            preparation=preparation,
+        )
+        if result.status is CompactionStatus.CANCELLED:
+            raise AgentCancelledError(
+                result.error or cancellation.reason or "agent run was aborted"
+            )
+        if result.status is CompactionStatus.FAILED:
+            raise _AutomaticCompactionError(
+                result.error or "automatic compaction failed"
+            )
+        return result.status is CompactionStatus.COMPLETED
 
     def _budget_failure(self) -> AgentRunResult | None:
         limit = self.policy.max_run_tokens

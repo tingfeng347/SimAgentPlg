@@ -3,11 +3,56 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
     from simagentplg.agent.cancellation import CancellationToken
     from simagentplg.agent.context_builder import ContextBuildResult
+
+
+class ModelErrorKind(StrEnum):
+    """Stable provider-neutral category for model request failures."""
+
+    CONTEXT_OVERFLOW = "context_overflow"
+    RATE_LIMIT = "rate_limit"
+    TIMEOUT = "timeout"
+    AUTHENTICATION = "authentication"
+    PROVIDER_ERROR = "provider_error"
+
+
+class ModelProviderError(RuntimeError):
+    """Normalized model provider failure exposed to the Agent Core."""
+
+    kind = ModelErrorKind.PROVIDER_ERROR
+
+
+class ContextOverflowError(ModelProviderError):
+    """The provider rejected a request because its context was too large."""
+
+    kind = ModelErrorKind.CONTEXT_OVERFLOW
+
+    def __init__(self, message: str, *, response_started: bool = False) -> None:
+        self.response_started = response_started
+        super().__init__(message)
+
+
+class ModelRateLimitError(ModelProviderError):
+    """The provider rejected a request because of rate limiting."""
+
+    kind = ModelErrorKind.RATE_LIMIT
+
+
+class ModelTimeoutError(ModelProviderError):
+    """The provider request exceeded its configured time limit."""
+
+    kind = ModelErrorKind.TIMEOUT
+
+
+class ModelAuthenticationError(ModelProviderError):
+    """The provider rejected the configured credentials."""
+
+    kind = ModelErrorKind.AUTHENTICATION
 
 
 @dataclass(frozen=True, slots=True)

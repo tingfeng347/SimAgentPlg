@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import uuid4
 
 from simagentplg.agent.cancellation import (
     AgentCancelledError,
@@ -28,12 +29,20 @@ SUMMARY_CONTEXT_HEADER = "Conversation summary from earlier turns:"
 
 
 class CompactionStatus(StrEnum):
-    """Terminal state of one explicit compaction operation."""
+    """Terminal state of one compaction operation."""
 
     COMPLETED = "completed"
     SKIPPED = "skipped"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class CompactionTrigger(StrEnum):
+    """Reason one compaction operation was requested."""
+
+    EXPLICIT = "explicit"
+    PRESSURE = "pressure"
+    OVERFLOW = "overflow"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +143,12 @@ class CompactionRequest:
 
     preparation: CompactionPreparation
     previous_summary: SummaryEntry | None = None
+    trigger: CompactionTrigger = CompactionTrigger.EXPLICIT
+    operation_id: str = field(default_factory=lambda: uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if not self.operation_id:
+            raise ValueError("compaction operation_id must not be empty")
 
 
 class Compactor(Protocol):
@@ -150,16 +165,20 @@ class Compactor(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
-    """Structured terminal result of one explicit compaction operation."""
+    """Structured terminal result of one compaction operation."""
 
     status: CompactionStatus
     preparation: CompactionPreparation
     summary: SummaryEntry | None = None
     messages: tuple[AgentMessage, ...] = field(default_factory=tuple)
     error: str | None = None
+    trigger: CompactionTrigger = CompactionTrigger.EXPLICIT
+    operation_id: str = field(default_factory=lambda: uuid4().hex)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", deepcopy(self.messages))
+        if not self.operation_id:
+            raise ValueError("compaction operation_id must not be empty")
         if self.status is CompactionStatus.COMPLETED:
             if self.summary is None or not self.messages or self.error is not None:
                 raise ValueError(
@@ -276,7 +295,7 @@ def _is_valid_summary_message(message: Mapping[str, Any]) -> bool:
 
 
 class CompactionRuntime:
-    """Execute explicit compaction independently from the Agent Loop."""
+    """Execute compaction with atomic state replacement and lifecycle events."""
 
     def __init__(
         self,
@@ -297,7 +316,27 @@ class CompactionRuntime:
         *,
         cancellation: CancellationToken,
     ) -> CompactionResult:
-        """Generate and atomically install one compacted history snapshot."""
+        """Run explicit compaction in a dedicated event operation."""
+
+        operation_id = self.event_emitter.begin_run()
+        try:
+            return await self.compact_in_active_run(
+                compactor,
+                cancellation=cancellation,
+                trigger=CompactionTrigger.EXPLICIT,
+            )
+        finally:
+            self.event_emitter.end_run(operation_id)
+
+    async def compact_in_active_run(
+        self,
+        compactor: Compactor,
+        *,
+        cancellation: CancellationToken,
+        trigger: CompactionTrigger,
+        preparation: CompactionPreparation | None = None,
+    ) -> CompactionResult:
+        """Compact while reusing the caller's active Agent event run."""
 
         from simagentplg.agent.events import (
             CompactionCompleted,
@@ -309,82 +348,92 @@ class CompactionRuntime:
             raise RuntimeError("explicit compaction requires a CompactionPolicy")
 
         before = self.state.snapshot().messages
-        preparation = self.policy.prepare(
+        active_preparation = preparation or self.policy.prepare(
             before,
             estimator=self.estimator,
         )
-        previous_summary = find_previous_summary(preparation.protected_messages)
-        request = CompactionRequest(preparation, previous_summary)
-        operation_id = self.event_emitter.begin_run()
+        previous_summary = find_previous_summary(active_preparation.protected_messages)
+        request = CompactionRequest(
+            active_preparation,
+            previous_summary,
+            trigger=trigger,
+        )
+        await self.event_emitter.emit(CompactionStarted(request))
+        if not active_preparation.can_compact:
+            result = CompactionResult(
+                status=CompactionStatus.SKIPPED,
+                preparation=active_preparation,
+                trigger=trigger,
+                operation_id=request.operation_id,
+            )
+            await self.event_emitter.emit(CompactionCompleted(result))
+            return result
+
         try:
-            await self.event_emitter.emit(CompactionStarted(request))
-            if not preparation.can_compact:
-                result = CompactionResult(
-                    status=CompactionStatus.SKIPPED,
-                    preparation=preparation,
+            output = await cancellation.run(
+                compactor.compact(
+                    request,
+                    cancellation=cancellation,
                 )
-                await self.event_emitter.emit(CompactionCompleted(result))
-                return result
+            )
+            if not isinstance(output, CompactorOutput):
+                raise TypeError("Compactor.compact() must return CompactorOutput")
+            cancellation.raise_if_cancelled()
+            if self.state.messages != before:
+                raise RuntimeError("agent history changed during compaction")
 
-            try:
-                output = await cancellation.run(
-                    compactor.compact(
-                        request,
-                        cancellation=cancellation,
-                    )
-                )
-                if not isinstance(output, CompactorOutput):
-                    raise TypeError("Compactor.compact() must return CompactorOutput")
-                cancellation.raise_if_cancelled()
-                if self.state.messages != before:
-                    raise RuntimeError("agent history changed during compaction")
-
-                summary = build_summary_entry(
-                    output,
-                    preparation,
-                    previous_summary=previous_summary,
-                )
-                state_messages = build_compacted_state_messages(
-                    preparation,
-                    summary,
-                )
-                session_messages = build_compacted_session_messages(
-                    preparation,
-                    summary,
-                )
-                result = CompactionResult(
-                    status=CompactionStatus.COMPLETED,
-                    preparation=preparation,
-                    summary=summary,
-                    messages=session_messages,
-                )
-                completed_event = CompactionCompleted(result)
-                self.state.replace_messages(state_messages)
-                await self.event_emitter.emit(completed_event)
-                return result
-            except AgentCancelledError as exc:
-                result = CompactionResult(
-                    status=CompactionStatus.CANCELLED,
-                    preparation=preparation,
-                    error=str(exc),
-                )
-                await self.event_emitter.emit(CompactionFailed(result))
-                return result
-            except asyncio.CancelledError:
-                result = CompactionResult(
-                    status=CompactionStatus.CANCELLED,
-                    preparation=preparation,
-                    error="compaction coroutine was cancelled",
-                )
-                await self.event_emitter.emit(CompactionFailed(result))
-                raise
-            except Exception as exc:
-                result = CompactionResult(
-                    status=CompactionStatus.FAILED,
-                    preparation=preparation,
-                    error=str(exc),
-                )
-                await self.event_emitter.emit(CompactionFailed(result))
-                return result
-        finally:
-            self.event_emitter.end_run(operation_id)
+            summary = build_summary_entry(
+                output,
+                active_preparation,
+                previous_summary=previous_summary,
+            )
+            state_messages = build_compacted_state_messages(
+                active_preparation,
+                summary,
+            )
+            session_messages = build_compacted_session_messages(
+                active_preparation,
+                summary,
+            )
+            result = CompactionResult(
+                status=CompactionStatus.COMPLETED,
+                preparation=active_preparation,
+                summary=summary,
+                messages=session_messages,
+                trigger=trigger,
+                operation_id=request.operation_id,
+            )
+            completed_event = CompactionCompleted(result)
+            self.state.replace_messages(state_messages)
+            await self.event_emitter.emit(completed_event)
+            return result
+        except AgentCancelledError as exc:
+            result = CompactionResult(
+                status=CompactionStatus.CANCELLED,
+                preparation=active_preparation,
+                error=str(exc),
+                trigger=trigger,
+                operation_id=request.operation_id,
+            )
+            await self.event_emitter.emit(CompactionFailed(result))
+            return result
+        except asyncio.CancelledError:
+            result = CompactionResult(
+                status=CompactionStatus.CANCELLED,
+                preparation=active_preparation,
+                error="compaction coroutine was cancelled",
+                trigger=trigger,
+                operation_id=request.operation_id,
+            )
+            await self.event_emitter.emit(CompactionFailed(result))
+            raise
+        except Exception as exc:
+            result = CompactionResult(
+                status=CompactionStatus.FAILED,
+                preparation=active_preparation,
+                error=str(exc),
+                trigger=trigger,
+                operation_id=request.operation_id,
+            )
+            await self.event_emitter.emit(CompactionFailed(result))
+            return result

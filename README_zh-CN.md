@@ -23,6 +23,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - Provider-neutral Token Usage 与单次 Run 预算保护
 - 上下文压力估算、独立窗口预算和非变异压缩准备
 - 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
+- 可选的阈值自动压缩，以及 Provider 上下文溢出后的单次安全恢复
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -149,9 +150,35 @@ agent = BaseAgent(
 User/Assistant/Tool Turn，以及需要原文保留的最近 Turn。Tool Call 和对应 Tool Result
 不会被切开。
 
-压力评估仍是只读观察，不会自动压缩或重试 overflow。应用也可以直接调用
+只配置 `CompactionPolicy` 时，压力评估仍是只读观察。应用也可以直接调用
 `estimate_context_usage()` 和 `prepare_compaction()`，并通过
 `MessageTokenEstimator` 替换默认估算器。
+
+## 自动压缩与 Overflow 恢复
+
+自动行为默认关闭；启用时复用同一个 `CompactionPolicy` 和 `Compactor`：
+
+```python
+from simagentplg import AutoCompactionPolicy
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+    auto_compaction_policy=AutoCompactionPolicy(),
+)
+```
+
+达到压力阈值后，Core 会在同一次 Agent Run 内压缩旧完整 Turn、重建上下文，再请求模型。
+Provider Adapter 抛出 `ContextOverflowError` 时，Core 最多执行一次“压缩—重建—重试”。
+第二次溢出返回 `StopReason.CONTEXT_OVERFLOW`；Compactor 失败返回
+`StopReason.COMPACTION_FAILED`。一旦 Text 或 Thinking Delta 已对外发布，Core 不会重试，
+从而避免重复的流式输出。
+
+`AutoCompactionPolicy(compact_on_pressure=False)` 可以只保留 Overflow 恢复；省略该策略或
+设置 `enabled=False` 会关闭全部自动行为。Provider Adapter 通过 `ModelProviderError` 和
+`ModelErrorKind` 统一区分上下文溢出、限流、超时、认证及普通 Provider 错误。
 
 ## 显式上下文压缩
 
@@ -177,8 +204,8 @@ Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn
 
 生命周期通过 `CompactionStarted`、`CompactionCompleted` 和 `CompactionFailed` 发布。
 `abort()`、`wait_for_idle()` 同时适用于普通 Run 和压缩。`SessionRecorder` 保存紧凑恢复
-快照，同时保留原始 `SessionMessage` 审计条目。Core 不选择摘要模型或 Prompt，当前也
-不会自动触发压缩。
+快照，同时保留原始 `SessionMessage` 审计条目。每次压缩都有独立 `operation_id` 和
+`CompactionTrigger`。Core 不会替派生 Agent 选择摘要模型或 Prompt。
 
 ## RuntimePolicy
 
@@ -429,10 +456,10 @@ uv build
 包根目录导出：
 
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
-- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`
+- Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`、`ModelErrorKind`、`ModelProviderError`、`ContextOverflowError`、`ModelRateLimitError`、`ModelTimeoutError`、`ModelAuthenticationError`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
-- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`SummaryEntry`
+- Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`AutoCompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
+- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

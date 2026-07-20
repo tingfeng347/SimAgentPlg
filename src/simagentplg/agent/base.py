@@ -14,6 +14,7 @@ from simagentplg.agent.compaction import (
 )
 from simagentplg.agent.context_builder import AgentContextBuilder
 from simagentplg.agent.context_management import (
+    AutoCompactionPolicy,
     CompactionPolicy,
     MessageTokenEstimator,
 )
@@ -73,6 +74,7 @@ class BaseAgent:
         context_builder: AgentContextBuilder | None = None,
         compaction_policy: CompactionPolicy | None = None,
         compactor: Compactor | None = None,
+        auto_compaction_policy: AutoCompactionPolicy | None = None,
         context_token_estimator: MessageTokenEstimator | None = None,
         runtime_policy: RuntimePolicy | None = None,
         event_sink: AgentEventSink | None = None,
@@ -86,6 +88,12 @@ class BaseAgent:
         self.runtime_policy = policy
         self.compaction_policy = compaction_policy
         self.compactor = compactor
+        self.auto_compaction_policy = auto_compaction_policy
+        if auto_compaction_policy is not None and auto_compaction_policy.enabled:
+            if compaction_policy is None:
+                raise ValueError("automatic compaction requires a CompactionPolicy")
+            if compactor is None:
+                raise ValueError("automatic compaction requires a Compactor")
         self.context_token_estimator = context_token_estimator
         self.handlers = list(handlers or ())
         self.middlewares = list(middlewares or ())
@@ -130,6 +138,9 @@ class BaseAgent:
             skill_manager=self._skill_manager,
             policy=self.runtime_policy,
             compaction_policy=self.compaction_policy,
+            auto_compaction_policy=self.auto_compaction_policy,
+            compactor=self.compactor,
+            compaction_runtime=self._compaction_runtime,
             context_token_estimator=self.context_token_estimator,
             event_emitter=self._event_emitter,
         )

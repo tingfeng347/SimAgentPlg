@@ -27,6 +27,8 @@ Requires Python 3.12 or newer.
   compaction preparation
 - Explicit, cancellable compaction through a pluggable `Compactor`, canonical
   `SummaryEntry`, and resumable Session snapshots
+- Opt-in automatic compaction on context pressure and one safe recovery attempt
+  for provider-normalized context overflow
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -219,10 +221,39 @@ reached, its `CompactionPreparation` separates protected messages, complete
 old User/Assistant/Tool turns to summarize, and recent turns to keep. Tool
 calls and results remain in the same turn.
 
-Pressure evaluation remains observation-only and never auto-compacts or retries
-an overflow. Applications can call `estimate_context_usage()` and
-`prepare_compaction()` directly, and can replace the fallback through
-`MessageTokenEstimator`.
+`CompactionPolicy` alone remains observation-only. Applications can call
+`estimate_context_usage()` and `prepare_compaction()` directly, and can replace
+the fallback through `MessageTokenEstimator`.
+
+### Automatic compaction and overflow recovery
+
+Automatic behavior is opt-in and reuses the same `CompactionPolicy` and
+`Compactor`:
+
+```python
+from simagentplg import AutoCompactionPolicy
+
+agent = BaseAgent(
+    model,
+    agent_id="context-aware",
+    compaction_policy=context_policy,
+    compactor=my_compactor,
+    auto_compaction_policy=AutoCompactionPolicy(),
+)
+```
+
+At the configured pressure threshold, Core compacts old complete turns,
+rebuilds context, and dispatches the model request in the same Agent Run. If a
+provider adapter raises `ContextOverflowError`, Core can compact, rebuild, and
+retry once. A second overflow returns `StopReason.CONTEXT_OVERFLOW`; compactor
+failure returns `StopReason.COMPACTION_FAILED`. Core never retries after text or
+thinking deltas have been exposed, preventing duplicate provisional output.
+
+`AutoCompactionPolicy(compact_on_pressure=False)` keeps overflow recovery while
+disabling proactive compaction. Set `enabled=False` or omit the policy to keep
+all automatic behavior off. Provider adapters normalize overflow, rate-limit,
+timeout, authentication, and other failures through `ModelProviderError` and
+`ModelErrorKind`.
 
 ### Explicit compaction
 
@@ -252,8 +283,9 @@ message.
 `CompactionStarted`, `CompactionCompleted`, and `CompactionFailed` expose the
 lifecycle. `abort()` and `wait_for_idle()` apply to compaction as well as normal
 runs. `SessionRecorder` stores a compacted recovery snapshot while retaining
-the original `SessionMessage` audit entries. The Core does not choose a summary
-model or prompt and still does not trigger compaction automatically.
+the original `SessionMessage` audit entries. Each operation exposes a stable
+`operation_id` and `CompactionTrigger`. The Core does not choose a summary model
+or prompt.
 
 ## Runtime policy
 
@@ -531,20 +563,18 @@ uv run mypy
 uv build
 ```
 
-fuck
-
 ## Public API
 
 The package root exports:
 
 - Agent: `BaseAgent`, `AgentOrchestrator`, `AgentState`, `AgentStatus`
-- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`
+- Providers: `ModelAdapter`, `OpenAIModelAdapter`, `ModelConfig`, `AssistantMessage`, `ModelToolCall`, `ModelUsage`, `ModelStreamEvent`, `ModelTextDelta`, `ModelThinkingDelta`, `ModelResponseCompleted`, `ModelErrorKind`, `ModelProviderError`, `ContextOverflowError`, `ModelRateLimitError`, `ModelTimeoutError`, `ModelAuthenticationError`
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
 - Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `SessionCompaction`
-- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
-- Compaction: `CompactionRuntime`, `Compactor`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `SummaryEntry`
+- Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `AutoCompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
+- Compaction: `CompactionRuntime`, `Compactor`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`

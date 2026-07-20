@@ -24,6 +24,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - 上下文压力估算、独立窗口预算和非变异压缩准备
 - 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
 - 可选的阈值自动压缩，以及 Provider 上下文溢出后的单次安全恢复
+- 版本化 Session 序列化、原子 JSON 持久化和显式跨进程恢复
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -197,6 +198,19 @@ print(compaction.status)
 print(compaction.summary)
 ```
 
+`ModelCompactor` 可以把借用的 `ModelAdapter` 接入该协议，同时由应用继续拥有摘要 Prompt：
+
+```python
+compactor = ModelCompactor(
+    summary_model,
+    context_builder=build_summary_context,
+    source="summary-model:v1",
+)
+```
+
+注入的 Builder 接收 `CompactionRequest`，返回完整 `ContextBuildResult`。调用方负责借用模型
+的生命周期，因此 Core 不会静默创建另一个 Provider Client，也不会替应用选择 Prompt。
+
 Core 将 `CompactionRequest` 交给 Compactor，由 Core 在 `SummaryEntry` 中写入可信的范围和
 Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn”。失败或取消返回
 结构化 `CompactionResult`，历史保持不变。重复压缩时，旧 Summary 会传给 Compactor
@@ -206,6 +220,37 @@ Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn
 `abort()`、`wait_for_idle()` 同时适用于普通 Run 和压缩。`SessionRecorder` 保存紧凑恢复
 快照，同时保留原始 `SessionMessage` 审计条目。每次压缩都有独立 `operation_id` 和
 `CompactionTrigger`。Core 不会替派生 Agent 选择摘要模型或 Prompt。
+
+## 持久化 Session
+
+`SessionRecorder` 可以使用 `JsonFileSessionStorage` 原子保存版本化 Session 文档：
+
+```python
+from simagentplg import JsonFileSessionStorage, SessionRecorder
+
+storage = JsonFileSessionStorage("./sessions")
+recorder = SessionRecorder(session_id="project-42", storage=storage)
+agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+await agent.run(task="remember this decision")
+```
+
+另一个进程可以读取完成快照并显式恢复新的 Agent：
+
+```python
+saved = await storage.load("project-42")
+if saved is not None:
+    resumed = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+    resumed.restore_session(saved)
+```
+
+JSON 格式包含 `SESSION_SCHEMA_VERSION`、Run Result、Usage、消息和 Compaction 快照。
+Session ID 会映射为哈希文件名；写入通过临时文件和原子替换完成，因此失败写入不会覆盖
+上一个有效快照。损坏 JSON 和未知 Schema 会抛出 `SessionSerializationError`，不会被
+误认为 Session 不存在。
+
+`restore_session()` 会校验 Agent 身份，并拒绝包含未完成 Run 的 Session。Core 不会重放
+中断的 Tool Call，因为它可能已经产生外部副作用。不同进程可以读取已完成快照，但文件
+实现不协调同一 Session 的并发写入；最后一次成功的原子替换生效。
 
 ## RuntimePolicy
 
@@ -410,7 +455,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Model Adapter + Tool Protocol + Middleware + MCP + Skills
 + Lifecycle Events + Session + Streaming + Tool Progress + Usage Budget
 + Context Pressure + Compaction Preparation
-+ Explicit Compactor + Summary Entry + Session Compaction Snapshot
++ Model Compactor + Summary Entry + Durable Session Snapshot
 ```
 
 派生 Agent 负责具体能力与策略：
@@ -433,6 +478,8 @@ uv run python examples/06_skill.py
 uv run python examples/13_usage_budget.py
 uv run python examples/14_context_pressure.py
 uv run python examples/15_explicit_compaction.py
+uv run python examples/16_durable_session.py record
+uv run python examples/16_durable_session.py resume
 ```
 
 ## 测试
@@ -458,8 +505,9 @@ uv build
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`、`ModelErrorKind`、`ModelProviderError`、`ContextOverflowError`、`ModelRateLimitError`、`ModelTimeoutError`、`ModelAuthenticationError`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
+- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`MemorySessionStorage`、`JsonFileSessionStorage`、`SessionCompaction`、`SESSION_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`
 - Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`AutoCompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
-- Compaction：`CompactionRuntime`、`Compactor`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
+- Compaction：`CompactionRuntime`、`Compactor`、`ModelCompactor`、`CompactionContextBuilder`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`
 - Middleware：`Middleware`、`ToolMiddleware`、`ToolCallContext`、`ToolNext`
 - 扩展：`McpServerManager`、`SkillManager`

@@ -1,0 +1,10 @@
+class SessionError(RuntimeError):
+    """Base error for durable Session encoding and storage."""
+
+
+class SessionSerializationError(SessionError):
+    """A Session payload is invalid, unsupported, or not JSON-compatible."""
+
+
+class SessionStorageError(SessionError):
+    """A Session could not be read or atomically persisted."""

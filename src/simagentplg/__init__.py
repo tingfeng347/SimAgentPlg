@@ -53,6 +53,10 @@ from simagentplg.agent.events import (
     TurnCompleted,
     TurnStarted,
 )
+from simagentplg.agent.model_compactor import (
+    CompactionContextBuilder,
+    ModelCompactor,
+)
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import (
     AgentRunError,
@@ -106,13 +110,20 @@ from simagentplg.providers import (
     OpenAIModelAdapter,
 )
 from simagentplg.session import (
+    SESSION_SCHEMA_VERSION,
     AgentSession,
+    JsonFileSessionStorage,
     MemorySessionStorage,
     SessionCompaction,
+    SessionError,
     SessionMessage,
     SessionRecorder,
     SessionRun,
+    SessionSerializationError,
     SessionStorage,
+    SessionStorageError,
+    session_from_dict,
+    session_to_dict,
 )
 
 __all__ = [
@@ -128,6 +139,8 @@ __all__ = [
     "CompactionStatus",
     "CompactionTrigger",
     "SummaryEntry",
+    "CompactionContextBuilder",
+    "ModelCompactor",
     "ModelConfig",
     "ModelAdapter",
     "OpenAIModelAdapter",
@@ -210,6 +223,13 @@ __all__ = [
     "SessionRun",
     "SessionCompaction",
     "SessionStorage",
+    "JsonFileSessionStorage",
     "MemorySessionStorage",
     "SessionRecorder",
+    "SESSION_SCHEMA_VERSION",
+    "session_to_dict",
+    "session_from_dict",
+    "SessionError",
+    "SessionSerializationError",
+    "SessionStorageError",
 ]

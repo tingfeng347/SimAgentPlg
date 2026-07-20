@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ from simagentplg.providers.base import ModelAdapter
 
 if TYPE_CHECKING:
     from simagentplg.handlers.base import BaseHandler
+    from simagentplg.session.types import AgentSession
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful, concise assistant."
 
@@ -68,7 +71,7 @@ class BaseAgent:
         *,
         agent_id: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        handlers: Iterable["BaseHandler"] | None = None,
+        handlers: Iterable[BaseHandler] | None = None,
         middlewares: Iterable[ToolMiddleware] | None = None,
         skills_dir: str | Path | None = None,
         context_builder: AgentContextBuilder | None = None,
@@ -183,6 +186,25 @@ class BaseAgent:
         if history:
             messages.extend(dict(message) for message in history)
         self.state.reset(messages)
+
+    def restore_session(self, session: AgentSession) -> None:
+        """Restore one finished Session projection into this Agent's history."""
+
+        if self._pending_operations or self._operation_lock.locked():
+            raise RuntimeError("cannot restore a Session while the agent is active")
+        snapshot = session.snapshot()
+        if snapshot.agent_id is not None and snapshot.agent_id != self.agent_id:
+            raise ValueError(
+                f"session {snapshot.session_id!r} belongs to agent "
+                f"{snapshot.agent_id!r}, not {self.agent_id!r}"
+            )
+        unfinished = [run.run_id for run in snapshot.runs if not run.finished]
+        if unfinished:
+            raise ValueError(
+                "cannot restore a Session with unfinished run(s): "
+                + ", ".join(unfinished)
+            )
+        self.reset(snapshot.messages)
 
     async def startup(self) -> None:
         """Start the model adapter, handlers, and middleware resources."""

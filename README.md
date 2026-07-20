@@ -29,6 +29,8 @@ Requires Python 3.12 or newer.
   `SummaryEntry`, and resumable Session snapshots
 - Opt-in automatic compaction on context pressure and one safe recovery attempt
   for provider-normalized context overflow
+- Versioned Session serialization, atomic JSON persistence, and explicit
+  cross-process restoration
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
 
@@ -273,6 +275,21 @@ print(compaction.status)
 print(compaction.summary)
 ```
 
+`ModelCompactor` adapts a borrowed `ModelAdapter` into this protocol while the
+application still owns the summary prompt:
+
+```python
+compactor = ModelCompactor(
+    summary_model,
+    context_builder=build_summary_context,
+    source="summary-model:v1",
+)
+```
+
+The injected builder receives `CompactionRequest` and returns the complete
+`ContextBuildResult`. The caller owns the borrowed model lifecycle, so Core
+does not silently create another provider client or choose a prompt.
+
 The Core calls the Compactor with `CompactionRequest`, creates trusted range and
 token metadata in `SummaryEntry`, then atomically installs protected messages +
 Summary + recent turns. Failure or cancellation returns a structured
@@ -286,6 +303,42 @@ runs. `SessionRecorder` stores a compacted recovery snapshot while retaining
 the original `SessionMessage` audit entries. Each operation exposes a stable
 `operation_id` and `CompactionTrigger`. The Core does not choose a summary model
 or prompt.
+
+## Durable Sessions
+
+`SessionRecorder` can use `JsonFileSessionStorage` to atomically persist a
+versioned Session document:
+
+```python
+from simagentplg import JsonFileSessionStorage, SessionRecorder
+
+storage = JsonFileSessionStorage("./sessions")
+recorder = SessionRecorder(session_id="project-42", storage=storage)
+agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+await agent.run(task="remember this decision")
+```
+
+A different process can load the completed snapshot and explicitly restore a
+new Agent:
+
+```python
+saved = await storage.load("project-42")
+if saved is not None:
+    resumed = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
+    resumed.restore_session(saved)
+```
+
+The JSON format carries `SESSION_SCHEMA_VERSION`, Run results and Usage,
+messages, and Compaction snapshots. Session IDs are mapped to hashed filenames;
+writes use a temporary file plus atomic replacement, so a failed write does not
+replace the last valid snapshot. Corrupt JSON and unsupported schema versions
+raise `SessionSerializationError` instead of looking like a missing Session.
+
+`restore_session()` verifies Agent identity and rejects unfinished Runs. Core
+does not replay an interrupted Tool call because it may already have produced
+an external side effect. Separate processes may read completed snapshots, but
+concurrent writers to the same Session are not coordinated in this file-backed
+implementation; the last successful replacement wins.
 
 ## Runtime policy
 
@@ -510,7 +563,7 @@ Orchestration + State + Context + Runtime Policy + Run Result
 + Lifecycle Events + Linear Session + Runtime Cancellation
 + Provider Streaming + Tool Progress + Usage Accounting + Run Budget
 + Context Pressure + Compaction Preparation
-+ Explicit Compactor + Summary Entry + Session Compaction Snapshot
++ Model Compactor + Summary Entry + Durable Session Snapshot
 ```
 
 Derived agents own concrete capabilities and policies:
@@ -542,6 +595,8 @@ uv run python examples/12_tool_progress.py
 uv run python examples/13_usage_budget.py
 uv run python examples/14_context_pressure.py
 uv run python examples/15_explicit_compaction.py
+uv run python examples/16_durable_session.py record
+uv run python examples/16_durable_session.py resume
 ```
 
 See [the examples guide](examples/README.md) for the capability demonstrated by
@@ -572,9 +627,9 @@ The package root exports:
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
-- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `SessionCompaction`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `JsonFileSessionStorage`, `SessionCompaction`, `SESSION_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`
 - Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `AutoCompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
-- Compaction: `CompactionRuntime`, `Compactor`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
+- Compaction: `CompactionRuntime`, `Compactor`, `ModelCompactor`, `CompactionContextBuilder`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`
 - Middleware: `Middleware`, `ToolMiddleware`, `ToolCallContext`, `ToolNext`
 - Extensions: `McpServerManager`, `SkillManager`

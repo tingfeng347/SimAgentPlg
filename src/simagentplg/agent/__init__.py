@@ -53,6 +53,10 @@ from simagentplg.agent.events import (
     TurnCompleted,
     TurnStarted,
 )
+from simagentplg.agent.model_compactor import (
+    CompactionContextBuilder,
+    ModelCompactor,
+)
 from simagentplg.agent.orchestrator import AgentOrchestrator
 from simagentplg.agent.result import (
     AgentRunError,
@@ -92,6 +96,8 @@ __all__ = [
     "CompactionStatus",
     "CompactionTrigger",
     "SummaryEntry",
+    "CompactionContextBuilder",
+    "ModelCompactor",
     "AgentState",
     "AgentStatus",
     "AgentContextBuilder",

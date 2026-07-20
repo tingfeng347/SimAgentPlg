@@ -42,6 +42,10 @@ def main() -> None:
         "AutoCompactionPolicy",
         "ContextOverflowError",
         "CompactionTrigger",
+        "ModelCompactor",
+        "JsonFileSessionStorage",
+        "session_to_dict",
+        "session_from_dict",
     }
     missing_exports = required_exports.difference(simagentplg.__all__)
     if missing_exports:

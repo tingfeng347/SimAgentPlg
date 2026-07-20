@@ -29,7 +29,7 @@ Requires Python 3.12 or newer.
   `SummaryEntry`, and resumable Session snapshots
 - Opt-in automatic compaction on context pressure and one safe recovery attempt
   for provider-normalized context overflow
-- Versioned Session serialization, atomic JSON persistence, and explicit
+- Versioned Session serialization, append-only JSONL journals, and explicit
   cross-process restoration
 - Optional MCP integration through `McpToolHandler`
 - Local skill discovery, metadata projection, and explicit context activation
@@ -304,15 +304,15 @@ the original `SessionMessage` audit entries. Each operation exposes a stable
 `operation_id` and `CompactionTrigger`. The Core does not choose a summary model
 or prompt.
 
-## Durable Sessions
+## Durable Session journals
 
-`SessionRecorder` can use `JsonFileSessionStorage` to atomically persist a
-versioned Session document:
+`SessionRecorder` can use `JsonlSessionStorage` to append a versioned semantic
+record for each accepted lifecycle mutation:
 
 ```python
-from simagentplg import JsonFileSessionStorage, SessionRecorder
+from simagentplg import JsonlSessionStorage, SessionRecorder
 
-storage = JsonFileSessionStorage("./sessions")
+storage = JsonlSessionStorage("./sessions")
 recorder = SessionRecorder(session_id="project-42", storage=storage)
 agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
 await agent.run(task="remember this decision")
@@ -328,17 +328,24 @@ if saved is not None:
     resumed.restore_session(saved)
 ```
 
-The JSON format carries `SESSION_SCHEMA_VERSION`, Run results and Usage,
-messages, and Compaction snapshots. Session IDs are mapped to hashed filenames;
-writes use a temporary file plus atomic replacement, so a failed write does not
-replace the last valid snapshot. Corrupt JSON and unsupported schema versions
-raise `SessionSerializationError` instead of looking like a missing Session.
+Each JSONL record carries a monotonic `revision`, immutable `record_id`,
+`parent_id`, and `branch_id`. Version 1 projects only the `main` branch, but the
+envelope is already tree-addressable so future Fork support will not require a
+file-format migration. `SessionRecorder` appends compact mutations such as
+`run_started`, `message_appended`, `compaction_applied`, and `run_finished`;
+explicit `save()` appends a full Checkpoint for imports and exports.
+
+Session IDs are mapped to hashed filenames. Each complete line is encoded
+before one append write and followed by `fsync`; an incomplete final line from
+an interrupted write is ignored and repaired before the next append. Invalid
+JSON in a completed line and unsupported journal schema versions raise
+`SessionSerializationError` instead of looking like a missing Session.
 
 `restore_session()` verifies Agent identity and rejects unfinished Runs. Core
 does not replay an interrupted Tool call because it may already have produced
 an external side effect. Separate processes may read completed snapshots, but
-concurrent writers to the same Session are not coordinated in this file-backed
-implementation; the last successful replacement wins.
+concurrent writers to the same Session are not yet coordinated in this
+file-backed implementation.
 
 ## Runtime policy
 
@@ -627,7 +634,7 @@ The package root exports:
 - Runtime: `RuntimePolicy`, `AgentRunResult`, `RunUsage`, `AgentRunError`, `RunStatus`, `StopReason`
 - Cancellation: `CancellationToken`, `CancellationSource`, `AgentCancelledError`
 - Events: `AgentEvent`, `AgentEventSink`, `CompositeAgentEventSink`, `AssistantTextDelta`, `AssistantThinkingDelta`, `ToolProgressed`, `ContextPressureEvaluated`, `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
-- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `MemorySessionStorage`, `JsonFileSessionStorage`, `SessionCompaction`, `SESSION_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`
+- Session: `AgentSession`, `SessionRecorder`, `SessionStorage`, `SessionJournalStorage`, `MemorySessionStorage`, `JsonlSessionStorage`, `SessionCompaction`, `SessionRecord`, `SessionRecordDraft`, `SessionRecordKind`, `DEFAULT_SESSION_BRANCH`, `SESSION_SCHEMA_VERSION`, `SESSION_JOURNAL_SCHEMA_VERSION`, `session_to_dict`, `session_from_dict`, `SessionError`, `SessionSerializationError`, `SessionStorageError`
 - Context: `AgentContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextUsageEstimate`, `CompactionPolicy`, `AutoCompactionPolicy`, `CompactionDecision`, `CompactionPreparation`, `MessageTokenEstimator`, `estimate_context_usage`, `prepare_compaction`
 - Compaction: `CompactionRuntime`, `Compactor`, `ModelCompactor`, `CompactionContextBuilder`, `CompactorOutput`, `CompactionRequest`, `CompactionResult`, `CompactionStatus`, `CompactionTrigger`, `SummaryEntry`
 - Tools: `StepOutcome`, `ToolControl`, `ToolProgressUpdate`, `ToolProgressReporter`, `BaseHandler`, `MethodToolHandler`, `McpToolHandler`

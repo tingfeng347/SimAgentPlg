@@ -10,10 +10,17 @@ from simagentplg.session.errors import (
     SessionSerializationError,
     SessionStorageError,
 )
-from simagentplg.session.json_file import JsonFileSessionStorage
+from simagentplg.session.journal import (
+    DEFAULT_SESSION_BRANCH,
+    SESSION_JOURNAL_SCHEMA_VERSION,
+    SessionRecord,
+    SessionRecordDraft,
+    SessionRecordKind,
+)
+from simagentplg.session.jsonl import JsonlSessionStorage
 from simagentplg.session.memory import MemorySessionStorage
 from simagentplg.session.recorder import SessionRecorder
-from simagentplg.session.storage import SessionStorage
+from simagentplg.session.storage import SessionJournalStorage, SessionStorage
 from simagentplg.session.types import (
     AgentSession,
     SessionCompaction,
@@ -27,7 +34,8 @@ __all__ = [
     "SessionRun",
     "SessionCompaction",
     "SessionStorage",
-    "JsonFileSessionStorage",
+    "SessionJournalStorage",
+    "JsonlSessionStorage",
     "MemorySessionStorage",
     "SessionRecorder",
     "SESSION_SCHEMA_VERSION",
@@ -36,4 +44,9 @@ __all__ = [
     "SessionError",
     "SessionSerializationError",
     "SessionStorageError",
+    "SESSION_JOURNAL_SCHEMA_VERSION",
+    "DEFAULT_SESSION_BRANCH",
+    "SessionRecordKind",
+    "SessionRecordDraft",
+    "SessionRecord",
 ]

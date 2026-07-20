@@ -102,11 +102,15 @@ def _run_to_dict(run: SessionRun) -> dict[str, Any]:
         "task": run.task,
         "start_sequence": run.start_sequence,
         "finish_sequence": run.finish_sequence,
-        "result": _result_to_dict(run.result) if run.result is not None else None,
+        "result": (
+            agent_run_result_to_dict(run.result) if run.result is not None else None
+        ),
     }
 
 
-def _result_to_dict(result: AgentRunResult) -> dict[str, Any]:
+def agent_run_result_to_dict(result: AgentRunResult) -> dict[str, Any]:
+    """Encode a structured Run result for Session journal records."""
+
     return {
         "status": result.status.value,
         "stop_reason": result.stop_reason.value,
@@ -131,7 +135,11 @@ def _run_from_dict(value: Any, index: int) -> SessionRun:
     label = f"session.runs[{index}]"
     item = _mapping(value, label)
     raw_result = item.get("result")
-    result = None if raw_result is None else _result_from_dict(raw_result, label)
+    result = (
+        None
+        if raw_result is None
+        else agent_run_result_from_dict(raw_result, label=label)
+    )
     finish_sequence = _optional_integer(
         item.get("finish_sequence"),
         f"{label}.finish_sequence",
@@ -148,8 +156,14 @@ def _run_from_dict(value: Any, index: int) -> SessionRun:
     )
 
 
-def _result_from_dict(value: Any, parent_label: str) -> AgentRunResult:
-    label = f"{parent_label}.result"
+def agent_run_result_from_dict(
+    value: Any,
+    *,
+    label: str = "result",
+) -> AgentRunResult:
+    """Decode a structured Run result from a Session journal record."""
+
+    label = f"{label}.result" if not label.endswith(".result") else label
     item = _mapping(value, label)
     return AgentRunResult(
         status=RunStatus(_string(item.get("status"), f"{label}.status")),

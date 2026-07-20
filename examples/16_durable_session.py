@@ -7,7 +7,7 @@ from pathlib import Path
 
 from simagentplg import (
     BaseAgent,
-    JsonFileSessionStorage,
+    JsonlSessionStorage,
     ModelConfig,
     OpenAIModelAdapter,
     SessionRecorder,
@@ -21,7 +21,7 @@ SYSTEM_PROMPT = (
 )
 
 
-async def record(storage: JsonFileSessionStorage) -> None:
+async def record(storage: JsonlSessionStorage) -> None:
     recorder = SessionRecorder(session_id=SESSION_ID, storage=storage)
     agent = BaseAgent(
         OpenAIModelAdapter(ModelConfig.from_env()),
@@ -45,7 +45,7 @@ async def record(storage: JsonFileSessionStorage) -> None:
     print(f"saved runs: {len(saved.runs)}")
 
 
-async def resume(storage: JsonFileSessionStorage) -> None:
+async def resume(storage: JsonlSessionStorage) -> None:
     saved = await storage.load(SESSION_ID)
     if saved is None:
         raise RuntimeError("run the record command before resume")
@@ -80,7 +80,7 @@ async def main() -> None:
         default=os.getenv("SIMAGENTPLG_SESSION_DIR", ".simagentplg-sessions"),
     )
     args = parser.parse_args()
-    storage = JsonFileSessionStorage(Path(args.session_dir))
+    storage = JsonlSessionStorage(Path(args.session_dir))
     if args.command == "record":
         await record(storage)
     else:

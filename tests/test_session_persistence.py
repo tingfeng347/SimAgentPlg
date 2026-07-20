@@ -15,11 +15,12 @@ from simagentplg import (
     AssistantMessage,
     BaseAgent,
     CancellationToken,
-    JsonFileSessionStorage,
+    JsonlSessionStorage,
     ModelAdapter,
     RunStatus,
     RunUsage,
     SessionRecorder,
+    SessionRecordKind,
     SessionSerializationError,
     SessionStorageError,
     StopReason,
@@ -131,7 +132,7 @@ def durable_session(session_id: str = "持久会话") -> AgentSession:
 
 
 def json_files(directory: str) -> list[Path]:
-    return list(Path(directory).glob("*.json"))
+    return list(Path(directory).glob("*.jsonl"))
 
 
 def write_text(path: Path, content: str) -> None:
@@ -140,6 +141,22 @@ def write_text(path: Path, content: str) -> None:
 
 def directory_entries(directory: str) -> list[Path]:
     return list(Path(directory).iterdir())
+
+
+def append_bytes(path: Path, content: bytes) -> None:
+    with path.open("ab") as stream:
+        stream.write(content)
+
+
+def read_json_lines(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def write_json_lines(path: Path, records: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
 
 
 class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
@@ -157,10 +174,10 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             session.compactions[0].summary.content,
         )
 
-    async def test_json_storage_round_trips_between_instances(self) -> None:
+    async def test_jsonl_storage_round_trips_between_instances(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            writer = JsonFileSessionStorage(directory)
-            reader = JsonFileSessionStorage(directory)
+            writer = JsonlSessionStorage(directory)
+            reader = JsonlSessionStorage(directory)
             session = durable_session()
 
             await writer.save(session)
@@ -174,29 +191,29 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_session_id_cannot_escape_storage_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "sessions"
-            storage = JsonFileSessionStorage(root)
+            storage = JsonlSessionStorage(root)
             session = durable_session("../../outside")
 
             await storage.save(session)
 
-            self.assertEqual(len(list(root.glob("*.json"))), 1)
+            self.assertEqual(len(list(root.glob("*.jsonl"))), 1)
             self.assertFalse((Path(directory) / "outside.json").exists())
 
     async def test_corrupt_and_unknown_schema_are_explicit_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            storage = JsonFileSessionStorage(directory)
+            storage = JsonlSessionStorage(directory)
             session = durable_session("broken")
             await storage.save(session)
             path = (await asyncio.to_thread(json_files, directory))[0]
 
-            await asyncio.to_thread(write_text, path, "{not-json")
+            await asyncio.to_thread(write_text, path, "{not-json\n")
             with self.assertRaises(SessionSerializationError):
                 await storage.load("broken")
 
             await asyncio.to_thread(
                 write_text,
                 path,
-                json.dumps({"schema_version": 999, "session": {}}),
+                json.dumps({"journal_schema_version": 999}) + "\n",
             )
             with self.assertRaisesRegex(
                 SessionSerializationError,
@@ -204,9 +221,50 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await storage.load("broken")
 
+    async def test_incomplete_tail_is_ignored_and_repaired_on_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            original = durable_session("partial-tail")
+            await storage.save(original)
+            path = (await asyncio.to_thread(json_files, directory))[0]
+            await asyncio.to_thread(append_bytes, path, b'{"partial":')
+
+            restored = await storage.load("partial-tail")
+            self.assertEqual(restored, original)
+
+            changed = original.snapshot()
+            changed.begin_run("run-2", "new task", 1)
+            changed.append_message(
+                "run-2",
+                2,
+                {"role": "assistant", "content": "new answer"},
+            )
+            changed.finish_run("run-2", 3, completed_result("new answer"))
+            await storage.save(changed)
+
+            self.assertEqual(await storage.load("partial-tail"), changed)
+            self.assertEqual(len(await storage.records("partial-tail")), 2)
+
+    async def test_broken_tree_parent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = JsonlSessionStorage(directory)
+            session = durable_session("broken-parent")
+            await storage.save(session)
+            await storage.save(session)
+            path = (await asyncio.to_thread(json_files, directory))[0]
+            records = await asyncio.to_thread(read_json_lines, path)
+            records[1]["parent_id"] = "not-the-first-record"
+            await asyncio.to_thread(write_json_lines, path, records)
+
+            with self.assertRaisesRegex(
+                SessionSerializationError,
+                "parent changed",
+            ):
+                await storage.load("broken-parent")
+
     async def test_non_json_message_is_rejected_without_creating_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            storage = JsonFileSessionStorage(directory)
+            storage = JsonlSessionStorage(directory)
             session = AgentSession(session_id="invalid-json")
             session.bind_agent("durable-agent")
             session.begin_run("run-1", "task", 1)
@@ -223,9 +281,9 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 [],
             )
 
-    async def test_failed_atomic_replace_preserves_previous_snapshot(self) -> None:
+    async def test_failed_append_preserves_previous_journal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            storage = JsonFileSessionStorage(directory)
+            storage = JsonlSessionStorage(directory)
             original = durable_session("atomic")
             await storage.save(original)
             changed = original.snapshot()
@@ -239,7 +297,7 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "simagentplg.session.json_file.os.replace",
+                    "simagentplg.session.jsonl.os.write",
                     side_effect=OSError("disk failure"),
                 ),
                 self.assertRaises(SessionStorageError),
@@ -248,28 +306,19 @@ class SessionPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
             restored = await storage.load("atomic")
             self.assertEqual(restored, original)
-            self.assertFalse(
-                any(
-                    path.suffix == ".tmp"
-                    for path in await asyncio.to_thread(
-                        directory_entries,
-                        directory,
-                    )
-                )
-            )
 
     async def test_separate_python_process_loads_saved_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            storage = JsonFileSessionStorage(directory)
+            storage = JsonlSessionStorage(directory)
             await storage.save(durable_session("cross-process"))
             script = """
 import asyncio
 import json
 import sys
-from simagentplg import JsonFileSessionStorage
+from simagentplg import JsonlSessionStorage
 
 async def main():
-    session = await JsonFileSessionStorage(sys.argv[1]).load(sys.argv[2])
+    session = await JsonlSessionStorage(sys.argv[1]).load(sys.argv[2])
     if session is None:
         raise RuntimeError("missing session")
     print(json.dumps({
@@ -302,7 +351,7 @@ asyncio.run(main())
 
     async def test_restored_agent_continues_and_updates_durable_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            storage = JsonFileSessionStorage(directory)
+            storage = JsonlSessionStorage(directory)
             recorder = SessionRecorder(session_id="resume", storage=storage)
             first_agent = BaseAgent(
                 SequenceModel(["saved answer"]),
@@ -311,7 +360,7 @@ asyncio.run(main())
             )
             await first_agent.run(task="saved task")
 
-            saved = await JsonFileSessionStorage(directory).load("resume")
+            saved = await JsonlSessionStorage(directory).load("resume")
             assert saved is not None
             resumed_model = SequenceModel(["continued answer"])
             resumed_agent = BaseAgent(
@@ -319,7 +368,7 @@ asyncio.run(main())
                 agent_id="durable-agent",
                 event_sink=SessionRecorder(
                     session_id="resume",
-                    storage=JsonFileSessionStorage(directory),
+                    storage=JsonlSessionStorage(directory),
                 ),
             )
             resumed_agent.restore_session(saved)
@@ -330,6 +379,27 @@ asyncio.run(main())
             self.assertEqual(result.output, "continued answer")
             assert updated is not None
             self.assertEqual(len(updated.runs), 2)
+            records = await storage.records("resume")
+            self.assertEqual(
+                [record.kind for record in records],
+                [
+                    SessionRecordKind.RUN_STARTED,
+                    SessionRecordKind.MESSAGE_APPENDED,
+                    SessionRecordKind.RUN_FINISHED,
+                    SessionRecordKind.RUN_STARTED,
+                    SessionRecordKind.MESSAGE_APPENDED,
+                    SessionRecordKind.RUN_FINISHED,
+                ],
+            )
+            self.assertEqual(
+                [record.revision for record in records],
+                list(range(1, 7)),
+            )
+            self.assertEqual(
+                [record.parent_id for record in records[1:]],
+                [record.record_id for record in records[:-1]],
+            )
+            self.assertTrue(all(record.branch_id == "main" for record in records))
             self.assertEqual(
                 [
                     message.get("content")

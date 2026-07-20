@@ -24,7 +24,7 @@ Middleware、MCP 和 Skill 等运行机制；Shell、文件编辑、Git、审批
 - 上下文压力估算、独立窗口预算和非变异压缩准备
 - 通过可插拔 `Compactor`、标准 `SummaryEntry` 和 Session 快照提供显式可取消压缩
 - 可选的阈值自动压缩，以及 Provider 上下文溢出后的单次安全恢复
-- 版本化 Session 序列化、原子 JSON 持久化和显式跨进程恢复
+- 版本化 Session 序列化、追加式 JSONL Journal 和显式跨进程恢复
 - 通过 `McpToolHandler` 提供可选 MCP 集成
 - 通过 `SkillManager` 发现本地 Skill、投影 metadata 并显式激活上下文
 
@@ -221,14 +221,15 @@ Token metadata，最后原子替换成“受保护消息 + Summary + 最近 Turn
 快照，同时保留原始 `SessionMessage` 审计条目。每次压缩都有独立 `operation_id` 和
 `CompactionTrigger`。Core 不会替派生 Agent 选择摘要模型或 Prompt。
 
-## 持久化 Session
+## 持久化 Session Journal
 
-`SessionRecorder` 可以使用 `JsonFileSessionStorage` 原子保存版本化 Session 文档：
+`SessionRecorder` 可以使用 `JsonlSessionStorage`，为每个已接受的生命周期变更追加一条
+版本化语义 Record：
 
 ```python
-from simagentplg import JsonFileSessionStorage, SessionRecorder
+from simagentplg import JsonlSessionStorage, SessionRecorder
 
-storage = JsonFileSessionStorage("./sessions")
+storage = JsonlSessionStorage("./sessions")
 recorder = SessionRecorder(session_id="project-42", storage=storage)
 agent = BaseAgent(model, agent_id="core-agent", event_sink=recorder)
 await agent.run(task="remember this decision")
@@ -243,14 +244,19 @@ if saved is not None:
     resumed.restore_session(saved)
 ```
 
-JSON 格式包含 `SESSION_SCHEMA_VERSION`、Run Result、Usage、消息和 Compaction 快照。
-Session ID 会映射为哈希文件名；写入通过临时文件和原子替换完成，因此失败写入不会覆盖
-上一个有效快照。损坏 JSON 和未知 Schema 会抛出 `SessionSerializationError`，不会被
-误认为 Session 不存在。
+每条 JSONL Record 都包含单调递增的 `revision`、不可变 `record_id`、`parent_id` 和
+`branch_id`。版本 1 只投影 `main` Branch，但 Envelope 已经可以寻址成树，因此未来加入
+Fork 不需要迁移文件格式。`SessionRecorder` 追加 `run_started`、`message_appended`、
+`compaction_applied`、`run_finished` 等紧凑 Mutation；显式 `save()` 用完整 Checkpoint
+支持导入和导出。
+
+Session ID 会映射为哈希文件名。每一行先完整编码，再通过一次追加写入并执行 `fsync`；
+中断产生的不完整尾行会在读取时忽略，并在下一次追加前修复。已经换行的损坏 JSON 或
+未知 Journal Schema 会抛出 `SessionSerializationError`，不会被误认为 Session 不存在。
 
 `restore_session()` 会校验 Agent 身份，并拒绝包含未完成 Run 的 Session。Core 不会重放
 中断的 Tool Call，因为它可能已经产生外部副作用。不同进程可以读取已完成快照，但文件
-实现不协调同一 Session 的并发写入；最后一次成功的原子替换生效。
+实现暂不协调同一 Session 的多进程并发写入。
 
 ## RuntimePolicy
 
@@ -505,7 +511,7 @@ uv build
 - Agent：`BaseAgent`、`AgentOrchestrator`、`AgentState`、`AgentStatus`
 - Provider：`ModelAdapter`、`OpenAIModelAdapter`、`ModelConfig`、`AssistantMessage`、`ModelToolCall`、`ModelUsage`、`ModelErrorKind`、`ModelProviderError`、`ContextOverflowError`、`ModelRateLimitError`、`ModelTimeoutError`、`ModelAuthenticationError`
 - Runtime：`RuntimePolicy`、`AgentRunResult`、`RunUsage`、`AgentRunError`、`RunStatus`、`StopReason`
-- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`MemorySessionStorage`、`JsonFileSessionStorage`、`SessionCompaction`、`SESSION_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`
+- Session：`AgentSession`、`SessionRecorder`、`SessionStorage`、`SessionJournalStorage`、`MemorySessionStorage`、`JsonlSessionStorage`、`SessionCompaction`、`SessionRecord`、`SessionRecordDraft`、`SessionRecordKind`、`DEFAULT_SESSION_BRANCH`、`SESSION_SCHEMA_VERSION`、`SESSION_JOURNAL_SCHEMA_VERSION`、`session_to_dict`、`session_from_dict`、`SessionError`、`SessionSerializationError`、`SessionStorageError`
 - Context：`AgentContextBuilder`、`ContextBuildResult`、`ContextBudget`、`ContextUsageEstimate`、`CompactionPolicy`、`AutoCompactionPolicy`、`CompactionDecision`、`CompactionPreparation`、`MessageTokenEstimator`
 - Compaction：`CompactionRuntime`、`Compactor`、`ModelCompactor`、`CompactionContextBuilder`、`CompactorOutput`、`CompactionRequest`、`CompactionResult`、`CompactionStatus`、`CompactionTrigger`、`SummaryEntry`
 - Tool：`StepOutcome`、`ToolControl`、`BaseHandler`、`MethodToolHandler`、`McpToolHandler`

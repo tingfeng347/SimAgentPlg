@@ -43,7 +43,8 @@ def main() -> None:
         "ContextOverflowError",
         "CompactionTrigger",
         "ModelCompactor",
-        "JsonFileSessionStorage",
+        "JsonlSessionStorage",
+        "SessionRecord",
         "session_to_dict",
         "session_from_dict",
     }

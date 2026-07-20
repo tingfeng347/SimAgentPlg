@@ -9,7 +9,8 @@ from simagentplg.agent.events import (
     ToolCompleted,
 )
 from simagentplg.providers.base import serialize_assistant_message
-from simagentplg.session.storage import SessionStorage
+from simagentplg.session.journal import SessionRecordDraft
+from simagentplg.session.storage import SessionJournalStorage, SessionStorage
 from simagentplg.session.types import AgentSession
 
 _RECORDED_PAYLOADS = (
@@ -52,6 +53,13 @@ class SessionRecorder:
 
             if isinstance(payload, AgentStarted):
                 session.begin_run(event.run_id, payload.task, event.sequence)
+                draft = SessionRecordDraft.run_started(
+                    session_id=self.session_id,
+                    agent_id=event.agent_id,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    task=payload.task,
+                )
             elif isinstance(payload, CompactionCompleted):
                 assert payload.result.summary is not None
                 session.apply_compaction(
@@ -60,14 +68,28 @@ class SessionRecorder:
                     payload.result.summary,
                     payload.result.messages,
                 )
+                draft = SessionRecordDraft.compaction_applied(
+                    session_id=self.session_id,
+                    agent_id=event.agent_id,
+                    sequence=event.sequence,
+                    result=payload.result,
+                )
             elif isinstance(payload, MessageCompleted):
+                message = serialize_assistant_message(
+                    payload.message,
+                    usage=payload.usage,
+                )
                 session.append_message(
                     event.run_id,
                     event.sequence,
-                    serialize_assistant_message(
-                        payload.message,
-                        usage=payload.usage,
-                    ),
+                    message,
+                )
+                draft = SessionRecordDraft.message_appended(
+                    session_id=self.session_id,
+                    agent_id=event.agent_id,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    message=message,
                 )
             elif isinstance(payload, ToolCompleted):
                 for message in payload.result.messages:
@@ -76,14 +98,31 @@ class SessionRecorder:
                         event.sequence,
                         message,
                     )
+                draft = SessionRecordDraft.messages_appended(
+                    session_id=self.session_id,
+                    agent_id=event.agent_id,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    messages=payload.result.messages,
+                )
             else:
                 session.finish_run(
                     event.run_id,
                     event.sequence,
                     payload.result,
                 )
+                draft = SessionRecordDraft.run_finished(
+                    session_id=self.session_id,
+                    agent_id=event.agent_id,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    result=payload.result,
+                )
 
-            await self.storage.save(session)
+            if isinstance(self.storage, SessionJournalStorage):
+                await self.storage.append(draft)
+            else:
+                await self.storage.save(session)
 
     async def load(self) -> AgentSession | None:
         """Load the currently persisted detached Session snapshot."""

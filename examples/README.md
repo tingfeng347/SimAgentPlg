@@ -37,8 +37,8 @@ Every `BaseAgent` declares its own immutable `agent_id`.
 - `15_explicit_compaction.py`: a real Provider-backed Compactor atomically
   replaces old Tool history with a Summary Entry, then the Agent and Session
   continue from the compacted projection
-- `16_durable_session.py`: atomically persist a versioned JSON Session and
-  restore it in a separate process invocation
+- `16_durable_session.py`: append a versioned JSONL Session Journal and restore
+  it in a separate process invocation
 
 Run the composed Harness example directly:
 
@@ -86,6 +86,6 @@ The runtime-control example distinguishes external `abort()` from
 reporting idle. It waits briefly before aborting the provider request; set
 `HARNESS_ABORT_DELAY` to adjust that delay.
 
-`16_durable_session.py` writes a versioned JSON Session atomically. Run it once
+`16_durable_session.py` appends a versioned JSONL Session Journal. Run it once
 with `record` and again with `resume`; the second invocation creates a new Agent
 process and restores the saved conversation through `restore_session()`.
